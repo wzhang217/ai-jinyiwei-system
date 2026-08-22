@@ -14,7 +14,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
-const AGENT_VERSION: &str = "0.1.2";
+const AGENT_VERSION: &str = "0.1.3";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const MAX_PENDING_EVENTS: i64 = 10_000;
 const MAX_EVENT_DURATION_SECONDS: i64 = 86_400;
@@ -97,6 +97,14 @@ struct ActiveSession {
 }
 
 #[derive(Clone, Debug)]
+struct IdleSession {
+    event_id: String,
+    started_at: Instant,
+    occurred_at: String,
+    last_emitted_duration: i64,
+}
+
+#[derive(Clone, Debug)]
 struct ForegroundActivity {
     app_name: String,
     process_name: String,
@@ -116,7 +124,7 @@ struct Core {
     status: AgentStatus,
     token: Option<String>,
     active_session: Option<ActiveSession>,
-    idle_started: Option<Instant>,
+    idle_session: Option<IdleSession>,
     last_heartbeat: Instant,
     pending_registration_code: Option<String>,
     last_auto_enroll_attempt: Instant,
@@ -227,7 +235,7 @@ impl Core {
             status,
             token,
             active_session: None,
-            idle_started: None,
+            idle_session: None,
             last_heartbeat: Instant::now() - Duration::from_secs(60),
             pending_registration_code: None,
             last_auto_enroll_attempt: Instant::now() - Duration::from_secs(60),
@@ -408,6 +416,62 @@ impl Core {
         })
     }
 
+    fn finish_idle_session(&mut self, ended_at: Instant) -> Result<(), String> {
+        let Some(session) = self.idle_session.take() else {
+            return Ok(());
+        };
+        let duration = ended_at
+            .duration_since(session.started_at)
+            .as_secs()
+            .min(MAX_EVENT_DURATION_SECONDS as u64) as i64;
+        self.queue_event(AgentEvent {
+            event_id: session.event_id,
+            occurred_at: session.occurred_at,
+            event_type: "idle".into(),
+            app_name: "Idle".into(),
+            process_name: "system".into(),
+            context_label: None,
+            web_domain: None,
+            duration_seconds: duration,
+        })
+    }
+
+    fn checkpoint_idle_session(&mut self, now: Instant) -> Result<(), String> {
+        let Some((event_id, occurred_at, started_at, last_emitted_duration)) =
+            self.idle_session.as_ref().map(|session| {
+                (
+                    session.event_id.clone(),
+                    session.occurred_at.clone(),
+                    session.started_at,
+                    session.last_emitted_duration,
+                )
+            })
+        else {
+            return Ok(());
+        };
+        let duration = now
+            .duration_since(started_at)
+            .as_secs()
+            .min(MAX_EVENT_DURATION_SECONDS as u64) as i64;
+        if duration < ACTIVE_SESSION_CHECKPOINT_SECONDS || duration <= last_emitted_duration {
+            return Ok(());
+        }
+        self.queue_event(AgentEvent {
+            event_id,
+            occurred_at,
+            event_type: "idle".into(),
+            app_name: "Idle".into(),
+            process_name: "system".into(),
+            context_label: None,
+            web_domain: None,
+            duration_seconds: duration,
+        })?;
+        if let Some(session) = self.idle_session.as_mut() {
+            session.last_emitted_duration = duration;
+        }
+        Ok(())
+    }
+
     fn checkpoint_session(&mut self, now: Instant) -> Result<(), String> {
         let Some((
             event_id,
@@ -528,28 +592,39 @@ impl Core {
         let now = Instant::now();
         if !within_work_hours(&self.status.policy) {
             let _ = self.finish_session(now);
-            self.idle_started = None;
+            let _ = self.finish_idle_session(now);
         } else {
             let idle_seconds = system_idle_seconds();
             let idle_limit = self.status.policy.idle_threshold_seconds;
             if idle_seconds >= idle_limit {
-                if self.idle_started.is_none() {
-                    let _ = self.finish_session(now);
-                    self.idle_started = Some(now);
+                if self.idle_session.is_none() {
+                    let bounded_idle_seconds = idle_seconds.min(MAX_EVENT_DURATION_SECONDS as u64);
+                    let idle_started = now - Duration::from_secs(bounded_idle_seconds);
+                    let _ = self.finish_session(idle_started);
+                    let idle_occurred_at = (Utc::now()
+                        - chrono::Duration::seconds(bounded_idle_seconds as i64))
+                    .to_rfc3339();
+                    let event_id = Uuid::new_v4().to_string();
                     let _ = self.queue_event(AgentEvent {
-                        event_id: Uuid::new_v4().to_string(),
-                        occurred_at: Utc::now().to_rfc3339(),
+                        event_id: event_id.clone(),
+                        occurred_at: idle_occurred_at.clone(),
                         event_type: "idle".into(),
                         app_name: "Idle".into(),
                         process_name: "system".into(),
                         context_label: None,
                         web_domain: None,
-                        duration_seconds: idle_seconds.min(MAX_EVENT_DURATION_SECONDS as u64)
-                            as i64,
+                        duration_seconds: bounded_idle_seconds as i64,
+                    });
+                    self.idle_session = Some(IdleSession {
+                        event_id,
+                        started_at: idle_started,
+                        occurred_at: idle_occurred_at,
+                        last_emitted_duration: bounded_idle_seconds as i64,
                     });
                 }
+                let _ = self.checkpoint_idle_session(now);
             } else if let Some(activity) = foreground_application() {
-                self.idle_started = None;
+                let _ = self.finish_idle_session(now);
                 let changed = self
                     .active_session
                     .as_ref()
@@ -637,7 +712,10 @@ fn within_work_hours(policy: &Policy) -> bool {
         let mut parts = value.split(':');
         let hour = parts.next()?.parse::<u32>().ok()?;
         let minute = parts.next()?.parse::<u32>().ok()?;
-        (hour < 24 && minute < 60).then_some(hour * 60 + minute)
+        if minute >= 60 || hour > 24 || (hour == 24 && minute != 0) {
+            return None;
+        }
+        Some(hour * 60 + minute)
     }
     let Some(start) = parse_minutes(&policy.work_hours_start) else {
         return true;
@@ -647,6 +725,9 @@ fn within_work_hours(policy: &Policy) -> bool {
     };
     let now = Local::now().time();
     let current = now.hour() * 60 + now.minute();
+    if start == 0 && end == 24 * 60 {
+        return true;
+    }
     current >= start && current < end
 }
 
@@ -769,6 +850,16 @@ fn sanitize_context_label(app_name: &str, process_name: &str, title: &str) -> Op
             ("figma", "来源：Figma"),
             ("chatgpt", "来源：ChatGPT"),
             ("codex", "来源：Codex"),
+            ("jira", "来源：Jira"),
+            ("linear", "来源：Linear"),
+            ("trello", "来源：Trello"),
+            ("asana", "来源：Asana"),
+            ("clickup", "来源：ClickUp"),
+            ("feishu", "来源：飞书"),
+            ("lark", "来源：飞书"),
+            ("dingtalk", "来源：钉钉"),
+            ("slack", "来源：Slack"),
+            ("teams", "来源：Teams"),
         ] {
             if lower_title.contains(needle) {
                 return Some(label.into());
@@ -787,7 +878,100 @@ fn sanitize_context_label(app_name: &str, process_name: &str, title: &str) -> Op
         return extract_project_identifier(title);
     }
 
+    if is_document_process(&value) {
+        return extract_document_identifier(title);
+    }
+
     None
+}
+
+#[cfg(windows)]
+fn is_document_process(value: &str) -> bool {
+    [
+        "explorer.exe",
+        "wps.exe",
+        "et.exe",
+        "wpp.exe",
+        "winword.exe",
+        "excel.exe",
+        "powerpnt.exe",
+        "notepad.exe",
+        "wordpad.exe",
+        "acrobat.exe",
+        "foxitreader.exe",
+    ]
+    .iter()
+    .any(|name| value.contains(name))
+}
+
+#[cfg(windows)]
+fn extract_document_identifier(title: &str) -> Option<String> {
+    let mut candidate = title.trim();
+    for suffix in [
+        " - File Explorer",
+        " - Windows File Explorer",
+        " - WPS Office",
+        " - Word",
+        " - Excel",
+        " - PowerPoint",
+        " - Notepad",
+        " – File Explorer",
+        " – WPS Office",
+    ] {
+        if let Some(value) = candidate.strip_suffix(suffix) {
+            candidate = value.trim();
+            break;
+        }
+    }
+    candidate = candidate
+        .trim_start_matches('*')
+        .trim_matches(' ')
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(candidate)
+        .trim();
+    if candidate.is_empty()
+        || ["home", "desktop", "documents", "downloads"]
+            .contains(&candidate.to_lowercase().as_str())
+    {
+        return None;
+    }
+    let allowed_extensions = [
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "md", "txt", "csv", "rtf",
+    ];
+    let has_allowed_extension = candidate.rsplit_once('.').is_some_and(|(_, extension)| {
+        allowed_extensions.contains(&extension.to_lowercase().as_str())
+    });
+    if !has_allowed_extension && candidate.contains('.') {
+        return None;
+    }
+    if is_sensitive_document_name(candidate) {
+        let extension = candidate
+            .rsplit_once('.')
+            .map(|(_, extension)| format!(".{}", extension.to_lowercase()))
+            .unwrap_or_default();
+        return Some(format!("文档：敏感文件{extension}"));
+    }
+    sanitize_label(candidate, "文档：")
+}
+
+#[cfg(windows)]
+fn is_sensitive_document_name(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    lower == ".env"
+        || lower.starts_with(".env.")
+        || [
+            "password",
+            "passwd",
+            "secret",
+            "token",
+            "credential",
+            "apikey",
+            "api_key",
+            "private_key",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
 }
 
 #[cfg(windows)]
@@ -812,6 +996,9 @@ fn extract_project_identifier(title: &str) -> Option<String> {
         .rsplit_once(" - ")
         .map(|(_, value)| value)
         .or_else(|| prefix.rsplit_once(" – ").map(|(_, value)| value))
+        .unwrap_or(prefix)
+        .rsplit(['\\', '/'])
+        .next()
         .unwrap_or(prefix)
         .trim();
     let lower = candidate.to_lowercase();
@@ -841,6 +1028,9 @@ fn extract_project_identifier(title: &str) -> Option<String> {
 
 #[cfg(windows)]
 fn sanitize_label(value: &str, prefix: &str) -> Option<String> {
+    if value.contains('\\') || value.contains('/') {
+        return None;
+    }
     let mut output = String::new();
     let mut previous_space = false;
     for character in value.chars() {

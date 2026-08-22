@@ -4,25 +4,35 @@ const formatDuration = (seconds) => {
 };
 
 export function recordToMarkdown(record) {
-  const applications = (record.applicationNames || record.application_names || record.applications).map((key) => key).join(", ");
+  const applications = (record.applicationNames || record.application_names || record.applications || []).map((key) => key).join(", ");
   const contextLabels = (record.contextLabels || record.context_labels || []).join(", ");
   const webDomains = (record.webDomains || record.web_domains || []).join(", ");
-  const citations = record.citations.map((item) => `- ${item.label} — ${item.detail}`).join("\n");
-  const timeline = record.timeline.map((item) => `- ${item.time} · ${item.text}`).join("\n");
-  const resources = record.resources.map((item) => `- ${item.name} — ${item.path}`).join("\n");
+  const citations = (record.citations || []).map((item) => `- ${item.label} — ${item.detail}`).join("\n");
+  const timeline = (record.timeline || []).map((item) => `- ${item.time} · ${item.text}`).join("\n");
+  const resources = (record.resources || []).map((item) => `- ${item.name} — ${item.path}`).join("\n");
 
   const userId = record.userId || record.user_id || "employee_001";
   const periodStart = record.startedAt || record.started_at || "";
   const periodEnd = record.endedAt || record.ended_at || "";
-  return `---\ntitle: ${record.title}\ndescription: ${record.description}\napplications: [${applications}]\ncontext_labels: [${contextLabels}]\nweb_domains: [${webDomains}]\nduration: ${record.duration}\nrecord_type: ${record.recordType}\nuser_id: ${userId}\nperiod_start: ${periodStart}\nperiod_end: ${periodEnd}\n---\n\n## Memory summary\n\n${record.summary}\n\n## Relevant prior context\n\n${record.priorContext}\n\n## Important non-obvious context\n\n${record.nonObvious}\n\n## Recording summary\n\n${timeline}\n\n## Resources\n\n${resources}\n\n## Citations\n\n${citations}\n`;
+  return `---\ntitle: ${record.title}\ndescription: ${record.description}\napplications: [${applications}]\ncontext_labels: [${contextLabels}]\nweb_domains: [${webDomains}]\nduration: ${record.duration}\nrecord_type: ${record.recordType}\nrollup_scope: ${record.rollupScope || ""}\nsummary_status: ${record.summaryStatus || "generated"}\nsummary_model: ${record.summaryModel || "rules-v1"}\nuser_id: ${userId}\nperiod_start: ${periodStart}\nperiod_end: ${periodEnd}\ngenerated_at: ${record.generated_at || record.generatedAt || ""}\nsource_event_ids: [${(record.source_event_ids || record.sourceEventIds || []).join(", ")}]\nsource_record_ids: [${(record.source_record_ids || record.sourceRecordIds || []).join(", ")}]\n---\n\n## Memory summary\n\n${record.summary}\n\n## Relevant prior context\n\n${record.priorContext}\n\n## Important non-obvious context\n\n${record.importantContext || record.nonObvious}\n\n## Recording summary\n\n${timeline}\n\n## Resources\n\n${resources}\n\n## Citations\n\n${citations}\n`;
 }
 
 export function downloadRecordMarkdown(record) {
-  const blob = new Blob([recordToMarkdown(record)], { type: "text/markdown;charset=utf-8" });
+  downloadMarkdown(recordToMarkdown(record), `${record.id}-${record.duration || "record"}-memory-summary.md`);
+}
+
+export function downloadRecordsMarkdown(records) {
+  const markdown = records.map(recordToMarkdown).join("\n\n");
+  const datePrefix = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
+  downloadMarkdown(markdown, `${datePrefix}-memory-summaries.md`);
+}
+
+function downloadMarkdown(markdown, filename) {
+  const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = `2026-08-22T08-40-00-${record.id}-${record.duration}-memory-summary.md`;
+  anchor.download = filename;
   anchor.click();
   URL.revokeObjectURL(url);
 }

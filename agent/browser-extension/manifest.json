@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "AI锦衣卫 Browser Source",
+  "version": "0.1.0",
+  "description": "只向 AI锦衣卫发送当前标签页的域名和脱敏工作来源提示。",
+  "permissions": ["alarms", "storage", "tabs"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "AI锦衣卫来源采集"
+  },
+  "options_page": "options.html"
+}

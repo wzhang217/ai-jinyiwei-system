@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI锦衣卫 Browser Source</title>
+    <style>
+      :root { color-scheme: light; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #1d2a25; background: #f4f7f4; }
+      body { margin: 0; padding: 32px; }
+      main { width: min(680px, 100%); margin: auto; padding: 28px; border: 1px solid #dfe8e0; border-radius: 18px; background: #fff; box-shadow: 0 12px 32px rgba(30, 62, 42, .08); }
+      h1 { margin: 0 0 8px; font-size: 24px; } p { color: #67736b; line-height: 1.6; }
+      label { display: block; margin: 18px 0 6px; color: #536259; font-size: 13px; font-weight: 600; }
+      input { width: 100%; min-height: 40px; padding: 0 11px; border: 1px solid #cfdad1; border-radius: 9px; box-sizing: border-box; font: inherit; }
+      button { margin: 20px 8px 0 0; padding: 10px 15px; border: 0; border-radius: 9px; background: #285c46; color: #fff; cursor: pointer; font: inherit; }
+      button.secondary { background: #edf3ee; color: #31523f; }
+      #status { min-height: 22px; margin-top: 16px; color: #52715c; font-size: 13px; }
+      .notice { padding: 12px; border-radius: 9px; background: #fff7e8; color: #765b2f; font-size: 12px; line-height: 1.6; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>AI锦衣卫 Browser Source</h1>
+      <p>Chrome 和 Edge 共用此配置。扩展只发送当前标签页的域名，以及有限的来源/项目提示，不发送完整 URL、查询参数、网页正文或键盘内容。</p>
+      <div class="notice">MVP 需要把当前设备 Token 配置到扩展中。Token 仅保存在浏览器本地存储；正式企业版应改为 Agent 一次性配对，不应通过聊天或截图传递 Token。</div>
+      <form id="form">
+        <label for="serverUrl">服务地址</label>
+        <input id="serverUrl" type="url" placeholder="http://192.168.5.5:8787" required />
+        <label for="deviceToken">当前设备 Token</label>
+        <input id="deviceToken" type="password" autocomplete="off" required />
+        <label for="browserName">浏览器名称</label>
+        <input id="browserName" value="Google Chrome" required />
+        <button type="submit">保存配置</button>
+        <button id="sync" class="secondary" type="button">立即同步</button>
+      </form>
+      <div id="status" role="status"></div>
+    </main>
+    <script src="options.js"></script>
+  </body>
+</html>

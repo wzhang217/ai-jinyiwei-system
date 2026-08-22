@@ -6,3 +6,8 @@ server/*.sqlite-shm
 server/*.sqlite-wal
 agent/src-tauri/target/
 agent/src-tauri/gen/
+
+# Local frontend configuration may contain API tokens.
+app/.env
+app/.env.*
+!app/.env.example

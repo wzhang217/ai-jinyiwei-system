@@ -1,20 +1,42 @@
 const configuredBaseUrl = (import.meta.env.VITE_AGENT_API_BASE_URL || "").trim().replace(/\/$/, "");
 const adminToken = (import.meta.env.VITE_AGENT_ADMIN_TOKEN || "").trim();
+export const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
+let adminSessionToken = typeof window !== "undefined" ? window.sessionStorage.getItem("jinyiwei_admin_session") || "" : "";
 
 export const agentApiEnabled = Boolean(configuredBaseUrl && adminToken);
 
-async function request(path, options = {}) {
+export function setAdminSession(token) {
+  adminSessionToken = typeof token === "string" ? token : "";
+  if (typeof window !== "undefined") {
+    if (adminSessionToken) window.sessionStorage.setItem("jinyiwei_admin_session", adminSessionToken);
+    else window.sessionStorage.removeItem("jinyiwei_admin_session");
+  }
+}
+
+async function request(path, options = {}, { bootstrap = false } = {}) {
   if (!agentApiEnabled) throw new Error("Agent API is not configured");
+  const authHeaders = bootstrap || !adminSessionToken
+    ? { "x-admin-token": adminToken }
+    : { "x-admin-session": adminSessionToken };
   const response = await fetch(`${configuredBaseUrl}${path}`, {
     ...options,
     headers: {
       "content-type": "application/json",
-      "x-admin-token": adminToken,
+      ...authHeaders,
       ...(options.headers || {}),
     },
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(body.error?.message || `Agent API HTTP ${response.status}`);
+  return body;
+}
+
+export async function createAdminSession({ role, employeeId, team } = {}) {
+  const body = await request("/api/admin/sessions", {
+    method: "POST",
+    body: JSON.stringify({ role, ...(employeeId ? { employee_id: employeeId } : {}), ...(team ? { team } : {}) }),
+  }, { bootstrap: true });
+  setAdminSession(body.token);
   return body;
 }
 
@@ -33,6 +55,60 @@ export async function getLiveDevices() {
     error: device.queued_events > 0 ? `${device.queued_events} 条待上传` : "无",
     employeeId: device.employee_id,
   }));
+}
+
+export async function getLiveEmployees() {
+  const body = await request("/api/admin/employees");
+  return (body.employees || []).map((employee) => ({
+    id: employee.id,
+    name: employee.name,
+    title: "企业成员",
+    team: employee.team,
+    manager: "—",
+    status: Number(employee.online_device_count || 0) > 0 ? "active" : Number(employee.device_count || 0) > 0 ? "offline" : "pending",
+    focus: "暂无实时主题",
+    coverage: Number(employee.device_count || 0) > 0 ? Math.round((Number(employee.online_device_count || 0) / Number(employee.device_count || 1)) * 100) : 0,
+    device: employee.hostname || "未绑定设备",
+    deviceCount: Number(employee.device_count || 0),
+    lastHeartbeatAt: employee.last_heartbeat_at || null,
+  }));
+}
+
+export async function getLiveTeams() {
+  const body = await request("/api/admin/teams");
+  const knownTeamIds = {
+    "研发与产品中心": "team-product-dev",
+    "客户与销售团队": "team-sales",
+    "运营与支持团队": "team-operations",
+  };
+  return (body.teams || []).map((team) => ({
+    id: knownTeamIds[team.name] || team.id,
+    name: team.name,
+    lead: team.lead_name || "—",
+    members: Number(team.member_count || 0),
+    activeMembers: Number(team.online_member_count || 0),
+    coverage: Number(team.member_count || 0) > 0 ? Math.round((Number(team.online_member_count || 0) / Number(team.member_count || 1)) * 100) : 0,
+    focus: "等待 Memory Summary",
+    summary: "团队主题将在活动数据形成后显示。",
+    apps: [],
+    deviceCount: Number(team.device_count || 0),
+  }));
+}
+
+export async function getLivePolicy() {
+  const body = await request("/api/admin/policy");
+  return body.policy;
+}
+
+export async function updateLivePolicy(policy) {
+  const body = await request("/api/admin/policy", {
+    method: "PUT",
+    body: JSON.stringify({
+      work_hours_start: policy.work_hours_start,
+      work_hours_end: policy.work_hours_end,
+    }),
+  });
+  return body.policy;
 }
 
 export async function getLiveEvents(limit = 200) {
@@ -56,7 +132,7 @@ export async function getLiveEvents(limit = 200) {
       : `这是一条基于前台应用 ${event.app_name} 和活动时长生成的活动元数据记录。`,
     priorContext: "来源于 Windows Agent 的前台应用活动采集。",
     nonObvious: "该记录不包含窗口正文、键盘、剪贴板、屏幕或文件内容。",
-    timeline: [{ time: formatTime(event.occurred_at), text: event.type === "idle" ? "进入空闲状态" : `前台应用：${event.app_name}`, app: "codex" }],
+    timeline: [{ time: formatTime(event.occurred_at), text: event.type === "idle" ? "进入空闲状态" : `前台应用：${event.app_name}`, app: event.type === "idle" ? "other" : applicationKey(event.app_name) }],
     citations: [{ label: event.hostname, detail: `${event.employee_name} · ${event.process_name}`, type: "app" }],
     confidence: 1,
   }));
@@ -64,7 +140,78 @@ export async function getLiveEvents(limit = 200) {
 
 export async function getLiveHistory(limit = 200) {
   const body = await request(`/api/admin/history?limit=${limit}`);
-  return body.records.map((record) => ({
+  return body.records.map(normalizeLiveRecord);
+}
+
+export async function getMemoryJobs() {
+  const body = await request("/api/admin/memory/jobs");
+  return { jobs: body.jobs || [], model: body.model || "rules-v1" };
+}
+
+export async function getLiveAudit() {
+  const body = await request("/api/admin/audit");
+  return (body.logs || []).map((log) => ({
+    id: log.id,
+    time: formatRelativeTime(log.created_at),
+    createdAt: log.created_at,
+    actor: log.actor,
+    action: formatAuditAction(log.action),
+    target: log.target,
+    detail: log.detail || "",
+    result: log.action.includes("failed") ? "需关注" : log.action === "agent_offline" ? "需关注" : "成功",
+    type: log.action.startsWith("agent_") ? "agent" : log.action.includes("policy") ? "policy" : log.action.includes("retention") ? "export" : "access",
+  }));
+}
+
+export async function auditLiveExport(recordIds = []) {
+  return request("/api/admin/history/export", {
+    method: "POST",
+    body: JSON.stringify({ record_ids: recordIds }),
+  });
+}
+
+export async function runRetention(before, apply = false) {
+  const body = await request("/api/admin/retention", {
+    method: "POST",
+    body: JSON.stringify({ before, apply }),
+  });
+  return body;
+}
+
+export async function askLiveHistory(question, options = {}) {
+  const body = await request("/api/admin/history/ask", {
+    method: "POST",
+    body: JSON.stringify({
+      question,
+      ...(options.deviceId ? { device_id: options.deviceId } : {}),
+      ...(options.limit ? { limit: options.limit } : {}),
+    }),
+  });
+  const timeRange = body.time_range || null;
+  const rangeText = timeRange?.start && timeRange?.end
+    ? `时间范围：${formatTime(timeRange.start)}–${formatTime(timeRange.end)}`
+    : "时间范围：暂无可用证据";
+  const contextText = body.context_labels?.length ? `工作标识：${body.context_labels.join("、")}` : "工作标识：暂无明确项目标识";
+  const domainText = body.web_domains?.length ? `网站：${body.web_domains.join("、")}` : "网站：未记录网站域名";
+  const uncertainty = body.uncertainty || "应用活动只能说明上下文变化，不能单独证明工作效率或绩效。";
+  return {
+    answer: body.answer,
+    evidence: (body.evidence || []).map(normalizeLiveRecord),
+    applications: body.applications || [],
+    contextLabels: body.context_labels || [],
+    webDomains: body.web_domains || [],
+    citations: body.citations || [],
+    resources: body.resources || [],
+    timeRange,
+    caveats: [`${rangeText} · ${contextText} · ${domainText}。不确定性：${uncertainty}`, ...(body.caveats || [])],
+    uncertainty,
+    model: body.model,
+    generatedAt: body.generated_at,
+  };
+}
+
+function normalizeLiveRecord(record) {
+  return {
     ...record,
     id: record.id,
     day: formatDay(record.started_at),
@@ -72,6 +219,9 @@ export async function getLiveHistory(limit = 200) {
     duration: formatDuration(record.duration_seconds),
     durationSeconds: record.duration_seconds,
     recordType: record.record_type,
+    rollupScope: record.rollup_scope || (record.record_type === "rollup" ? "window" : "leaf"),
+    summaryStatus: record.summary_status || record.status || "generated",
+    summaryModel: record.summary_model || record.model_name || "rules-v1",
     userId: record.user_id,
     applications: record.applications || [],
     resources: record.resources || [],
@@ -81,14 +231,37 @@ export async function getLiveHistory(limit = 200) {
     })),
     citations: record.citations || [],
     priorContext: record.prior_context,
-    nonObvious: record.non_obvious,
+    importantContext: record.important_context || record.non_obvious,
+    nonObvious: record.non_obvious || record.important_context,
     confidence: record.confidence ?? 1,
     applicationNames: record.application_names || [],
     contextKinds: record.context_kinds || [],
     contextSwitches: record.context_switches || 0,
     contextLabels: record.context_labels || [],
     webDomains: record.web_domains || [],
-  }));
+  };
+}
+
+function applicationKey(appName) {
+  const normalized = String(appName || "").toLowerCase();
+  if (normalized.includes("edge") || normalized.includes("msedge")) return "edge";
+  if (normalized.includes("chrome")) return "chrome";
+  if (normalized.includes("360se")) return "browser360";
+  if (normalized.includes("code") || normalized.includes("visual studio")) return "vscode";
+  if (normalized.includes("wechat") || normalized.includes("weixin") || normalized.includes("企业微信")) return "wechat";
+  if (normalized.includes("slack")) return "slack";
+  if (normalized.includes("teams")) return "teams";
+  if (normalized.includes("feishu") || normalized.includes("lark") || normalized.includes("dingtalk")) return "collaboration";
+  if (["jira", "linear", "trello", "asana", "clickup"].some((name) => normalized.includes(name))) return "project";
+  if (normalized.includes("wps")) return "wps";
+  if (normalized.includes("winword") || normalized.includes("word")) return "word";
+  if (normalized.includes("excel")) return "excel";
+  if (normalized.includes("powerpnt") || normalized.includes("powerpoint")) return "powerpoint";
+  if (normalized.includes("notion")) return "notion";
+  if (normalized.includes("figma")) return "figma";
+  if (normalized.includes("explorer")) return "explorer";
+  if (normalized.includes("terminal") || normalized.includes("powershell") || normalized.includes("cmd.exe")) return "terminal";
+  return "other";
 }
 
 function formatDuration(seconds) {
@@ -118,4 +291,17 @@ function formatRelativeTime(value) {
   if (delta < 60) return `${delta} 分钟前`;
   const hours = Math.round(delta / 60);
   return `${hours} 小时前`;
+}
+
+function formatAuditAction(action) {
+  return {
+    admin_session_created: "创建管理会话",
+    registration_code_created: "生成注册码",
+    agent_enrolled: "Agent 注册绑定",
+    agent_online: "Agent 上线",
+    agent_offline: "Agent 离线",
+    policy_changed: "修改采集策略",
+    retention_deleted: "执行数据删除",
+    history_exported: "导出历史记录",
+  }[action] || action;
 }
