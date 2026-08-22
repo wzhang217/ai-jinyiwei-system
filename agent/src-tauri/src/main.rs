@@ -945,14 +945,28 @@ fn extract_document_identifier(title: &str) -> Option<String> {
     if !has_allowed_extension && candidate.contains('.') {
         return None;
     }
-    if is_sensitive_document_name(candidate) {
-        let extension = candidate
-            .rsplit_once('.')
-            .map(|(_, extension)| format!(".{}", extension.to_lowercase()))
-            .unwrap_or_default();
-        return Some(format!("文档：敏感文件{extension}"));
-    }
-    sanitize_label(candidate, "文档：")
+    Some(redacted_document_label(candidate))
+}
+
+#[cfg(windows)]
+fn redacted_document_label(candidate: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let extension = candidate
+        .rsplit_once('.')
+        .map(|(_, extension)| format!(".{}", extension.to_lowercase()))
+        .unwrap_or_default();
+    let mut hasher = DefaultHasher::new();
+    candidate.to_lowercase().hash(&mut hasher);
+    let prefix = if is_sensitive_document_name(candidate) {
+        "敏感文档"
+    } else if extension.is_empty() {
+        "文件夹"
+    } else {
+        "文档"
+    };
+    format!("文档：{prefix}标识-{:08x}{extension}", hasher.finish())
 }
 
 #[cfg(windows)]
