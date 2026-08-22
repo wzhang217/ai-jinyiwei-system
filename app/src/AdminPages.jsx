@@ -38,7 +38,7 @@ import {
 } from "@phosphor-icons/react";
 import { historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, downloadRecordsMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, demoMode, getLiveAudit, getLiveDevices, getLiveEmployees, getLiveEvents, getLivePolicy, getLiveTeams, getMemoryJobs, runRetention, updateLivePolicy } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, createRegistrationCode, demoMode, getLiveAudit, getLiveDevices, getLiveEmployees, getLiveEvents, getLivePolicy, getLiveTeams, getMemoryJobs, runRetention, updateLivePolicy } from "./services/agentApi.js";
 import { auditData, deviceData, employeeData, permissionRoles, settingsData, teamData } from "./adminData.js";
 
 const roleLabel = { admin: "企业管理员", manager: "直属管理者", employee: "员工", auditor: "审计员" };
@@ -540,6 +540,13 @@ function SkillAnswer({ result, onOpen }) {
 function DevicesPage({ role, query, target, onToast }) {
   const [tab, setTab] = useState("设备列表");
   const [selected, setSelected] = useState(null);
+  const [registrationOpen, setRegistrationOpen] = useState(false);
+  const [registrationEmployees, setRegistrationEmployees] = useState([]);
+  const [registrationEmployeeId, setRegistrationEmployeeId] = useState("");
+  const [registrationExpires, setRegistrationExpires] = useState(3600);
+  const [registrationCode, setRegistrationCode] = useState(null);
+  const [registrationLoading, setRegistrationLoading] = useState(false);
+  const [registrationError, setRegistrationError] = useState("");
   const [liveDevices, setLiveDevices] = useState(null);
   const [liveEvents, setLiveEvents] = useState(null);
   const [liveError, setLiveError] = useState("");
@@ -586,7 +593,57 @@ function DevicesPage({ role, query, target, onToast }) {
     const nextDevice = scopedDevices.find((device) => device.id === target);
     if (nextDevice) setSelected(nextDevice);
   }, [target, role]);
-  return <div className="page-content"><PageHeader eyebrow="DEVICE FLEET" title="设备" description={agentApiEnabled ? "已连接 Agent 局域网服务，显示真实设备心跳和缓存状态。" : "管理 Windows Agent、设备在线状态和采集诊断。"} meta={`${devices.length} 台设备`} action={<button className="outline-button" onClick={() => onToast("设备注册链接已复制")}><Plus size={17} />注册设备</button>} />{liveError && <div className="error-box">Agent 服务暂时不可用：{liveError}</div>}<Tabs tabs={["设备列表", "Agent 状态", "采集策略", "事件诊断"]} active={tab} onChange={setTab} />{tab === "设备列表" && <SectionCard title="Windows 设备" description="点击设备查看会话、心跳、缓存和采集错误"><div className="data-table device-table"><div className="table-row table-head"><span>设备</span><span>使用者</span><span>系统 / Agent</span><span>会话</span><span>心跳</span><span>状态</span></div>{devices.map((device) => <button className="table-row" key={device.id} onClick={() => setSelected(device)}><span className="table-person"><span className="device-icon"><Monitor size={17} /></span><strong>{device.name}</strong></span><span>{device.user}</span><span><strong>{device.os}</strong><small>Agent {device.agent}</small></span><span>{device.session}</span><span>{device.heartbeat}</span><StatusPill status={device.status} /></button>)}</div></SectionCard>}{tab === "Agent 状态" && <><KpiGrid items={[{ label: "Agent 在线率", value: `${scopedDevices.length ? Math.round((onlineCount / scopedDevices.length) * 100) : 0}%`, detail: `${onlineCount} / ${scopedDevices.length} 台`, icon: <Pulse size={20} />, good: true }, { label: "当前版本", value: versionCounts[0]?.version || "—", detail: `${versionCounts[0]?.count || 0} 台设备`, icon: <Wrench size={20} />, tone: "blue" }, { label: "待上传缓存", value: `${queuedCount} 条`, detail: "设备离线时保存在本地", icon: <DownloadSimple size={20} />, tone: "gold" }, { label: "异常设备", value: `${scopedDevices.filter((device) => device.status === "offline" || device.cache > 0).length} 台`, detail: "按心跳和缓存状态", icon: <WarningCircle size={20} />, tone: "green" }]} /><SectionCard title="Agent 版本分布"><div className="version-list">{versionRows}</div></SectionCard></>}{tab === "采集策略" && <PolicyPreview onToast={onToast} />}{tab === "事件诊断" && <SectionCard title="最近采集事件" description="只显示 Agent 诊断元数据"><div className="diagnostic-list">{diagnosticRows}</div></SectionCard>}{selected && <DeviceDrawer device={selected} onClose={() => setSelected(null)} onToast={onToast} />}</div>;
+  const openRegistration = async () => {
+    if (!agentApiEnabled) {
+      onToast("连接服务端后才能生成注册码");
+      return;
+    }
+    if (role !== "admin") {
+      onToast("只有企业管理员可以生成一次性注册码");
+      return;
+    }
+    setRegistrationOpen(true);
+    setRegistrationCode(null);
+    setRegistrationError("");
+    try {
+      const employees = await getLiveEmployees();
+      setRegistrationEmployees(employees);
+      setRegistrationEmployeeId((current) => current || employees[0]?.id || "");
+    } catch (error) {
+      setRegistrationError(error.message);
+    }
+  };
+
+  const generateRegistrationCode = async () => {
+    if (!registrationEmployeeId) return;
+    setRegistrationLoading(true);
+    setRegistrationError("");
+    try {
+      const result = await createRegistrationCode({ employeeId: registrationEmployeeId, expiresInSeconds: registrationExpires });
+      setRegistrationCode(result);
+    } catch (error) {
+      setRegistrationError(error.message);
+    } finally {
+      setRegistrationLoading(false);
+    }
+  };
+
+  const copyRegistrationCode = async () => {
+    if (!registrationCode?.code) return;
+    try {
+      await navigator.clipboard.writeText(registrationCode.code);
+      onToast("注册码已复制，请发送给对应员工");
+    } catch {
+      onToast("浏览器阻止了复制，请手动复制注册码");
+    }
+  };
+
+  return <div className="page-content"><PageHeader eyebrow="DEVICE FLEET" title="设备" description={agentApiEnabled ? "已连接 Agent 局域网服务，显示真实设备心跳和缓存状态。" : "管理 Windows Agent、设备在线状态和采集诊断。"} meta={`${devices.length} 台设备`} action={<button className="outline-button" onClick={() => void openRegistration()}><Plus size={17} />注册设备</button>} />{liveError && <div className="error-box">Agent 服务暂时不可用：{liveError}</div>}<Tabs tabs={["设备列表", "Agent 状态", "采集策略", "事件诊断"]} active={tab} onChange={setTab} />{tab === "设备列表" && <SectionCard title="Windows 设备" description="点击设备查看会话、心跳、缓存和采集错误"><div className="data-table device-table"><div className="table-row table-head"><span>设备</span><span>使用者</span><span>系统 / Agent</span><span>会话</span><span>心跳</span><span>状态</span></div>{devices.map((device) => <button className="table-row" key={device.id} onClick={() => setSelected(device)}><span className="table-person"><span className="device-icon"><Monitor size={17} /></span><strong>{device.name}</strong></span><span>{device.user}</span><span><strong>{device.os}</strong><small>Agent {device.agent}</small></span><span>{device.session}</span><span>{device.heartbeat}</span><StatusPill status={device.status} /></button>)}</div></SectionCard>}{tab === "Agent 状态" && <><KpiGrid items={[{ label: "Agent 在线率", value: `${scopedDevices.length ? Math.round((onlineCount / scopedDevices.length) * 100) : 0}%`, detail: `${onlineCount} / ${scopedDevices.length} 台`, icon: <Pulse size={20} />, good: true }, { label: "当前版本", value: versionCounts[0]?.version || "—", detail: `${versionCounts[0]?.count || 0} 台设备`, icon: <Wrench size={20} />, tone: "blue" }, { label: "待上传缓存", value: `${queuedCount} 条`, detail: "设备离线时保存在本地", icon: <DownloadSimple size={20} />, tone: "gold" }, { label: "异常设备", value: `${scopedDevices.filter((device) => device.status === "offline" || device.cache > 0).length} 台`, detail: "按心跳和缓存状态", icon: <WarningCircle size={20} />, tone: "green" }]} /><SectionCard title="Agent 版本分布"><div className="version-list">{versionRows}</div></SectionCard></>}{tab === "采集策略" && <PolicyPreview onToast={onToast} />}{tab === "事件诊断" && <SectionCard title="最近采集事件" description="只显示 Agent 诊断元数据"><div className="diagnostic-list">{diagnosticRows}</div></SectionCard>}{selected && <DeviceDrawer device={selected} onClose={() => setSelected(null)} onToast={onToast} />}{registrationOpen && <RegistrationCodeModal employees={registrationEmployees} employeeId={registrationEmployeeId} expiresInSeconds={registrationExpires} code={registrationCode} loading={registrationLoading} error={registrationError} onEmployeeChange={setRegistrationEmployeeId} onExpiresChange={setRegistrationExpires} onGenerate={() => void generateRegistrationCode()} onCopy={() => void copyRegistrationCode()} onClose={() => setRegistrationOpen(false)} />}</div>;
+}
+
+function RegistrationCodeModal({ employees, employeeId, expiresInSeconds, code, loading, error, onEmployeeChange, onExpiresChange, onGenerate, onCopy, onClose }) {
+  const employee = employees.find((item) => item.id === employeeId);
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="detail-panel registration-panel" role="dialog" aria-modal="true" aria-label="生成一次性注册码"><div className="detail-topbar"><div><span className="detail-kicker"><Fingerprint size={14} />DEVICE ENROLLMENT</span><h2>生成一次性注册码</h2><p>绑定 Windows Agent 到指定员工</p></div><button className="detail-close" onClick={onClose}><X size={21} /></button></div><div className="detail-scroll"><div className="detail-description">员工安装通用 MSI 后，需要使用这里生成的注册码完成设备绑定。注册码只显示一次，不写入安装包。</div><div className="registration-form"><label>绑定员工<select value={employeeId} onChange={(event) => onEmployeeChange(event.target.value)} disabled={loading || Boolean(code)}><option value="">请选择员工</option>{employees.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.team}</option>)}</select></label><label>有效期<select value={expiresInSeconds} onChange={(event) => onExpiresChange(Number(event.target.value))} disabled={loading || Boolean(code)}><option value={3600}>1 小时</option><option value={8 * 3600}>8 小时</option><option value={24 * 3600}>24 小时</option><option value={7 * 24 * 3600}>7 天</option></select></label></div>{error && <div className="error-box">注册码生成失败：{error}</div>}{code && <div className="registration-code-box"><span>发送给 {employee?.name || "员工"}</span><strong>{code.code}</strong><small>有效至 {new Date(code.expires_at).toLocaleString("zh-CN")}</small><button className="primary-button" onClick={onCopy}><DownloadSimple size={16} />复制注册码</button></div>} {!code && !error && !employees.length && <div className="empty-state"><UsersThree size={24} /><strong>暂无可绑定员工</strong><span>请先在员工目录中创建员工。</span></div>}<div className="registration-actions">{!code && <button className="primary-button" disabled={loading || !employeeId} onClick={onGenerate}>{loading ? "生成中…" : "生成注册码"}</button>}<button className="outline-button" onClick={onClose}>关闭</button></div><div className="detail-note"><ShieldCheck size={17} /><span>注册码只用于首次绑定；后续事件使用设备 Token。管理员 Token 和 API Key 不会发送到 Agent。</span></div></div></aside></div>;
 }
 
 function VersionRow({ version, count, width, status }) { return <div className="version-row"><span><strong>{version}</strong><small>{count}</small></span><span className="version-track"><i style={{ width }} /></span><StatusPill status={status === "推荐" ? "online" : status === "过旧" ? "offline" : "pending"} /></div>; }

@@ -74,6 +74,17 @@ export async function getLiveEmployees() {
   }));
 }
 
+export async function createRegistrationCode({ employeeId, expiresInSeconds = 3600 } = {}) {
+  const body = await request("/api/admin/registration-codes", {
+    method: "POST",
+    body: JSON.stringify({
+      employee_id: employeeId,
+      expires_in_seconds: expiresInSeconds,
+    }),
+  });
+  return body;
+}
+
 export async function getLiveTeams() {
   const body = await request("/api/admin/teams");
   const knownTeamIds = {
