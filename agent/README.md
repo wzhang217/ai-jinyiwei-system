@@ -38,11 +38,10 @@ MVP 不采集键盘、剪贴板、屏幕、聊天正文、文件正文或完整�
 
 ## Windows 一键安装包
 
-`.github/workflows/build-agent-windows.yml` 会在 Windows runner 上生成 MSI。普通 push 会生成通用安装包；手动触发 workflow 时，如果仓库配置了 `AGENT_REGISTRATION_CODE` Secret，workflow 会把一次性注册码写入安装资源，员工安装后自动注册。
+`.github/workflows/build-agent-windows.yml` 会在 Windows runner 上生成通用 MSI。安装包只预置局域网服务地址，不预置员工注册码；员工首次启动 Agent 后，在注册页面输入管理员临时生成的一次性注册码完成绑定，不需要为每台电脑重新构建安装包。
 
 GitHub 仓库建议配置：
 
 - Repository variable：`AGENT_SERVER_URL`，例如 `http://192.168.1.20:8787`
-- Repository secret：`AGENT_REGISTRATION_CODE`，只用于下一次手动构建的一次性注册码
 
-注册码不要长期保留在 Secret 中。生成一个员工安装包、下载 MSI 后，应立即删除或替换该 Secret；同一个注册码只能成功注册一台设备。
+注册码由管理员在员工准备安装时临时生成，并在 Agent 首次启动时输入；同一个注册码只能成功注册一台设备。
