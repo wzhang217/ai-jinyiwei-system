@@ -1336,6 +1336,43 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         return sendJson(response, 200, { records, generated_at: isoNow(), model: ai.model });
       }
 
+      if (method === "GET" && url.pathname.startsWith("/api/admin/history/") && url.pathname.endsWith("/sources")) {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
+        const recordId = decodeURIComponent(url.pathname.slice("/api/admin/history/".length, -"/sources".length));
+        if (!recordId || recordId.length > 200) return sendError(response, 400, "record id is invalid", "invalid_record_id");
+        const records = await getMemoryRecords(db, { limit: 2000, ai, principal });
+        const record = records.find((item) => item.id === recordId);
+        if (!record) return sendError(response, 404, "history record not found", "record_not_found");
+
+        const sourceRecordIds = Array.isArray(record.source_record_ids) ? record.source_record_ids : [];
+        const sourceRecords = sourceRecordIds
+          .map((sourceId) => records.find((item) => item.id === sourceId))
+          .filter(Boolean)
+          .map((source) => ({
+            ...source,
+            source_record_ids: undefined,
+          }));
+        const sourceEventIds = new Set(Array.isArray(record.source_event_ids) ? record.source_event_ids : []);
+        const sourceEvents = historyEventRows(db, record.device_id, principal)
+          .filter((event) => sourceEventIds.has(event.event_id))
+          .map((event) => ({
+            event_id: event.event_id,
+            occurred_at: event.occurred_at,
+            type: event.type,
+            app_name: event.app_name,
+            process_name: event.process_name,
+            context_label: event.context_label,
+            web_domain: event.web_domain,
+            duration_seconds: event.duration_seconds,
+          }));
+        return sendJson(response, 200, {
+          record_id: record.id,
+          source_records: sourceRecords,
+          source_events: sourceEvents,
+        });
+      }
+
       if (method === "POST" && url.pathname === "/api/admin/history/export") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");

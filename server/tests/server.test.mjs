@@ -164,6 +164,13 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.equal(rollup.record_type, "rollup");
     assert.equal(rollup.source_record_ids.length, 2);
     assert.ok(rollup.source_record_ids.includes(leaf.id));
+    const rollupSources = await jsonFetch(`${base}/api/admin/history/${encodeURIComponent(rollup.id)}/sources`, { headers: { "x-admin-token": "test-admin" } });
+    assert.equal(rollupSources.response.status, 200);
+    assert.equal(rollupSources.body.source_records.length, 2);
+    const leafSources = await jsonFetch(`${base}/api/admin/history/${encodeURIComponent(leaf.id)}/sources`, { headers: { "x-admin-token": "test-admin" } });
+    assert.equal(leafSources.response.status, 200);
+    assert.equal(leafSources.body.source_events.length, 2);
+    assert.equal(leafSources.body.source_events[0].window_title, undefined);
     const summaryCount = app.db.prepare("SELECT COUNT(*) AS count FROM memory_summaries").get().count;
     assert.ok(summaryCount >= 7);
     const storedColumns = app.db.prepare("SELECT title, summary, prior_context, important_context, period_start, period_end, source_event_ids, citations, citations_json FROM memory_summaries WHERE id = ?").get(leaf.id);

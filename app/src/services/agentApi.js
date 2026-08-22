@@ -154,6 +154,15 @@ export async function getLiveHistory(limit = 200) {
   return body.records.map(normalizeLiveRecord);
 }
 
+export async function getLiveHistorySources(recordId) {
+  const body = await request(`/api/admin/history/${encodeURIComponent(recordId)}/sources`);
+  return {
+    recordId: body.record_id,
+    sourceRecords: (body.source_records || []).map(normalizeLiveRecord),
+    sourceEvents: body.source_events || [],
+  };
+}
+
 export async function getMemoryJobs() {
   const body = await request("/api/admin/memory/jobs");
   return { jobs: body.jobs || [], model: body.model || "rules-v1" };
