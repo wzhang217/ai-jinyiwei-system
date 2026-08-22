@@ -83,6 +83,11 @@ function MiniBars({ values, labels }) {
   return <div className="mini-bars">{values.map((value, index) => <div className="mini-bar-group" key={`${value}-${index}`}><div className="mini-bar-track"><span style={{ height: `${value}%` }} /></div><small>{labels[index]}</small></div>)}</div>;
 }
 
+function workThemeLabel(record, fallback = "暂无实时主题") {
+  const value = String(record?.summary || record?.contextLabels?.[0] || record?.title || fallback).replace(/^项目：/, "").trim();
+  return value.length > 88 ? `${value.slice(0, 86)}…` : value;
+}
+
 function OverviewPage({ role, liveRecords, onNavigate, onToast }) {
   const [tab, setTab] = useState("今日态势");
   const [liveDevices, setLiveDevices] = useState(null);
@@ -125,13 +130,13 @@ function OverviewPage({ role, liveRecords, onNavigate, onToast }) {
         const teamRecords = sourceRecords.filter((record) => (record.employee_team || record.employeeTeam) === team.name);
         const activeMembers = new Set(teamRecords.map((record) => record.userId || record.user_id || record.employee_name).filter(Boolean)).size;
         const observedCoverage = teamRecords.length ? Math.min(100, Math.round((activeMembers / Math.max(1, team.members)) * 100)) : 0;
-        const rawFocus = teamRecords[0]?.contextLabels?.[0] || "";
+        const teamSummary = teamRecords.find((record) => record.rollupScope === "team_weekly");
         const usingLiveDirectory = Boolean(liveTeams);
         return {
           ...team,
           coverage: usingLiveDirectory ? observedCoverage : team.coverage,
           activeMembers: usingLiveDirectory ? activeMembers : team.activeMembers,
-          focus: rawFocus.replace(/^项目：/, "") || (teamRecords.length ? "活动上下文" : team.focus || "暂无实时主题"),
+          focus: teamSummary ? workThemeLabel(teamSummary) : teamRecords.length ? workThemeLabel(teamRecords[0], "活动上下文") : team.focus || "暂无实时主题",
         };
       });
   const liveAttention = liveRecords === null ? null : [
@@ -286,11 +291,12 @@ function TeamsPage({ role, target, liveRecords, onNavigate, onToast }) {
     const activeMembers = new Set(records.map((record) => record.userId || record.user_id || record.employee_name).filter(Boolean)).size;
     const liveCoverage = records.length ? Math.min(100, Math.round((activeMembers / Math.max(1, team.members)) * 100)) : 0;
     const latest = records[0];
+    const latestTeamSummary = records.find((record) => record.rollupScope === "team_weekly");
     return {
       ...team,
       activeMembers,
       coverage: agentApiEnabled && liveRecords !== null ? liveCoverage : team.coverage,
-      focus: latest?.contextLabels?.[0]?.replace(/^项目：/, "") || latest?.title || team.focus,
+      focus: latestTeamSummary ? workThemeLabel(latestTeamSummary) : latest ? workThemeLabel(latest) : team.focus,
       liveRecordCount: records.length,
     };
   });
