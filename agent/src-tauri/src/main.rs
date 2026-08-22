@@ -14,7 +14,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
-const AGENT_VERSION: &str = "0.1.0";
+const AGENT_VERSION: &str = "0.1.1";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const MAX_PENDING_EVENTS: i64 = 10_000;
 const MAX_EVENT_DURATION_SECONDS: i64 = 86_400;
