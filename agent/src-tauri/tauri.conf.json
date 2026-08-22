@@ -31,6 +31,7 @@
   "bundle": {
     "active": true,
     "targets": ["msi"],
+    "icon": ["icons/icon.ico"],
     "resources": ["resources/agent-config.json"],
     "windows": {
       "wix": {
