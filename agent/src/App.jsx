@@ -112,7 +112,7 @@ export function App() {
         <section className="card enrollment-card">
           <div className="card-kicker">设备注册</div>
           <h1>连接到企业工作区</h1>
-          <p>输入管理员提供的一次性注册码。注册后，Agent 只会采集应用活动、空闲状态和同步心跳。</p>
+            <p>输入管理员提供的一次性注册码。注册后，Agent 只会采集应用活动、脱敏工作标识、网站域名、空闲状态和同步心跳。</p>
           <form onSubmit={submitEnrollment}>
             <label>局域网服务地址<input value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} placeholder="http://192.168.1.20:8787" /></label>
             <label>一次性注册码<input value={registrationCode} onChange={(event) => setRegistrationCode(event.target.value.toUpperCase())} placeholder="JY-XXXXXXXXXX" autoComplete="off" /></label>
@@ -129,9 +129,9 @@ export function App() {
           </section>
           <section className="card">
             <div className="section-heading"><div><div className="card-kicker">采集策略</div><h2>当前会记录什么</h2></div><span className="policy-version">策略 v{status.policy.version}</span></div>
-            <div className="policy-list"><PolicyItem title="应用活动" detail="前台应用名称和使用时长" enabled /><PolicyItem title="空闲状态" detail={`超过 ${Math.round(status.policy.idle_threshold_seconds / 60)} 分钟进入空闲`} enabled /><PolicyItem title="同步心跳" detail={`每 ${status.policy.heartbeat_interval_seconds} 秒更新设备状态`} enabled /><PolicyItem title="屏幕、键盘和聊天正文" detail="系统级禁止采集" /></div>
+            <div className="policy-list"><PolicyItem title="应用活动" detail="前台应用名称和使用时长" enabled /><PolicyItem title="脱敏工作标识" detail="仅保留开发工具项目标识，不保存原始窗口标题" enabled /><PolicyItem title="网站来源" detail="仅保留域名，不保存完整 URL 或页面内容" enabled /><PolicyItem title="空闲状态" detail={`超过 ${Math.round(status.policy.idle_threshold_seconds / 60)} 分钟进入空闲`} enabled /><PolicyItem title="同步心跳" detail={`每 ${status.policy.heartbeat_interval_seconds} 秒更新设备状态`} enabled /><PolicyItem title="屏幕、键盘和聊天正文" detail="系统级禁止采集" /></div>
           </section>
-          <section className="card privacy-card"><div className="shield">✓</div><div><h2>隐私边界</h2><p>Agent 不读取键盘、剪贴板、屏幕、聊天正文、文件正文或完整网页内容。断网时数据只保存在本机队列，恢复后自动补传。</p></div></section>
+          <section className="card privacy-card"><div className="shield">✓</div><div><h2>隐私边界</h2><p>Agent 不读取键盘、剪贴板、屏幕、聊天正文、文件正文、原始窗口标题或完整网页内容；只保留有限的项目标识和网站域名。断网时数据只保存在本机队列，恢复后自动补传。</p></div></section>
         </>
       )}
 

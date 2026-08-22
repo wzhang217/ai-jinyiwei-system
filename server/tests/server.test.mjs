@@ -54,9 +54,16 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
       type: "app_session",
       app_name: "Visual Studio Code",
       process_name: "Code.exe",
+      context_label: "项目：AI锦衣卫系统",
       duration_seconds: 42,
     };
     const headers = { authorization: `Bearer ${enrolled.body.device_token}` };
+    const rejectedDomain = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ events: [{ ...event, event_id: "event-invalid-domain", web_domain: "github.com/path" }] }),
+    });
+    assert.equal(rejectedDomain.response.status, 400);
     const first = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers, body: JSON.stringify({ events: [event] }) });
     const duplicate = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers, body: JSON.stringify({ events: [event] }) });
     assert.equal(first.response.status, 202);
@@ -68,6 +75,8 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
       type: "app_session",
       app_name: "Google Chrome",
       process_name: "chrome.exe",
+      context_label: "来源：GitHub",
+      web_domain: "github.com",
       duration_seconds: 60,
     };
     const adjacent = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers, body: JSON.stringify({ events: [adjacentEvent] }) });
@@ -87,6 +96,9 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.deepEqual(history.body.records[0].applications.sort(), ["chrome", "vscode"]);
     assert.deepEqual(history.body.records[0].context_kinds.sort(), ["开发", "浏览器"]);
     assert.equal(history.body.records[0].context_switches, 1);
+    assert.deepEqual(history.body.records[0].context_labels.sort(), ["来源：GitHub", "项目：AI锦衣卫系统"]);
+    assert.deepEqual(history.body.records[0].web_domains, ["github.com"]);
+    assert.ok(history.body.records[0].timeline.some((item) => item.text.includes("域名：github.com")));
     assert.match(history.body.records[0].title, /Chen/);
   });
 });

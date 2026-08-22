@@ -78,6 +78,8 @@ struct AgentEvent {
     event_type: String,
     app_name: String,
     process_name: String,
+    context_label: Option<String>,
+    web_domain: Option<String>,
     duration_seconds: i64,
 }
 
@@ -85,8 +87,18 @@ struct AgentEvent {
 struct ActiveSession {
     app_name: String,
     process_name: String,
+    context_label: Option<String>,
+    web_domain: Option<String>,
     started_at: Instant,
     occurred_at: String,
+}
+
+#[derive(Clone, Debug)]
+struct ForegroundActivity {
+    app_name: String,
+    process_name: String,
+    context_label: Option<String>,
+    web_domain: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +159,10 @@ struct AgentEventPayload {
     event_type: String,
     app_name: String,
     process_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    context_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    web_domain: Option<String>,
     duration_seconds: i64,
 }
 
@@ -175,11 +191,14 @@ impl Core {
                event_type TEXT NOT NULL,
                app_name TEXT NOT NULL,
                process_name TEXT NOT NULL,
+               context_label TEXT,
+               web_domain TEXT,
                duration_seconds INTEGER NOT NULL,
                uploaded INTEGER NOT NULL DEFAULT 0
              );",
         )
         .map_err(|error| error.to_string())?;
+        ensure_event_metadata_columns(&db)?;
 
         let server_url = read_config(&db, "server_url");
         let device_id = read_config(&db, "device_id");
@@ -249,8 +268,8 @@ impl Core {
 
     fn queue_event(&mut self, event: AgentEvent) -> Result<(), String> {
         self.db.execute(
-            "INSERT OR IGNORE INTO events (event_id, occurred_at, event_type, app_name, process_name, duration_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![event.event_id, event.occurred_at, event.event_type, event.app_name, event.process_name, event.duration_seconds],
+            "INSERT OR IGNORE INTO events (event_id, occurred_at, event_type, app_name, process_name, context_label, web_domain, duration_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![event.event_id, event.occurred_at, event.event_type, event.app_name, event.process_name, event.context_label, event.web_domain, event.duration_seconds],
         ).map_err(|error| error.to_string())?;
         let removed = self.db.execute(
             "DELETE FROM events WHERE uploaded = 0 AND event_id IN (SELECT event_id FROM events WHERE uploaded = 0 ORDER BY occurred_at ASC LIMIT -1 OFFSET ?1)",
@@ -264,7 +283,7 @@ impl Core {
     }
 
     fn pending_events(&self, limit: usize) -> Result<Vec<AgentEventPayload>, String> {
-        let mut statement = self.db.prepare("SELECT event_id, occurred_at, event_type, app_name, process_name, duration_seconds FROM events WHERE uploaded = 0 ORDER BY occurred_at ASC LIMIT ?1").map_err(|error| error.to_string())?;
+        let mut statement = self.db.prepare("SELECT event_id, occurred_at, event_type, app_name, process_name, context_label, web_domain, duration_seconds FROM events WHERE uploaded = 0 ORDER BY occurred_at ASC LIMIT ?1").map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(params![limit as i64], |row| {
                 Ok(AgentEventPayload {
@@ -273,7 +292,9 @@ impl Core {
                     event_type: row.get(2)?,
                     app_name: row.get(3)?,
                     process_name: row.get(4)?,
-                    duration_seconds: row.get::<_, i64>(5)?.clamp(0, MAX_EVENT_DURATION_SECONDS),
+                    context_label: row.get(5)?,
+                    web_domain: row.get(6)?,
+                    duration_seconds: row.get::<_, i64>(7)?.clamp(0, MAX_EVENT_DURATION_SECONDS),
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -378,6 +399,8 @@ impl Core {
             event_type: "app_session".into(),
             app_name: session.app_name,
             process_name: session.process_name,
+            context_label: session.context_label,
+            web_domain: session.web_domain,
             duration_seconds: duration,
         })
     }
@@ -471,22 +494,30 @@ impl Core {
                         event_type: "idle".into(),
                         app_name: "Idle".into(),
                         process_name: "system".into(),
+                        context_label: None,
+                        web_domain: None,
                         duration_seconds: idle_seconds.min(MAX_EVENT_DURATION_SECONDS as u64)
                             as i64,
                     });
                 }
-            } else if let Some((app_name, process_name)) = foreground_application() {
+            } else if let Some(activity) = foreground_application() {
                 self.idle_started = None;
                 let changed = self
                     .active_session
                     .as_ref()
-                    .map(|session| session.process_name != process_name)
+                    .map(|session| {
+                        session.process_name != activity.process_name
+                            || session.context_label != activity.context_label
+                            || session.web_domain != activity.web_domain
+                    })
                     .unwrap_or(true);
                 if changed {
                     let _ = self.finish_session(now);
                     self.active_session = Some(ActiveSession {
-                        app_name,
-                        process_name,
+                        app_name: activity.app_name,
+                        process_name: activity.process_name,
+                        context_label: activity.context_label,
+                        web_domain: activity.web_domain,
                         started_at: now,
                         occurred_at: Utc::now().to_rfc3339(),
                     });
@@ -505,6 +536,28 @@ impl Core {
         }
         self.status.queued_events = pending_count(&self.db);
     }
+}
+
+fn ensure_event_metadata_columns(db: &Connection) -> Result<(), String> {
+    let mut statement = db
+        .prepare("PRAGMA table_info(events)")
+        .map_err(|error| error.to_string())?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    for (name, definition) in [("context_label", "TEXT"), ("web_domain", "TEXT")] {
+        if !columns.iter().any(|column| column == name) {
+            db.execute(
+                &format!("ALTER TABLE events ADD COLUMN {name} {definition}"),
+                [],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn read_config(db: &Connection, key: &str) -> Option<String> {
@@ -567,7 +620,7 @@ fn remove_secret(device_id: &str) {
 }
 
 #[cfg(windows)]
-fn foreground_application() -> Option<(String, String)> {
+fn foreground_application() -> Option<ForegroundActivity> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -575,7 +628,7 @@ fn foreground_application() -> Option<(String, String)> {
         OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId,
+        GetForegroundWindow, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
     };
 
     unsafe {
@@ -603,15 +656,177 @@ fn foreground_application() -> Option<(String, String)> {
             .to_string_lossy()
             .into_owned();
         let process_name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
-        Some((
-            process_name.trim_end_matches(".exe").to_string(),
+        let app_name = process_name.trim_end_matches(".exe").to_string();
+        let title_length = GetWindowTextLengthW(window);
+        let title = if title_length > 0 {
+            let mut title_buffer = vec![0u16; title_length as usize + 1];
+            let copied =
+                GetWindowTextW(window, title_buffer.as_mut_ptr(), title_buffer.len() as i32);
+            if copied > 0 {
+                Some(
+                    OsString::from_wide(&title_buffer[..copied as usize])
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let context_label = title
+            .as_deref()
+            .and_then(|value| sanitize_context_label(&app_name, &process_name, value));
+        let web_domain = title
+            .as_deref()
+            .filter(|_| is_browser_process(&app_name, &process_name))
+            .and_then(extract_explicit_web_domain);
+
+        Some(ForegroundActivity {
+            app_name,
             process_name,
-        ))
+            context_label,
+            web_domain,
+        })
     }
 }
 
 #[cfg(not(windows))]
-fn foreground_application() -> Option<(String, String)> {
+fn foreground_application() -> Option<ForegroundActivity> {
+    None
+}
+
+#[cfg(windows)]
+fn is_browser_process(app_name: &str, process_name: &str) -> bool {
+    let value = format!("{} {}", app_name, process_name).to_lowercase();
+    ["chrome", "msedge", "edge", "firefox", "360se"]
+        .iter()
+        .any(|name| value.contains(name))
+}
+
+#[cfg(windows)]
+fn sanitize_context_label(app_name: &str, process_name: &str, title: &str) -> Option<String> {
+    let value = format!("{} {}", app_name, process_name).to_lowercase();
+
+    if is_browser_process(app_name, process_name) {
+        let lower_title = title.to_lowercase();
+        for (needle, label) in [
+            ("github", "来源：GitHub"),
+            ("gitlab", "来源：GitLab"),
+            ("notion", "来源：Notion"),
+            ("figma", "来源：Figma"),
+            ("chatgpt", "来源：ChatGPT"),
+            ("codex", "来源：Codex"),
+        ] {
+            if lower_title.contains(needle) {
+                return Some(label.into());
+            }
+        }
+        return None;
+    }
+
+    if value.contains("code.exe")
+        || value.contains("visual studio")
+        || value.contains("devenv")
+        || value.contains("idea")
+        || value.contains("pycharm")
+        || value.contains("android studio")
+    {
+        return extract_project_identifier(title);
+    }
+
+    None
+}
+
+#[cfg(windows)]
+fn extract_project_identifier(title: &str) -> Option<String> {
+    let mut prefix = None;
+    for suffix in [
+        " - Visual Studio Code",
+        " - Microsoft Visual Studio",
+        " - IntelliJ IDEA",
+        " - PyCharm",
+        " - Android Studio",
+        " – Visual Studio Code",
+        " – Microsoft Visual Studio",
+    ] {
+        if let Some(value) = title.strip_suffix(suffix) {
+            prefix = Some(value);
+            break;
+        }
+    }
+    let prefix = prefix.unwrap_or(title);
+    let candidate = prefix
+        .rsplit_once(" - ")
+        .map(|(_, value)| value)
+        .or_else(|| prefix.rsplit_once(" – ").map(|(_, value)| value))
+        .unwrap_or(prefix)
+        .trim();
+    let lower = candidate.to_lowercase();
+    if candidate.is_empty()
+        || [
+            "welcome",
+            "untitled",
+            "visual studio code",
+            "microsoft visual studio",
+        ]
+        .iter()
+        .any(|value| lower == *value)
+    {
+        return None;
+    }
+    sanitize_label(candidate, "项目：")
+}
+
+#[cfg(windows)]
+fn sanitize_label(value: &str, prefix: &str) -> Option<String> {
+    let mut output = String::new();
+    let mut previous_space = false;
+    for character in value.chars() {
+        if character.is_alphanumeric() || matches!(character, '_' | '-' | '.') {
+            output.push(character);
+            previous_space = false;
+        } else if character.is_whitespace() && !previous_space {
+            output.push(' ');
+            previous_space = true;
+        }
+    }
+    let output = output.trim().trim_matches('.').to_string();
+    if output.is_empty() {
+        return None;
+    }
+    let limited = output.chars().take(80).collect::<String>();
+    Some(format!("{prefix}{limited}"))
+}
+
+#[cfg(windows)]
+fn extract_explicit_web_domain(title: &str) -> Option<String> {
+    const KNOWN_TLDS: [&str; 12] = [
+        "com", "cn", "org", "net", "io", "ai", "dev", "co", "gov", "edu", "app", "me",
+    ];
+    for token in title.split(|character: char| {
+        !(character.is_ascii_alphanumeric() || matches!(character, '.' | '-'))
+    }) {
+        let candidate = token.trim_matches('.').to_lowercase();
+        if candidate == "localhost" {
+            return Some(candidate);
+        }
+        let parts = candidate.split('.').collect::<Vec<_>>();
+        if parts.len() < 2
+            || parts
+                .iter()
+                .any(|part| part.is_empty() || part.starts_with('-') || part.ends_with('-'))
+            || !parts.iter().all(|part| {
+                part.chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+            })
+            || !KNOWN_TLDS.contains(&parts.last().copied().unwrap_or_default())
+        {
+            continue;
+        }
+        return Some(candidate);
+    }
     None
 }
 

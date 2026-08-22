@@ -92,6 +92,8 @@ function createSchema(db) {
       type TEXT NOT NULL CHECK (type IN ('app_session', 'idle')),
       app_name TEXT NOT NULL,
       process_name TEXT NOT NULL,
+      context_label TEXT,
+      web_domain TEXT,
       duration_seconds INTEGER NOT NULL DEFAULT 0,
       received_at TEXT NOT NULL
     );
@@ -111,6 +113,9 @@ function createSchema(db) {
     );
   `);
 
+  ensureColumn(db, "events", "context_label", "TEXT");
+  ensureColumn(db, "events", "web_domain", "TEXT");
+
   const employeeInsert = db.prepare(
     "INSERT OR IGNORE INTO employees (id, name, team, created_at) VALUES (?, ?, ?, ?)",
   );
@@ -119,6 +124,12 @@ function createSchema(db) {
 
   const policyInsert = db.prepare("INSERT OR IGNORE INTO policies (key, value) VALUES (?, ?)");
   for (const [key, value] of Object.entries(defaultPolicy)) policyInsert.run(key, String(value));
+}
+
+function ensureColumn(db, table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (columns.some((item) => item.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
 function getPolicy(db) {
@@ -213,9 +224,18 @@ function validateEvents(body) {
     if (typeof event.occurred_at !== "string" || Number.isNaN(Date.parse(event.occurred_at))) return "occurred_at must be an ISO date";
     if (typeof event.app_name !== "string" || event.app_name.length > 120) return "app_name is required";
     if (typeof event.process_name !== "string" || event.process_name.length > 120) return "process_name is required";
+    if (event.context_label !== undefined && event.context_label !== null && (typeof event.context_label !== "string" || event.context_label.length > 120 || /[\r\n]/.test(event.context_label))) return "context_label is invalid";
+    if (event.web_domain !== undefined && event.web_domain !== null && (typeof event.web_domain !== "string" || event.web_domain.length > 253 || !isSafeWebDomain(event.web_domain))) return "web_domain is invalid";
     if (!Number.isInteger(event.duration_seconds) || event.duration_seconds < 0 || event.duration_seconds > 86400) return "duration_seconds is invalid";
   }
   return null;
+}
+
+function isSafeWebDomain(value) {
+  const domain = value.trim().toLowerCase();
+  if (!domain || domain.includes("/") || domain.includes("?") || domain.includes("#") || domain.includes("@")) return false;
+  if (domain === "localhost") return true;
+  return domain.split(".").length >= 2 && /^[a-z0-9][a-z0-9.-]*[a-z0-9]$/.test(domain);
 }
 
 function formatDuration(seconds) {
@@ -336,18 +356,33 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200 } = {}) {
       const applications = [...new Set(rawApplicationNames.map(applicationKey))];
       const contextKinds = [...new Set(episode.rows.map((row) => applicationContext(row.app_name, row.process_name)))];
       const contextSwitches = Math.max(0, episode.rows.filter((row) => row.type === "app_session").length - 1);
+      const contextLabels = [...new Set(episode.rows.map((row) => row.context_label).filter((value) => typeof value === "string" && value.trim()))];
+      const webDomains = [...new Set(episode.rows.map((row) => row.web_domain).filter((value) => typeof value === "string" && value.trim()))];
+      const sourceLabels = [...contextLabels, ...webDomains];
       const displayApps = episode.isIdle ? ["系统空闲"] : applicationNames;
-      const displayTitle = contextKinds.length > 1
+      const displayTitle = sourceLabels.length
+        ? `${episode.employeeName} · ${sourceLabels.slice(0, 2).join("、")}${sourceLabels.length > 2 ? " 等" : ""}`
+        : contextKinds.length > 1
         ? `${episode.employeeName} · ${contextKinds.join("、")}活动`
         : displayApps.length > 2
           ? `${episode.employeeName} · ${displayApps.slice(0, 2).join("、")} 等 ${displayApps.length} 个应用`
-        : `${episode.employeeName} · ${displayApps.join("、")}`;
+          : `${episode.employeeName} · ${displayApps.join("、")}`;
       const readableDuration = formatDuration(durationSeconds);
       const timeline = episode.rows.map((row) => ({
         occurred_at: row.occurred_at,
-        text: row.type === "idle" ? "进入系统空闲状态" : `前台应用：${displayApplicationName(row.app_name)}`,
+        text: row.type === "idle"
+          ? "进入系统空闲状态"
+          : [
+              `前台应用：${displayApplicationName(row.app_name)}`,
+              row.context_label,
+              row.web_domain ? `域名：${row.web_domain}` : null,
+            ].filter(Boolean).join(" · "),
         app: row.type === "idle" ? "other" : applicationKey(row.app_name),
       }));
+      const resources = [
+        ...contextLabels.map((label) => ({ name: label, path: "脱敏工作标识", type: "metadata" })),
+        ...webDomains.map((domain) => ({ name: domain, path: "仅域名元数据", type: "metadata" })),
+      ];
       const citations = [...new Map(episode.rows.map((row) => [row.process_name, {
         label: row.hostname,
         detail: `${episode.employeeName} · ${row.process_name}`,
@@ -365,21 +400,23 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200 } = {}) {
         title: displayTitle,
         description: episode.isIdle
           ? `${episode.employeeName} 的电脑处于系统空闲状态 ${readableDuration}。`
-          : `${episode.employeeName} 在 ${displayApps.join("、")} 中连续活动 ${readableDuration}。`,
+          : `${episode.employeeName} 在 ${displayApps.join("、")} 中连续活动 ${readableDuration}${sourceLabels.length ? `，关联 ${sourceLabels.join("、")}` : ""}。`,
         applications,
         application_names: applicationNames,
         context_kinds: contextKinds,
         context_switches: contextSwitches,
+        context_labels: contextLabels,
+        web_domains: webDomains,
         duration_seconds: durationSeconds,
         started_at: start,
         ended_at: end,
         summary: episode.isIdle
           ? "这是一条基于系统空闲状态生成的活动元数据记录。"
-          : `${episode.employeeName} 在 ${contextKinds.join("、")}上下文中连续活动 ${readableDuration}，期间记录到 ${episode.rows.length} 个前台应用片段并发生 ${contextSwitches} 次应用切换，主要涉及 ${displayApps.join("、")}。该摘要只基于活动元数据生成。`,
-        prior_context: "来源于 Windows Agent 的前台应用活动采集；当前版本未读取窗口正文、聊天正文或文件正文。",
-        non_obvious: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论。",
+          : `${episode.employeeName} 在 ${contextKinds.join("、")}上下文中连续活动 ${readableDuration}，期间记录到 ${episode.rows.length} 个前台应用片段并发生 ${contextSwitches} 次应用切换，主要涉及 ${displayApps.join("、")}${sourceLabels.length ? `，关联 ${sourceLabels.join("、")}` : ""}。该摘要只基于活动元数据生成。`,
+        prior_context: "来源于 Windows Agent 的前台应用活动采集；工作标识来自允许的开发工具窗口标题脱敏结果，网站只保留域名。",
+        non_obvious: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论；系统不保存原始窗口标题、完整 URL、页面正文或聊天正文。",
         timeline,
-        resources: [],
+        resources,
         citations,
         confidence: 1,
       };
@@ -507,11 +544,11 @@ function createRequestHandler({ db, adminToken, logger = console }) {
         if (validationError) return sendError(response, 400, validationError);
         const insert = db.prepare(`
           INSERT OR IGNORE INTO events
-            (event_id, device_id, occurred_at, type, app_name, process_name, duration_seconds, received_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            (event_id, device_id, occurred_at, type, app_name, process_name, context_label, web_domain, duration_seconds, received_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
         for (const event of body.events) {
-          insert.run(event.event_id, device.id, event.occurred_at, event.type, event.app_name, event.process_name, event.duration_seconds, isoNow());
+          insert.run(event.event_id, device.id, event.occurred_at, event.type, event.app_name, event.process_name, event.context_label || null, event.web_domain ? event.web_domain.trim().toLowerCase() : null, event.duration_seconds, isoNow());
         }
         db.prepare("UPDATE devices SET status = 'online', last_heartbeat_at = ?, updated_at = ? WHERE id = ?").run(isoNow(), isoNow(), device.id);
         return sendJson(response, 202, { accepted: body.events.length, duplicate_safe: true });

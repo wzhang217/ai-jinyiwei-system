@@ -1,6 +1,6 @@
 # AI锦衣卫 Windows Agent
 
-这是员工电脑端的 Tauri 2 + React MVP。当前目标是 Windows 10/11，负责采集前台应用活动、系统空闲状态和同步心跳。
+这是员工电脑端的 Tauri 2 + React MVP。当前目标是 Windows 10/11，负责采集前台应用活动、脱敏工作标识、可识别的网站域名、系统空闲状态和同步心跳。
 
 ## 本地开发
 
@@ -34,7 +34,7 @@ curl -X POST http://localhost:8787/api/admin/registration-codes \
   -d '{"employee_id":"employee-wei"}'
 ```
 
-MVP 不采集键盘、剪贴板、屏幕、聊天正文、文件正文或完整网页内容。
+MVP 不采集键盘、剪贴板、屏幕、聊天正文、文件正文、原始窗口标题或完整网页内容。开发工具只保留经过清洗的项目标识；浏览器只有在窗口标题明确包含域名时才记录域名，完整浏览器 URL 需要后续扩展接入。
 
 ## Windows 一键安装包
 

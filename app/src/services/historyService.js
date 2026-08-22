@@ -5,6 +5,8 @@ const formatDuration = (seconds) => {
 
 export function recordToMarkdown(record) {
   const applications = (record.applicationNames || record.application_names || record.applications).map((key) => key).join(", ");
+  const contextLabels = (record.contextLabels || record.context_labels || []).join(", ");
+  const webDomains = (record.webDomains || record.web_domains || []).join(", ");
   const citations = record.citations.map((item) => `- ${item.label} — ${item.detail}`).join("\n");
   const timeline = record.timeline.map((item) => `- ${item.time} · ${item.text}`).join("\n");
   const resources = record.resources.map((item) => `- ${item.name} — ${item.path}`).join("\n");
@@ -12,7 +14,7 @@ export function recordToMarkdown(record) {
   const userId = record.userId || record.user_id || "employee_001";
   const periodStart = record.startedAt || record.started_at || "";
   const periodEnd = record.endedAt || record.ended_at || "";
-  return `---\ntitle: ${record.title}\ndescription: ${record.description}\napplications: [${applications}]\nduration: ${record.duration}\nrecord_type: ${record.recordType}\nuser_id: ${userId}\nperiod_start: ${periodStart}\nperiod_end: ${periodEnd}\n---\n\n## Memory summary\n\n${record.summary}\n\n## Relevant prior context\n\n${record.priorContext}\n\n## Important non-obvious context\n\n${record.nonObvious}\n\n## Recording summary\n\n${timeline}\n\n## Resources\n\n${resources}\n\n## Citations\n\n${citations}\n`;
+  return `---\ntitle: ${record.title}\ndescription: ${record.description}\napplications: [${applications}]\ncontext_labels: [${contextLabels}]\nweb_domains: [${webDomains}]\nduration: ${record.duration}\nrecord_type: ${record.recordType}\nuser_id: ${userId}\nperiod_start: ${periodStart}\nperiod_end: ${periodEnd}\n---\n\n## Memory summary\n\n${record.summary}\n\n## Relevant prior context\n\n${record.priorContext}\n\n## Important non-obvious context\n\n${record.nonObvious}\n\n## Recording summary\n\n${timeline}\n\n## Resources\n\n${resources}\n\n## Citations\n\n${citations}\n`;
 }
 
 export function downloadRecordMarkdown(record) {
@@ -28,7 +30,7 @@ export function downloadRecordMarkdown(record) {
 export function askHistory(query, records) {
   const normalized = query.toLowerCase();
   const matched = records.filter((record) => {
-    const haystack = [record.title, record.description, record.summary, record.priorContext, record.nonObvious, ...record.applications].join(" ").toLowerCase();
+    const haystack = [record.title, record.description, record.summary, record.priorContext, record.nonObvious, ...(record.contextLabels || []), ...(record.webDomains || []), ...record.applications].join(" ").toLowerCase();
     return normalized.split(/\s+/).some((token) => token.length > 1 && haystack.includes(token)) || normalized.includes("今天") || normalized.includes("主要");
   });
   const evidence = (matched.length ? matched : records.slice(0, 2)).slice(0, 3);
