@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createAgentServer, processMemoryGenerationJobs } from "../src/index.mjs";
+import { createAgentServer, processMemoryGenerationJobs, rankHistoryRecords } from "../src/index.mjs";
 import { createAiService } from "../src/ai.mjs";
 
 async function withServer(callback, options = {}) {
@@ -23,6 +23,28 @@ async function jsonFetch(url, options = {}) {
   const response = await fetch(url, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
   return { response, body: await response.json() };
 }
+
+test("ranks relevant Memory Summary records before History Skill context", () => {
+  const ranked = rankHistoryRecords("GitHub 项目", [
+    {
+      id: "wps-record",
+      title: "Wei · WPS Office",
+      application_names: ["WPS Office"],
+      context_labels: [],
+      web_domains: [],
+      started_at: "2026-08-23T10:00:00.000Z",
+    },
+    {
+      id: "github-record",
+      title: "Wei · 项目：AI锦衣卫系统",
+      application_names: ["Google Chrome"],
+      context_labels: ["项目：AI锦衣卫系统", "来源：GitHub"],
+      web_domains: ["github.com"],
+      started_at: "2026-08-23T09:00:00.000Z",
+    },
+  ]);
+  assert.equal(ranked[0].id, "github-record");
+});
 
 test("enrolls a device and accepts idempotent events and heartbeats", async () => {
   await withServer(async ({ base, app }) => {

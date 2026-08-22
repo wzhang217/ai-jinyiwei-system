@@ -656,6 +656,48 @@ function aiInputForRecord(record) {
   };
 }
 
+const HISTORY_QUERY_STOPWORDS = new Set([
+  "最近", "今天", "昨天", "本周", "这周", "主要", "做了", "什么", "哪些", "这个", "团队", "工作", "活动", "记录", "情况", "是否", "存在", "频繁", "任务", "切换",
+]);
+
+function historyQueryTokens(question) {
+  const fragments = String(question || "").toLowerCase().match(/[\p{Script=Han}]+|[a-z0-9][a-z0-9._-]*/gu) || [];
+  const tokens = new Set();
+  for (const fragment of fragments) {
+    if (HISTORY_QUERY_STOPWORDS.has(fragment)) continue;
+    if (/^[\p{Script=Han}]+$/u.test(fragment)) {
+      if (fragment.length >= 2) tokens.add(fragment);
+      for (let index = 0; index < fragment.length - 1; index += 1) tokens.add(fragment.slice(index, index + 2));
+    } else if (fragment.length >= 2) {
+      tokens.add(fragment);
+    }
+  }
+  return [...tokens];
+}
+
+export function rankHistoryRecords(question, records = []) {
+  const tokens = historyQueryTokens(question);
+  return records
+    .map((record, index) => {
+      const fields = [
+        [record.title, 6],
+        [record.context_labels?.join(" "), 5],
+        [record.web_domains?.join(" "), 5],
+        [record.application_names?.join(" "), 4],
+        [record.description, 2],
+        [record.summary, 2],
+        [record.prior_context, 1],
+      ];
+      const score = tokens.reduce((total, token) => total + fields.reduce((fieldTotal, [value, weight]) => (
+        String(value || "").toLowerCase().includes(token) ? fieldTotal + weight : fieldTotal
+      ), 0), 0);
+      const startedAt = Date.parse(record.started_at || "");
+      return { record, score, startedAt: Number.isFinite(startedAt) ? startedAt : 0, index };
+    })
+    .sort((left, right) => right.score - left.score || right.startedAt - left.startedAt || left.index - right.index)
+    .map(({ record }) => record);
+}
+
 function startOfUtcWeekMs(milliseconds) {
   const date = new Date(milliseconds);
   const day = date.getUTCDay();
@@ -1172,10 +1214,11 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const limit = Math.min(Math.max(Number(body.limit) || 200, 1), 2000);
         const deviceId = typeof body.device_id === "string" && body.device_id.trim() ? body.device_id.trim() : null;
         const records = await getMemoryRecords(db, { deviceId, limit, ai, principal });
-        const answer = await ai.answerHistory({ question: body.question.trim(), records });
+        const rankedRecords = rankHistoryRecords(body.question.trim(), records);
+        const answer = await ai.answerHistory({ question: body.question.trim(), records: rankedRecords });
         const evidenceIds = Array.isArray(answer.evidence_ids) ? answer.evidence_ids : [];
-        const evidence = evidenceIds.map((id) => records.find((record) => record.id === id)).filter(Boolean);
-        const selectedEvidence = evidence.length ? evidence : records.slice(0, 3);
+        const evidence = evidenceIds.map((id) => rankedRecords.find((record) => record.id === id)).filter(Boolean);
+        const selectedEvidence = evidence.length ? evidence : rankedRecords.slice(0, 3);
         const citations = [...new Map(selectedEvidence
           .flatMap((record) => record.citations || [])
           .map((citation) => [`${citation.label}:${citation.detail}`, citation]))
