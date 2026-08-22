@@ -84,6 +84,8 @@ export async function getLiveHistory(limit = 200) {
     nonObvious: record.non_obvious,
     confidence: record.confidence ?? 1,
     applicationNames: record.application_names || [],
+    contextKinds: record.context_kinds || [],
+    contextSwitches: record.context_switches || 0,
   }));
 }
 

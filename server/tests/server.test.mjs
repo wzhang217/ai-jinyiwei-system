@@ -85,6 +85,8 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.equal(events.body.events[0].process_name, "Code.exe");
     assert.equal(history.body.records.length, 1);
     assert.deepEqual(history.body.records[0].applications.sort(), ["chrome", "vscode"]);
+    assert.deepEqual(history.body.records[0].context_kinds.sort(), ["开发", "浏览器"]);
+    assert.equal(history.body.records[0].context_switches, 1);
     assert.match(history.body.records[0].title, /Chen/);
   });
 });

@@ -35,6 +35,12 @@ const HIDDEN_AGENT_PROCESSES = new Set([
   "runtimebroker.exe",
   "textinputhost.exe",
   "shellexperiencehost.exe",
+  "mphelper.exe",
+  "newidview.exe",
+  "360albumviewer64.exe",
+  "360huabao.exe",
+  "sesvcr.exe",
+  "softmgrlite.exe",
 ]);
 
 const isoNow = () => new Date().toISOString();
@@ -219,7 +225,7 @@ function formatDuration(seconds) {
 
 function applicationKey(appName) {
   const normalized = String(appName || "").toLowerCase();
-  if (normalized.includes("chrome") || normalized.includes("edge")) return "chrome";
+  if (normalized.includes("chrome") || normalized.includes("edge") || normalized.includes("360se")) return "chrome";
   if (normalized.includes("code") || normalized.includes("visual studio")) return "vscode";
   if (normalized.includes("wechat") || normalized.includes("weixin") || normalized.includes("企业微信")) return "wechat";
   if (normalized.includes("notion")) return "notion";
@@ -233,6 +239,7 @@ function displayApplicationName(appName) {
   const normalized = String(appName || "").toLowerCase();
   if (normalized.includes("chrome")) return "Google Chrome";
   if (normalized.includes("edge")) return "Microsoft Edge";
+  if (normalized.includes("360se")) return "360 浏览器";
   if (normalized.includes("code") || normalized.includes("visual studio")) return "Visual Studio Code";
   if (normalized.includes("wechat") || normalized.includes("weixin") || normalized.includes("企业微信")) return "微信/企业微信";
   if (normalized.includes("notion")) return "Notion";
@@ -240,6 +247,18 @@ function displayApplicationName(appName) {
   if (normalized.includes("explorer")) return "Windows 文件资源管理器";
   if (normalized.includes("codex") || normalized.includes("chatgpt")) return "Codex";
   return appName;
+}
+
+function applicationContext(appName, processName) {
+  const normalized = `${appName || ""} ${processName || ""}`.toLowerCase();
+  if (normalized.includes("wechat") || normalized.includes("weixin") || normalized.includes("企业微信") || normalized.includes("slack") || normalized.includes("teams")) return "沟通";
+  if (normalized.includes("chrome") || normalized.includes("edge") || normalized.includes("360se") || normalized.includes("firefox") || normalized.includes("browser")) return "浏览器";
+  if (normalized.includes("code") || normalized.includes("visual studio") || normalized.includes("idea") || normalized.includes("devenv")) return "开发";
+  if (normalized.includes("wps") || normalized.includes("word") || normalized.includes("excel") || normalized.includes("powerpoint") || normalized.includes("notion")) return "文档";
+  if (normalized.includes("explorer") || normalized.includes("finder")) return "文件";
+  if (normalized.includes("terminal") || normalized.includes("powershell") || normalized.includes("cmd.exe") || normalized.includes("windowsterminal")) return "终端";
+  if (normalized.includes("idle") || normalized.includes("system")) return "系统";
+  return "其他";
 }
 
 function historyEventRows(db, deviceId) {
@@ -315,9 +334,13 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200 } = {}) {
       const rawApplicationNames = [...new Set(episode.rows.map((row) => row.app_name))];
       const applicationNames = [...new Set(rawApplicationNames.map(displayApplicationName))];
       const applications = [...new Set(rawApplicationNames.map(applicationKey))];
+      const contextKinds = [...new Set(episode.rows.map((row) => applicationContext(row.app_name, row.process_name)))];
+      const contextSwitches = Math.max(0, episode.rows.filter((row) => row.type === "app_session").length - 1);
       const displayApps = episode.isIdle ? ["系统空闲"] : applicationNames;
-      const displayTitle = displayApps.length > 2
-        ? `${episode.employeeName} · ${displayApps.slice(0, 2).join("、")} 等 ${displayApps.length} 个应用`
+      const displayTitle = contextKinds.length > 1
+        ? `${episode.employeeName} · ${contextKinds.join("、")}活动`
+        : displayApps.length > 2
+          ? `${episode.employeeName} · ${displayApps.slice(0, 2).join("、")} 等 ${displayApps.length} 个应用`
         : `${episode.employeeName} · ${displayApps.join("、")}`;
       const readableDuration = formatDuration(durationSeconds);
       const timeline = episode.rows.map((row) => ({
@@ -345,12 +368,14 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200 } = {}) {
           : `${episode.employeeName} 在 ${displayApps.join("、")} 中连续活动 ${readableDuration}。`,
         applications,
         application_names: applicationNames,
+        context_kinds: contextKinds,
+        context_switches: contextSwitches,
         duration_seconds: durationSeconds,
         started_at: start,
         ended_at: end,
         summary: episode.isIdle
           ? "这是一条基于系统空闲状态生成的活动元数据记录。"
-          : `${episode.employeeName} 在 ${displayApps.join("、")} 中连续活动 ${readableDuration}，期间记录到 ${episode.rows.length} 个前台应用片段。该摘要只基于活动元数据生成。`,
+          : `${episode.employeeName} 在 ${contextKinds.join("、")}上下文中连续活动 ${readableDuration}，期间记录到 ${episode.rows.length} 个前台应用片段并发生 ${contextSwitches} 次应用切换，主要涉及 ${displayApps.join("、")}。该摘要只基于活动元数据生成。`,
         prior_context: "来源于 Windows Agent 的前台应用活动采集；当前版本未读取窗口正文、聊天正文或文件正文。",
         non_obvious: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论。",
         timeline,
