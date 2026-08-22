@@ -950,23 +950,19 @@ fn extract_document_identifier(title: &str) -> Option<String> {
 
 #[cfg(windows)]
 fn redacted_document_label(candidate: &str) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let extension = candidate
         .rsplit_once('.')
         .map(|(_, extension)| format!(".{}", extension.to_lowercase()))
         .unwrap_or_default();
-    let mut hasher = DefaultHasher::new();
-    candidate.to_lowercase().hash(&mut hasher);
+    if extension.is_empty() {
+        return "文件夹：脱敏文件夹".into();
+    }
     let prefix = if is_sensitive_document_name(candidate) {
-        "敏感文档"
-    } else if extension.is_empty() {
-        "文件夹"
+        "敏感文件"
     } else {
-        "文档"
+        "脱敏文件"
     };
-    format!("文档：{prefix}标识-{:08x}{extension}", hasher.finish())
+    format!("文档：{prefix}{extension}")
 }
 
 #[cfg(windows)]
