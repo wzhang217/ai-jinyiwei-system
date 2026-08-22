@@ -25,6 +25,18 @@ const defaultPolicy = {
   version: 1,
 };
 
+const HISTORY_WINDOW_SECONDS = 10 * 60;
+const HIDDEN_AGENT_PROCESSES = new Set([
+  "ai-jinyiwei-agent.exe",
+  "dwm.exe",
+  "sihost.exe",
+  "searchhost.exe",
+  "startmenuexperiencehost.exe",
+  "runtimebroker.exe",
+  "textinputhost.exe",
+  "shellexperiencehost.exe",
+]);
+
 const isoNow = () => new Date().toISOString();
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const newId = (prefix) => `${prefix}_${randomBytes(12).toString("hex")}`;
@@ -200,6 +212,155 @@ function validateEvents(body) {
   return null;
 }
 
+function formatDuration(seconds) {
+  const minutes = Math.max(1, Math.round(Number(seconds || 0) / 60));
+  return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
+}
+
+function applicationKey(appName) {
+  const normalized = String(appName || "").toLowerCase();
+  if (normalized.includes("chrome") || normalized.includes("edge")) return "chrome";
+  if (normalized.includes("code") || normalized.includes("visual studio")) return "vscode";
+  if (normalized.includes("wechat") || normalized.includes("weixin") || normalized.includes("企业微信")) return "wechat";
+  if (normalized.includes("notion")) return "notion";
+  if (normalized.includes("figma")) return "figma";
+  if (normalized.includes("finder") || normalized.includes("explorer")) return "finder";
+  if (normalized.includes("codex") || normalized.includes("chatgpt")) return "codex";
+  return "other";
+}
+
+function displayApplicationName(appName) {
+  const normalized = String(appName || "").toLowerCase();
+  if (normalized.includes("chrome")) return "Google Chrome";
+  if (normalized.includes("edge")) return "Microsoft Edge";
+  if (normalized.includes("code") || normalized.includes("visual studio")) return "Visual Studio Code";
+  if (normalized.includes("wechat") || normalized.includes("weixin") || normalized.includes("企业微信")) return "微信/企业微信";
+  if (normalized.includes("notion")) return "Notion";
+  if (normalized.includes("figma")) return "Figma";
+  if (normalized.includes("explorer")) return "Windows 文件资源管理器";
+  if (normalized.includes("codex") || normalized.includes("chatgpt")) return "Codex";
+  return appName;
+}
+
+function historyEventRows(db, deviceId) {
+  const query = deviceId
+    ? `SELECT ev.*, d.employee_id, e.name AS employee_name, e.team AS employee_team, d.hostname
+       FROM events ev
+       JOIN devices d ON d.id = ev.device_id
+       JOIN employees e ON e.id = d.employee_id
+       WHERE ev.device_id = ?
+       ORDER BY ev.occurred_at ASC
+       LIMIT 10000`
+    : `SELECT ev.*, d.employee_id, e.name AS employee_name, e.team AS employee_team, d.hostname
+       FROM events ev
+       JOIN devices d ON d.id = ev.device_id
+       JOIN employees e ON e.id = d.employee_id
+       ORDER BY ev.occurred_at ASC
+       LIMIT 10000`;
+  const rows = deviceId ? db.prepare(query).all(deviceId) : db.prepare(query).all();
+  return rows.filter((row) => !HIDDEN_AGENT_PROCESSES.has(String(row.process_name || "").toLowerCase()));
+}
+
+function buildHistoryRecords(db, { deviceId = null, limit = 200 } = {}) {
+  const episodes = [];
+  let current = null;
+
+  const flush = () => {
+    if (current) episodes.push(current);
+    current = null;
+  };
+
+  for (const row of historyEventRows(db, deviceId)) {
+    const startMs = Date.parse(row.occurred_at);
+    if (Number.isNaN(startMs)) continue;
+    const rawDurationSeconds = Math.max(0, Number(row.duration_seconds) || 0);
+    // Values exactly at the protocol ceiling were produced by the first
+    // Windows idle-time implementation when the machine uptime was long.
+    // Keep those raw events for diagnostics, but do not turn them into fake
+    // 24-hour History entries.
+    if (row.type === "idle" && rawDurationSeconds >= 86_400) continue;
+    const durationSeconds = rawDurationSeconds;
+    const endMs = startMs + durationSeconds * 1000;
+    const isIdle = row.type === "idle";
+    const gapSeconds = current ? Math.max(0, (startMs - current.endMs) / 1000) : Infinity;
+    const exceedsWindow = current && ((startMs - current.startMs) / 1000 >= HISTORY_WINDOW_SECONDS);
+
+    if (!current || current.deviceId !== row.device_id || current.isIdle !== isIdle || gapSeconds > HISTORY_WINDOW_SECONDS || exceedsWindow) {
+      flush();
+      current = {
+        deviceId: row.device_id,
+        employeeId: row.employee_id,
+        employeeName: row.employee_name,
+        employeeTeam: row.employee_team,
+        hostname: row.hostname,
+        isIdle,
+        startMs,
+        endMs,
+        rows: [row],
+      };
+    } else {
+      current.endMs = Math.max(current.endMs, endMs);
+      current.rows.push(row);
+    }
+  }
+  flush();
+
+  return episodes
+    .sort((left, right) => right.startMs - left.startMs)
+    .slice(0, Math.min(Math.max(Number(limit) || 200, 1), 2000))
+    .map((episode) => {
+      const start = new Date(episode.startMs).toISOString();
+      const end = new Date(episode.endMs).toISOString();
+      const durationSeconds = Math.max(0, Math.round((episode.endMs - episode.startMs) / 1000));
+      const rawApplicationNames = [...new Set(episode.rows.map((row) => row.app_name))];
+      const applicationNames = [...new Set(rawApplicationNames.map(displayApplicationName))];
+      const applications = [...new Set(rawApplicationNames.map(applicationKey))];
+      const displayApps = episode.isIdle ? ["系统空闲"] : applicationNames;
+      const displayTitle = displayApps.length > 2
+        ? `${episode.employeeName} · ${displayApps.slice(0, 2).join("、")} 等 ${displayApps.length} 个应用`
+        : `${episode.employeeName} · ${displayApps.join("、")}`;
+      const readableDuration = formatDuration(durationSeconds);
+      const timeline = episode.rows.map((row) => ({
+        occurred_at: row.occurred_at,
+        text: row.type === "idle" ? "进入系统空闲状态" : `前台应用：${displayApplicationName(row.app_name)}`,
+        app: row.type === "idle" ? "other" : applicationKey(row.app_name),
+      }));
+      const citations = [...new Map(episode.rows.map((row) => [row.process_name, {
+        label: row.hostname,
+        detail: `${episode.employeeName} · ${row.process_name}`,
+        type: "app",
+      }])).values()];
+
+      return {
+        id: `history_${episode.deviceId}_${episode.startMs}`,
+        user_id: episode.employeeId,
+        employee_name: episode.employeeName,
+        employee_team: episode.employeeTeam,
+        device_id: episode.deviceId,
+        hostname: episode.hostname,
+        record_type: "leaf",
+        title: displayTitle,
+        description: episode.isIdle
+          ? `${episode.employeeName} 的电脑处于系统空闲状态 ${readableDuration}。`
+          : `${episode.employeeName} 在 ${displayApps.join("、")} 中连续活动 ${readableDuration}。`,
+        applications,
+        application_names: applicationNames,
+        duration_seconds: durationSeconds,
+        started_at: start,
+        ended_at: end,
+        summary: episode.isIdle
+          ? "这是一条基于系统空闲状态生成的活动元数据记录。"
+          : `${episode.employeeName} 在 ${displayApps.join("、")} 中连续活动 ${readableDuration}，期间记录到 ${episode.rows.length} 个前台应用片段。该摘要只基于活动元数据生成。`,
+        prior_context: "来源于 Windows Agent 的前台应用活动采集；当前版本未读取窗口正文、聊天正文或文件正文。",
+        non_obvious: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论。",
+        timeline,
+        resources: [],
+        citations,
+        confidence: 1,
+      };
+    });
+}
+
 function createRequestHandler({ db, adminToken, logger = console }) {
   return async (request, response) => {
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
@@ -254,6 +415,13 @@ function createRequestHandler({ db, adminToken, logger = console }) {
              ORDER BY ev.occurred_at DESC LIMIT ${limit}`;
         const events = deviceId ? db.prepare(query).all(deviceId) : db.prepare(query).all();
         return sendJson(response, 200, { events });
+      }
+
+      if (method === "GET" && url.pathname === "/api/admin/history") {
+        if (!requireAdmin(request, adminToken)) return sendError(response, 401, "admin authentication required", "unauthorized");
+        const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 200, 1), 2000);
+        const deviceId = url.searchParams.get("device_id") || null;
+        return sendJson(response, 200, { records: buildHistoryRecords(db, { deviceId, limit }) });
       }
 
       if (method === "GET" && url.pathname === "/api/admin/audit") {

@@ -62,6 +62,31 @@ export async function getLiveEvents(limit = 200) {
   }));
 }
 
+export async function getLiveHistory(limit = 200) {
+  const body = await request(`/api/admin/history?limit=${limit}`);
+  return body.records.map((record) => ({
+    ...record,
+    id: record.id,
+    day: formatDay(record.started_at),
+    time: formatTime(record.started_at),
+    duration: formatDuration(record.duration_seconds),
+    durationSeconds: record.duration_seconds,
+    recordType: record.record_type,
+    userId: record.user_id,
+    applications: record.applications || [],
+    resources: record.resources || [],
+    timeline: (record.timeline || []).map((item) => ({
+      ...item,
+      time: formatTime(item.occurred_at || item.time),
+    })),
+    citations: record.citations || [],
+    priorContext: record.prior_context,
+    nonObvious: record.non_obvious,
+    confidence: record.confidence ?? 1,
+    applicationNames: record.application_names || [],
+  }));
+}
+
 function formatDuration(seconds) {
   const totalMinutes = Math.max(1, Math.round(Number(seconds || 0) / 60));
   return totalMinutes >= 60 ? `${Math.floor(totalMinutes / 60)}h ${totalMinutes % 60}m` : `${totalMinutes}m`;

@@ -62,15 +62,30 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.equal(first.response.status, 202);
     assert.equal(duplicate.response.status, 202);
 
+    const adjacentEvent = {
+      event_id: "event-2",
+      occurred_at: new Date(Date.now() - 1_000).toISOString(),
+      type: "app_session",
+      app_name: "Google Chrome",
+      process_name: "chrome.exe",
+      duration_seconds: 60,
+    };
+    const adjacent = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers, body: JSON.stringify({ events: [adjacentEvent] }) });
+    assert.equal(adjacent.response.status, 202);
+
     const heartbeat = await jsonFetch(`${base}/api/agent/heartbeat`, { method: "POST", headers, body: JSON.stringify({ agent_version: "0.1.0", queued_events: 0 }) });
     assert.equal(heartbeat.response.status, 200);
 
     const devices = await jsonFetch(`${base}/api/admin/devices`, { headers: { "x-admin-token": "test-admin" } });
     const events = await jsonFetch(`${base}/api/admin/events`, { headers: { "x-admin-token": "test-admin" } });
+    const history = await jsonFetch(`${base}/api/admin/history`, { headers: { "x-admin-token": "test-admin" } });
     assert.equal(devices.body.devices.length, 1);
     assert.equal(devices.body.devices[0].status, "online");
-    assert.equal(events.body.events.length, 1);
+    assert.equal(events.body.events.length, 2);
     assert.equal(events.body.events[0].process_name, "Code.exe");
+    assert.equal(history.body.records.length, 1);
+    assert.deepEqual(history.body.records[0].applications.sort(), ["chrome", "vscode"]);
+    assert.match(history.body.records[0].title, /Chen/);
   });
 });
 

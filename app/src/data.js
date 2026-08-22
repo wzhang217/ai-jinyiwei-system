@@ -6,6 +6,7 @@ export const applications = {
   wechat: { name: "企业微信", kind: "沟通", color: "#20c36b" },
   notion: { name: "Notion", kind: "文档", color: "#161616" },
   figma: { name: "Figma", kind: "设计", color: "#f24e1e" },
+  other: { name: "其他应用", kind: "未分类", color: "#7c8077" },
 };
 
 export const historyRecords = [

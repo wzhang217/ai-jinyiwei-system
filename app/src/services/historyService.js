@@ -4,12 +4,15 @@ const formatDuration = (seconds) => {
 };
 
 export function recordToMarkdown(record) {
-  const applications = record.applications.map((key) => key).join(", ");
+  const applications = (record.applicationNames || record.application_names || record.applications).map((key) => key).join(", ");
   const citations = record.citations.map((item) => `- ${item.label} — ${item.detail}`).join("\n");
   const timeline = record.timeline.map((item) => `- ${item.time} · ${item.text}`).join("\n");
   const resources = record.resources.map((item) => `- ${item.name} — ${item.path}`).join("\n");
 
-  return `---\ntitle: ${record.title}\ndescription: ${record.description}\napplications: [${applications}]\nduration: ${record.duration}\nrecord_type: ${record.recordType}\nuser_id: employee_001\nperiod_start: 2026-08-22T08:40:00+08:00\nperiod_end: 2026-08-22T14:40:00+08:00\n---\n\n## Memory summary\n\n${record.summary}\n\n## Relevant prior context\n\n${record.priorContext}\n\n## Important non-obvious context\n\n${record.nonObvious}\n\n## Recording summary\n\n${timeline}\n\n## Resources\n\n${resources}\n\n## Citations\n\n${citations}\n`;
+  const userId = record.userId || record.user_id || "employee_001";
+  const periodStart = record.startedAt || record.started_at || "";
+  const periodEnd = record.endedAt || record.ended_at || "";
+  return `---\ntitle: ${record.title}\ndescription: ${record.description}\napplications: [${applications}]\nduration: ${record.duration}\nrecord_type: ${record.recordType}\nuser_id: ${userId}\nperiod_start: ${periodStart}\nperiod_end: ${periodEnd}\n---\n\n## Memory summary\n\n${record.summary}\n\n## Relevant prior context\n\n${record.priorContext}\n\n## Important non-obvious context\n\n${record.nonObvious}\n\n## Recording summary\n\n${timeline}\n\n## Resources\n\n${resources}\n\n## Citations\n\n${citations}\n`;
 }
 
 export function downloadRecordMarkdown(record) {

@@ -36,7 +36,7 @@ import {
 } from "@phosphor-icons/react";
 import { applications, defaultQuestions, historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, getLiveEvents } from "./services/agentApi.js";
+import { agentApiEnabled, getLiveHistory } from "./services/agentApi.js";
 import { AdminPage, roleLabel } from "./AdminPages.jsx";
 
 const navGroups = [
@@ -78,7 +78,7 @@ function App() {
   useEffect(() => {
     if (!agentApiEnabled) return undefined;
     let cancelled = false;
-    const refreshLiveRecords = () => getLiveEvents().then((records) => {
+    const refreshLiveRecords = () => getLiveHistory().then((records) => {
       if (!cancelled) setLiveRecords(records);
     }).catch(() => {});
     refreshLiveRecords();
