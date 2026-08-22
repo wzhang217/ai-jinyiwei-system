@@ -275,6 +275,46 @@ test("pairs a browser with a short-lived scoped credential", async () => {
   });
 });
 
+test("splits long foreground sessions into ten-minute Memory Summary windows", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-LONG-SESSION", os_version: "Windows 11", agent_version: "0.1.3" }),
+    });
+    const occurredAt = new Date(Date.now() - 31 * 60_000).toISOString();
+    const uploaded = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${enrolled.body.device_token}` },
+      body: JSON.stringify({ events: [{
+        event_id: "long-session",
+        occurred_at: occurredAt,
+        type: "app_session",
+        app_name: "Visual Studio Code",
+        process_name: "Code.exe",
+        context_label: "项目：AI锦衣卫系统",
+        duration_seconds: 1_501,
+      }] }),
+    });
+    assert.equal(uploaded.response.status, 202);
+
+    const history = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    const leaves = history.body.records
+      .filter((record) => record.record_type === "leaf")
+      .sort((left, right) => Date.parse(left.started_at) - Date.parse(right.started_at));
+    assert.deepEqual(leaves.map((record) => record.duration_seconds), [600, 600, 301]);
+    assert.ok(leaves.every((record) => record.duration_seconds <= 600));
+    assert.ok(leaves.every((record) => record.context_switches === 0));
+    assert.ok(leaves.every((record) => record.source_event_ids.length === 1 && record.source_event_ids[0] === "long-session"));
+    assert.ok(history.body.records.some((record) => record.record_type === "rollup" && record.rollup_scope === "window"));
+  });
+});
+
 test("allows an admin to configure 24-hour collection", async () => {
   await withServer(async ({ base }) => {
     const headers = { "x-admin-token": "test-admin" };

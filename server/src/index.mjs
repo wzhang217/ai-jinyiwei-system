@@ -537,6 +537,29 @@ function historyEventRows(db, deviceId, principal = null, team = null) {
   return rows.filter((row) => !HIDDEN_AGENT_PROCESSES.has(String(row.process_name || "").toLowerCase()));
 }
 
+function splitHistoryEventRow(row) {
+  const durationSeconds = Math.max(0, Number(row.duration_seconds) || 0);
+  if (durationSeconds <= HISTORY_WINDOW_SECONDS) return [row];
+  const startMs = Date.parse(row.occurred_at);
+  if (!Number.isFinite(startMs)) return [row];
+  const segments = [];
+  let offsetSeconds = 0;
+  let segmentIndex = 0;
+  while (offsetSeconds < durationSeconds) {
+    const segmentDuration = Math.min(HISTORY_WINDOW_SECONDS, durationSeconds - offsetSeconds);
+    segments.push({
+      ...row,
+      event_id: `${row.event_id}:segment:${segmentIndex}`,
+      source_event_id: row.event_id,
+      occurred_at: new Date(startMs + offsetSeconds * 1000).toISOString(),
+      duration_seconds: segmentDuration,
+    });
+    offsetSeconds += segmentDuration;
+    segmentIndex += 1;
+  }
+  return segments;
+}
+
 function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = null, team = null } = {}) {
   const episodes = [];
   let current = null;
@@ -546,7 +569,8 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
     current = null;
   };
 
-  for (const row of historyEventRows(db, deviceId, principal, team)) {
+  for (const sourceRow of historyEventRows(db, deviceId, principal, team)) {
+    for (const row of splitHistoryEventRow(sourceRow)) {
     const startMs = Date.parse(row.occurred_at);
     if (Number.isNaN(startMs)) continue;
     const rawDurationSeconds = Math.max(0, Number(row.duration_seconds) || 0);
@@ -579,6 +603,7 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
       current.rows.push(row);
     }
   }
+  }
   flush();
 
   const selectedEpisodes = episodes
@@ -593,7 +618,17 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
       const applicationNames = [...new Set(rawApplicationNames.map(displayApplicationName))];
       const applications = [...new Set(rawApplicationNames.map(applicationKey))];
       const contextKinds = [...new Set(episode.rows.map((row) => applicationContext(row.app_name, row.process_name)))];
-      const contextSwitches = Math.max(0, episode.rows.filter((row) => row.type === "app_session").length - 1);
+      const contextKeys = episode.rows.map((row) => [
+        row.type,
+        row.app_name,
+        row.process_name,
+        row.context_label || "",
+        row.web_domain || "",
+      ].join("\u001f"));
+      const contextSwitches = contextKeys.slice(1).reduce(
+        (count, key, index) => count + (key === contextKeys[index] ? 0 : 1),
+        0,
+      );
       const contextLabels = [...new Set(episode.rows.map((row) => row.context_label).filter((value) => typeof value === "string" && value.trim()))];
       const webDomains = [...new Set(episode.rows.map((row) => row.web_domain).filter((value) => typeof value === "string" && value.trim()))];
       const sourceLabels = [...contextLabels, ...webDomains];
@@ -657,7 +692,7 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         timeline,
         resources,
         citations,
-        source_event_ids: episode.rows.map((row) => row.event_id),
+        source_event_ids: [...new Set(episode.rows.map((row) => row.source_event_id || row.event_id))],
         confidence: 1,
       };
   });
