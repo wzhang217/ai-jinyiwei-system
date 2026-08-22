@@ -51,7 +51,24 @@ jobs:
         run: npm ci
 
       - name: Build MSI
-        run: npm run tauri:build
+        shell: pwsh
+        run: |
+          $attempts = 3
+          $exitCode = 1
+          for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+            Write-Host "Building MSI (attempt $attempt/$attempts)"
+            npm run tauri:build
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -eq 0) {
+              break
+            }
+            if ($attempt -lt $attempts) {
+              $delay = 30 * $attempt
+              Write-Host "Build failed with exit code $exitCode; retrying in $delay seconds"
+              Start-Sleep -Seconds $delay
+            }
+          }
+          exit $exitCode
 
       - name: Upload MSI artifact
         uses: actions/upload-artifact@v4
