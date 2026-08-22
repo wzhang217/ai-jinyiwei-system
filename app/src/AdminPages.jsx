@@ -315,7 +315,7 @@ function TeamsPage({ role, target, liveRecords, onNavigate, onToast }) {
     event.preventDefault();
     if (!skillQuestion.trim()) return;
     try {
-      if (agentApiEnabled) setSkillAnswer(await askLiveHistory(skillQuestion));
+      if (agentApiEnabled) setSkillAnswer(await askLiveHistory(skillQuestion, { team: selectedTeam?.name }));
       else if (demoMode) setSkillAnswer(askHistory(skillQuestion, sourceRecords));
       else throw new Error("Agent API is not configured; connect the real server or explicitly enable demo mode");
     } catch (error) {

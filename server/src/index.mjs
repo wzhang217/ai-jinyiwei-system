@@ -482,7 +482,7 @@ function metadataResource(label) {
   return { name: value, path: "脱敏工作标识", type: "metadata" };
 }
 
-function historyEventRows(db, deviceId, principal = null) {
+function historyEventRows(db, deviceId, principal = null, team = null) {
   const conditions = [];
   const params = [];
   if (deviceId) {
@@ -492,6 +492,10 @@ function historyEventRows(db, deviceId, principal = null) {
   const scope = scopePredicate(principal);
   conditions.push(scope.sql);
   params.push(...scope.params);
+  if (team && principal?.role !== "employee") {
+    conditions.push("e.team = ?");
+    params.push(team);
+  }
   const query = `SELECT ev.*, d.employee_id, e.name AS employee_name, e.team AS employee_team, d.hostname
     FROM events ev
     JOIN devices d ON d.id = ev.device_id
@@ -503,7 +507,7 @@ function historyEventRows(db, deviceId, principal = null) {
   return rows.filter((row) => !HIDDEN_AGENT_PROCESSES.has(String(row.process_name || "").toLowerCase()));
 }
 
-function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = null } = {}) {
+function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = null, team = null } = {}) {
   const episodes = [];
   let current = null;
 
@@ -512,7 +516,7 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
     current = null;
   };
 
-  for (const row of historyEventRows(db, deviceId, principal)) {
+  for (const row of historyEventRows(db, deviceId, principal, team)) {
     const startMs = Date.parse(row.occurred_at);
     if (Number.isNaN(startMs)) continue;
     const rawDurationSeconds = Math.max(0, Number(row.duration_seconds) || 0);
@@ -1073,8 +1077,8 @@ export async function processMemoryGenerationJobs(db, ai, logger = console, { li
   return { processed: jobs.length, succeeded, retried, failed };
 }
 
-async function getMemoryRecords(db, { deviceId = null, limit = 200, ai, principal = null }) {
-  const leafRecords = await materializeMemoryRecords(db, buildHistoryRecords(db, { deviceId, limit, principal }), ai);
+async function getMemoryRecords(db, { deviceId = null, limit = 200, ai, principal = null, team = null }) {
+  const leafRecords = await materializeMemoryRecords(db, buildHistoryRecords(db, { deviceId, limit, principal, team }), ai);
   const rollupRecords = [];
   for (const scope of ["window", "hourly", "daily", "weekly", "team_weekly"]) {
     rollupRecords.push(...await materializeMemoryRecords(db, buildRollupRecords(leafRecords, scope), ai));
@@ -1265,7 +1269,9 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         }
         const limit = Math.min(Math.max(Number(body.limit) || 200, 1), 2000);
         const deviceId = typeof body.device_id === "string" && body.device_id.trim() ? body.device_id.trim() : null;
-        const records = await getMemoryRecords(db, { deviceId, limit, ai, principal });
+        const requestedTeam = typeof body.team === "string" && body.team.trim() ? body.team.trim().slice(0, 120) : null;
+        const effectiveTeam = principal.role === "manager" ? principal.team : principal.role === "employee" ? null : requestedTeam;
+        const records = await getMemoryRecords(db, { deviceId, limit, ai, principal, team: effectiveTeam });
         const queryTimeRange = historyQueryTimeRange(body.question.trim());
         const timeScopedRecords = filterHistoryRecordsByTime(records, queryTimeRange);
         const rankedRecords = rankHistoryRecords(body.question.trim(), timeScopedRecords);
@@ -1298,6 +1304,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           resources,
           time_range: evidenceTimeRange(selectedEvidence),
           query_time_range: queryTimeRange,
+          query_team: effectiveTeam,
           caveats: [answer.caveat || "答案只基于活动元数据和 Memory Summary。"],
           uncertainty: answer.uncertainty || "应用活动只能说明上下文变化，不能单独证明工作效率或绩效。",
           model: answer.model_name || ai.model,

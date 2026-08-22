@@ -286,6 +286,56 @@ test("filters History Skill evidence by the requested time range", async () => {
   });
 });
 
+test("keeps History Skill answers inside the requested team scope", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    async function enroll(employeeId, hostname, eventId, appName) {
+      const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+        method: "POST",
+        headers: adminHeaders,
+        body: JSON.stringify({ employee_id: employeeId }),
+      });
+      const device = await jsonFetch(`${base}/api/agent/enroll`, {
+        method: "POST",
+        body: JSON.stringify({ registration_code: code.body.code, hostname, os_version: "Windows 11", agent_version: "0.1.3" }),
+      });
+      const result = await jsonFetch(`${base}/api/agent/events`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${device.body.device_token}` },
+        body: JSON.stringify({ events: [{ event_id: eventId, occurred_at: new Date().toISOString(), type: "app_session", app_name: appName, process_name: `${appName}.exe`, duration_seconds: 60 }] }),
+      });
+      assert.equal(result.response.status, 202);
+    }
+    await enroll("employee-wei", "WIN-TEAM-WEI", "team-wei-event", "Visual Studio Code");
+    await enroll("employee-lin", "WIN-TEAM-LIN", "team-lin-event", "WPS");
+
+    const teamAnswer = await jsonFetch(`${base}/api/admin/history/ask`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ question: "这个团队最近主要做了什么？", team: "客户与销售团队" }),
+    });
+    assert.equal(teamAnswer.response.status, 200);
+    assert.equal(teamAnswer.body.query_team, "客户与销售团队");
+    assert.ok(teamAnswer.body.evidence.length >= 1);
+    assert.ok(teamAnswer.body.evidence.every((record) => record.employee_team === "客户与销售团队"));
+    assert.ok(teamAnswer.body.evidence.every((record) => record.employee_name !== "Wei"));
+
+    const managerSession = await jsonFetch(`${base}/api/admin/sessions`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ role: "manager", team: "研发与产品中心" }),
+    });
+    const managerAnswer = await jsonFetch(`${base}/api/admin/history/ask`, {
+      method: "POST",
+      headers: { "x-admin-session": managerSession.body.token },
+      body: JSON.stringify({ question: "这个团队最近主要做了什么？", team: "客户与销售团队" }),
+    });
+    assert.equal(managerAnswer.response.status, 200);
+    assert.equal(managerAnswer.body.query_team, "研发与产品中心");
+    assert.ok(managerAnswer.body.evidence.every((record) => record.employee_team === "研发与产品中心"));
+  });
+});
+
 test("classifies project-management and collaboration sources without raw page content", async () => {
   await withServer(async ({ base }) => {
     const code = await jsonFetch(`${base}/api/admin/registration-codes`, {

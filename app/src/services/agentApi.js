@@ -195,6 +195,7 @@ export async function askLiveHistory(question, options = {}) {
     body: JSON.stringify({
       question,
       ...(options.deviceId ? { device_id: options.deviceId } : {}),
+      ...(options.team ? { team: options.team } : {}),
       ...(options.limit ? { limit: options.limit } : {}),
     }),
   });
@@ -214,6 +215,7 @@ export async function askLiveHistory(question, options = {}) {
     citations: body.citations || [],
     resources: body.resources || [],
     timeRange,
+    team: body.query_team || options.team || null,
     caveats: [`${rangeText} · ${contextText} · ${domainText}。不确定性：${uncertainty}`, ...(body.caveats || [])],
     uncertainty,
     model: body.model,
