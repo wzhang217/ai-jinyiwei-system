@@ -144,6 +144,11 @@ function App() {
   useEffect(() => {
     if (!agentApiEnabled) return undefined;
     let cancelled = false;
+    // Do not keep rendering the previous role's records while the new
+    // server-side scope is being established.
+    setLiveRecords(null);
+    setLiveUpdatedAt(null);
+    setLiveError("");
     createAdminSession({
       role,
       employeeId: role === "employee" ? "employee-wei" : undefined,
