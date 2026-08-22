@@ -632,10 +632,10 @@ fn system_idle_seconds() -> u64 {
 }
 
 #[cfg(windows)]
-fn enable_startup(app: &AppHandle) {
+fn enable_startup(_app: &AppHandle) {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
     use winreg::RegKey;
-    if let Ok(executable) = app.path().executable() {
+    if let Ok(executable) = std::env::current_exe() {
         if let Ok(run_key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
             "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
             KEY_WRITE,
