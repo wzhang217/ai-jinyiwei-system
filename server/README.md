@@ -29,6 +29,7 @@ AI_API_URL=https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions
 AI_ENABLED=true
 AI_MAX_REQUESTS_PER_MINUTE=30
 AI_MAX_INPUT_RECORDS=200
+AI_REQUEST_TIMEOUT_MS=20000
 AGENT_ADMIN_TOKEN=dev-admin-token
 ```
 
@@ -42,7 +43,7 @@ AGENT_ADMIN_TOKEN=dev-admin-token
 
 管理后台的“立即刷新”会重新读取 `GET /api/admin/history`，历史记录页的导出会调用 `POST /api/admin/history/export`，服务端返回当前权限范围内的记录并写入 `history_exported` 审计日志。设备列表读取真实心跳；超过策略心跳间隔的设备会被标记为离线，并写入 `agent_offline`，恢复心跳后写入 `agent_online`。
 
-历史记录同时提供 Leaf、连续窗口、小时、每日、个人每周和团队周 Rollup Summary。模型暂时不可用时会先返回规则兜底摘要，并写入 `memory_generation_jobs`，后台会按退避策略重试，最多 5 次。`AI_MAX_REQUESTS_PER_MINUTE` 控制单个服务进程的模型调用预算，超过后暂时使用规则摘要并进入重试队列。
+历史记录同时提供 Leaf、连续窗口、小时、每日、个人每周和团队周 Rollup Summary。模型暂时不可用时会先返回规则兜底摘要，并写入 `memory_generation_jobs`，后台会按退避策略重试，最多 5 次。`AI_MAX_REQUESTS_PER_MINUTE` 控制单个服务进程的模型调用预算，超过后暂时使用规则摘要并进入重试队列。模型请求默认 20 秒超时，超时同样会进入规则兜底和重试流程。
 
 管理员可以先预览再执行数据留存删除，删除活动事件、Leaf/Rollup Summary，并写入审计日志：
 

@@ -136,6 +136,7 @@ export function createAiService({
   promptVersion = DEFAULT_PROMPT_VERSION,
   maxRequestsPerMinute = Number(process.env.AI_MAX_REQUESTS_PER_MINUTE) || 30,
   maxInputRecords = Number(process.env.AI_MAX_INPUT_RECORDS) || 200,
+  requestTimeoutMs = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 20_000,
 } = {}) {
   const canCallModel = Boolean(enabled && apiKey && typeof fetchImpl === "function");
   const callTimestamps = [];
@@ -150,21 +151,36 @@ export function createAiService({
       throw error;
     }
     callTimestamps.push(now);
-    const response = await fetchImpl(apiUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        temperature: 0.2,
-        messages,
-      }),
-    });
-    if (!response.ok) throw new Error(`AI API HTTP ${response.status}`);
-    const body = await response.json();
-    return parseJsonContent(body.choices?.[0]?.message?.content);
+    const timeoutMs = Math.max(1, Number(requestTimeoutMs) || 20_000);
+    const controller = typeof globalThis.AbortController === "function" ? new AbortController() : null;
+    const timeout = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+      const response = await fetchImpl(apiUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0.2,
+          messages,
+        }),
+        ...(controller ? { signal: controller.signal } : {}),
+      });
+      if (!response.ok) throw new Error(`AI API HTTP ${response.status}`);
+      const body = await response.json();
+      return parseJsonContent(body.choices?.[0]?.message?.content);
+    } catch (error) {
+      if (controller?.signal.aborted) {
+        const timeoutError = new Error(`AI API timeout after ${timeoutMs}ms`);
+        timeoutError.code = "ai_timeout";
+        throw timeoutError;
+      }
+      throw error;
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
   }
 
   return {

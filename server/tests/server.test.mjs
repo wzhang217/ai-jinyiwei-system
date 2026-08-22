@@ -363,6 +363,21 @@ test("configures the Qwen 3.7 Plus adapter without sending a real request", asyn
   assert.equal(summary.confidence, 0.9);
 });
 
+test("times out a stuck model request and keeps the safe fallback path", async () => {
+  const ai = createAiService({
+    apiKey: "test-key",
+    requestTimeoutMs: 5,
+    fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener("abort", () => reject(new Error("aborted by test")), { once: true });
+    }),
+    logger: { warn() {} },
+  });
+  const summary = await ai.summarizeMemory({ title: "规则标题", summary: "规则总结" });
+  assert.equal(summary.status, "fallback");
+  assert.equal(summary.retryable, true);
+  assert.equal(summary.model_name, "rules-v1");
+});
+
 test("uses safe fallbacks for optional empty model fields without losing generated status", async () => {
   const ai = createAiService({
     apiKey: "test-key",
