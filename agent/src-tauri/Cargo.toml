@@ -6,6 +6,7 @@ authors = ["AI锦衣卫"]
 edition = "2021"
 
 [build-dependencies]
+ico = "0.5"
 png = "0.17"
 tauri-build = { version = "2", features = [] }
 

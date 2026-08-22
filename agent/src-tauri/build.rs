@@ -35,25 +35,15 @@ fn png_bytes() -> Vec<u8> {
     bytes
 }
 
-fn ico_bytes(png: &[u8]) -> Vec<u8> {
-    let image_offset = 6u32 + 16u32;
-    let mut bytes = Vec::with_capacity(image_offset as usize + png.len());
+fn ico_bytes() -> Vec<u8> {
+    let image = ico::IconImage::from_rgba_data(32, 32, icon_pixels());
+    let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
+    icon_dir.add_entry(ico::IconDirEntry::encode_as_bmp(&image).expect("encode BMP icon entry"));
 
-    // ICONDIR header: reserved, image type (icon), image count.
-    bytes.extend_from_slice(&0u16.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-
-    // One 32x32 PNG-backed icon directory entry.
-    bytes.push(32);
-    bytes.push(32);
-    bytes.push(0);
-    bytes.push(0);
-    bytes.extend_from_slice(&1u16.to_le_bytes());
-    bytes.extend_from_slice(&32u16.to_le_bytes());
-    bytes.extend_from_slice(&(png.len() as u32).to_le_bytes());
-    bytes.extend_from_slice(&image_offset.to_le_bytes());
-    bytes.extend_from_slice(png);
+    let mut bytes = Vec::new();
+    icon_dir
+        .write(Cursor::new(&mut bytes))
+        .expect("write generated ICO icon");
     bytes
 }
 
@@ -63,14 +53,10 @@ fn main() {
     create_dir_all(&icon_dir).expect("create icon directory");
     let png = png_bytes();
     let icon_path = icon_dir.join("icon.png");
-    if !icon_path.exists() {
-        write(&icon_path, &png).expect("write generated PNG icon");
-    }
+    write(&icon_path, &png).expect("write generated PNG icon");
 
     let ico_path = icon_dir.join("icon.ico");
-    if !ico_path.exists() {
-        write(&ico_path, ico_bytes(&png)).expect("write generated ICO icon");
-    }
+    write(&ico_path, ico_bytes()).expect("write generated ICO icon");
 
     tauri_build::build()
 }
