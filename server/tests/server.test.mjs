@@ -146,6 +146,7 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.equal(events.body.events[0].duration_seconds, 120);
     assert.equal(history.body.records.filter((record) => record.record_type === "leaf").length, 2);
     assert.ok(history.body.records.some((record) => record.record_type === "rollup" && record.rollup_scope === "window"));
+    assert.ok(history.body.records.some((record) => record.record_type === "rollup" && record.rollup_scope === "six_hour"));
     assert.ok(history.body.records.some((record) => record.record_type === "rollup" && record.rollup_scope === "hourly"));
     assert.ok(history.body.records.some((record) => record.record_type === "rollup" && record.rollup_scope === "daily"));
     assert.ok(history.body.records.some((record) => record.record_type === "rollup" && record.rollup_scope === "weekly"));
@@ -312,6 +313,9 @@ test("splits long foreground sessions into ten-minute Memory Summary windows", a
     assert.ok(leaves.every((record) => record.context_switches === 0));
     assert.ok(leaves.every((record) => record.source_event_ids.length === 1 && record.source_event_ids[0] === "long-session"));
     assert.ok(history.body.records.some((record) => record.record_type === "rollup" && record.rollup_scope === "window"));
+    const sixHour = history.body.records.find((record) => record.record_type === "rollup" && record.rollup_scope === "six_hour");
+    assert.ok(sixHour);
+    assert.equal(sixHour.source_record_ids.length, 3);
   });
 });
 

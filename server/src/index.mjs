@@ -858,6 +858,30 @@ function buildRollupRecords(leafRecords, scope = "window") {
       }
     }
     flush();
+  } else if (scope === "six_hour") {
+    // Codex-style long memories are rolling windows over one contiguous
+    // work arc, rather than fixed clock buckets. Keep a partial window so a
+    // currently active work arc can appear before six hours are complete.
+    let current = null;
+    const flush = () => {
+      if (current && current.records.length > 1) groups.push(current);
+      current = null;
+    };
+    for (const record of sorted) {
+      const startMs = Date.parse(record.started_at);
+      const endMs = Date.parse(record.ended_at);
+      const gapSeconds = current ? Math.max(0, (startMs - current.endMs) / 1000) : Infinity;
+      const spanSeconds = current ? Math.max(0, (startMs - current.startMs) / 1000) : Infinity;
+      const day = record.started_at.slice(0, 10);
+      if (!current || current.deviceId !== record.device_id || current.day !== day || gapSeconds > 30 * 60 || spanSeconds >= 6 * 60 * 60) {
+        flush();
+        current = { deviceId: record.device_id, employeeId: record.user_id, startMs, endMs, records: [record], day };
+      } else {
+        current.endMs = Math.max(current.endMs, endMs);
+        current.records.push(record);
+      }
+    }
+    flush();
   } else {
     const grouped = new Map();
     for (const record of sorted) {
@@ -897,7 +921,7 @@ function buildRollupRecords(leafRecords, scope = "window") {
     const durationSeconds = records.reduce((sum, record) => sum + Math.max(0, Number(record.duration_seconds) || 0), 0);
     const contextTitle = contextLabels.length ? contextLabels.slice(0, 2).join("、") : contextKinds.slice(0, 3).join("、") || "连续工作";
     const readableDuration = formatDuration(durationSeconds);
-    const scopeLabel = scope === "hourly" ? "小时汇总" : scope === "daily" ? "每日汇总" : scope === "weekly" ? "每周汇总" : scope === "team_weekly" ? "团队周汇总" : "连续工作汇总";
+    const scopeLabel = scope === "six_hour" ? "6 小时汇总" : scope === "hourly" ? "小时汇总" : scope === "daily" ? "每日汇总" : scope === "weekly" ? "每周汇总" : scope === "team_weekly" ? "团队周汇总" : "连续工作汇总";
     const isTeamRollup = scope === "team_weekly";
     const subjectName = isTeamRollup ? `${first.employee_team || "未分组"}团队` : first.employee_name;
     return {
@@ -1145,7 +1169,7 @@ export async function processMemoryGenerationJobs(db, ai, logger = console, { li
 async function getMemoryRecords(db, { deviceId = null, limit = 200, ai, principal = null, team = null }) {
   const leafRecords = await materializeMemoryRecords(db, buildHistoryRecords(db, { deviceId, limit, principal, team }), ai);
   const rollupRecords = [];
-  for (const scope of ["window", "hourly", "daily", "weekly", "team_weekly"]) {
+  for (const scope of ["window", "six_hour", "hourly", "daily", "weekly", "team_weekly"]) {
     rollupRecords.push(...await materializeMemoryRecords(db, buildRollupRecords(leafRecords, scope), ai));
   }
   return [...leafRecords, ...rollupRecords]
