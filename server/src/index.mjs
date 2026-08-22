@@ -543,9 +543,14 @@ function createRequestHandler({ db, adminToken, logger = console }) {
         const validationError = validateEvents(body);
         if (validationError) return sendError(response, 400, validationError);
         const insert = db.prepare(`
-          INSERT OR IGNORE INTO events
+          INSERT INTO events
             (event_id, device_id, occurred_at, type, app_name, process_name, context_label, web_domain, duration_seconds, received_at)
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(event_id) DO UPDATE SET
+            context_label = COALESCE(excluded.context_label, events.context_label),
+            web_domain = COALESCE(excluded.web_domain, events.web_domain),
+            duration_seconds = MAX(events.duration_seconds, excluded.duration_seconds),
+            received_at = excluded.received_at
         `);
         for (const event of body.events) {
           insert.run(event.event_id, device.id, event.occurred_at, event.type, event.app_name, event.process_name, event.context_label || null, event.web_domain ? event.web_domain.trim().toLowerCase() : null, event.duration_seconds, isoNow());

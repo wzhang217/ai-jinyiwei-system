@@ -14,10 +14,11 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
-const AGENT_VERSION: &str = "0.1.1";
+const AGENT_VERSION: &str = "0.1.2";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const MAX_PENDING_EVENTS: i64 = 10_000;
 const MAX_EVENT_DURATION_SECONDS: i64 = 86_400;
+const ACTIVE_SESSION_CHECKPOINT_SECONDS: i64 = 60;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Policy {
@@ -85,12 +86,14 @@ struct AgentEvent {
 
 #[derive(Clone, Debug)]
 struct ActiveSession {
+    event_id: String,
     app_name: String,
     process_name: String,
     context_label: Option<String>,
     web_domain: Option<String>,
     started_at: Instant,
     occurred_at: String,
+    last_emitted_duration: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -268,7 +271,7 @@ impl Core {
 
     fn queue_event(&mut self, event: AgentEvent) -> Result<(), String> {
         self.db.execute(
-            "INSERT OR IGNORE INTO events (event_id, occurred_at, event_type, app_name, process_name, context_label, web_domain, duration_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO events (event_id, occurred_at, event_type, app_name, process_name, context_label, web_domain, duration_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(event_id) DO UPDATE SET context_label = excluded.context_label, web_domain = excluded.web_domain, duration_seconds = MAX(events.duration_seconds, excluded.duration_seconds)",
             params![event.event_id, event.occurred_at, event.event_type, event.app_name, event.process_name, event.context_label, event.web_domain, event.duration_seconds],
         ).map_err(|error| error.to_string())?;
         let removed = self.db.execute(
@@ -394,7 +397,7 @@ impl Core {
         };
         let duration = ended_at.duration_since(session.started_at).as_secs() as i64;
         self.queue_event(AgentEvent {
-            event_id: Uuid::new_v4().to_string(),
+            event_id: session.event_id,
             occurred_at: session.occurred_at,
             event_type: "app_session".into(),
             app_name: session.app_name,
@@ -403,6 +406,51 @@ impl Core {
             web_domain: session.web_domain,
             duration_seconds: duration,
         })
+    }
+
+    fn checkpoint_session(&mut self, now: Instant) -> Result<(), String> {
+        let Some((
+            event_id,
+            app_name,
+            process_name,
+            context_label,
+            web_domain,
+            occurred_at,
+            started_at,
+            last_emitted_duration,
+        )) = self.active_session.as_ref().map(|session| {
+            (
+                session.event_id.clone(),
+                session.app_name.clone(),
+                session.process_name.clone(),
+                session.context_label.clone(),
+                session.web_domain.clone(),
+                session.occurred_at.clone(),
+                session.started_at,
+                session.last_emitted_duration,
+            )
+        })
+        else {
+            return Ok(());
+        };
+        let duration = now.duration_since(started_at).as_secs() as i64;
+        if duration < ACTIVE_SESSION_CHECKPOINT_SECONDS || duration <= last_emitted_duration {
+            return Ok(());
+        }
+        self.queue_event(AgentEvent {
+            event_id,
+            occurred_at,
+            event_type: "app_session".into(),
+            app_name,
+            process_name,
+            context_label,
+            web_domain,
+            duration_seconds: duration,
+        })?;
+        if let Some(session) = self.active_session.as_mut() {
+            session.last_emitted_duration = duration;
+        }
+        Ok(())
     }
 
     fn enroll_from_code(
@@ -514,15 +562,18 @@ impl Core {
                 if changed {
                     let _ = self.finish_session(now);
                     self.active_session = Some(ActiveSession {
+                        event_id: Uuid::new_v4().to_string(),
                         app_name: activity.app_name,
                         process_name: activity.process_name,
                         context_label: activity.context_label,
                         web_domain: activity.web_domain,
                         started_at: now,
                         occurred_at: Utc::now().to_rfc3339(),
+                        last_emitted_duration: 0,
                     });
                 }
             }
+            let _ = self.checkpoint_session(now);
         }
 
         if now.duration_since(self.last_heartbeat).as_secs()

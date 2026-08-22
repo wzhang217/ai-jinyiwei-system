@@ -66,8 +66,10 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.equal(rejectedDomain.response.status, 400);
     const first = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers, body: JSON.stringify({ events: [event] }) });
     const duplicate = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers, body: JSON.stringify({ events: [event] }) });
+    const checkpoint = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers, body: JSON.stringify({ events: [{ ...event, duration_seconds: 120 }] }) });
     assert.equal(first.response.status, 202);
     assert.equal(duplicate.response.status, 202);
+    assert.equal(checkpoint.response.status, 202);
 
     const adjacentEvent = {
       event_id: "event-2",
@@ -92,6 +94,7 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.equal(devices.body.devices[0].status, "online");
     assert.equal(events.body.events.length, 2);
     assert.equal(events.body.events[0].process_name, "Code.exe");
+    assert.equal(events.body.events[0].duration_seconds, 120);
     assert.equal(history.body.records.length, 1);
     assert.deepEqual(history.body.records[0].applications.sort(), ["chrome", "vscode"]);
     assert.deepEqual(history.body.records[0].context_kinds.sort(), ["开发", "浏览器"]);
