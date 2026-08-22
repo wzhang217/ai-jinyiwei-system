@@ -1,0 +1,11 @@
+{
+  "name": "ai-jinyiwei-agent-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --experimental-sqlite src/index.mjs",
+    "dev": "node --watch --experimental-sqlite src/index.mjs",
+    "test": "node --test --experimental-sqlite tests/server.test.mjs"
+  }
+}

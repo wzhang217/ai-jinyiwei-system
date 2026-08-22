@@ -1,0 +1,62 @@
+name: Build AI锦衣卫 Windows Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: "Agent 局域网服务地址；也可以使用仓库变量 AGENT_SERVER_URL"
+        required: false
+        type: string
+  push:
+    paths:
+      - "agent/**"
+      - ".github/workflows/build-agent-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-msi:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: agent
+    env:
+      AGENT_SERVER_URL: ${{ github.event_name == 'workflow_dispatch' && inputs.server_url || vars.AGENT_SERVER_URL || '' }}
+      AGENT_REGISTRATION_CODE: ${{ github.event_name == 'workflow_dispatch' && secrets.AGENT_REGISTRATION_CODE || '' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: agent/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Write one-click enrollment config
+        shell: pwsh
+        run: |
+          $config = @{
+            server_url = $env:AGENT_SERVER_URL
+            registration_code = $env:AGENT_REGISTRATION_CODE
+          } | ConvertTo-Json -Compress
+          Set-Content -Path "src-tauri/resources/agent-config.json" -Value $config -Encoding UTF8
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build MSI
+        run: npm run tauri:build
+
+      - name: Upload MSI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-jinyiwei-agent-msi
+          path: agent/src-tauri/target/release/bundle/msi/*.msi
+          if-no-files-found: error
+          retention-days: 14

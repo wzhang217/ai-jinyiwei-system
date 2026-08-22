@@ -1,0 +1,8 @@
+node_modules/
+dist/
+server/data/
+server/*.sqlite
+server/*.sqlite-shm
+server/*.sqlite-wal
+agent/src-tauri/target/
+agent/src-tauri/gen/

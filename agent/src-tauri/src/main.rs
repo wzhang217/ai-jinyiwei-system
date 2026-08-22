@@ -1,0 +1,757 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+use chrono::{Local, Timelike, Utc};
+use reqwest::blocking::Client;
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use uuid::Uuid;
+
+const AGENT_VERSION: &str = "0.1.0";
+const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
+const MAX_PENDING_EVENTS: i64 = 10_000;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Policy {
+    idle_threshold_seconds: u64,
+    heartbeat_interval_seconds: u64,
+    work_hours_start: String,
+    work_hours_end: String,
+    version: u64,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            idle_threshold_seconds: 300,
+            heartbeat_interval_seconds: 60,
+            work_hours_start: "09:00".into(),
+            work_hours_end: "18:00".into(),
+            version: 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AgentStatus {
+    state: String,
+    server_url: Option<String>,
+    device_id: Option<String>,
+    employee_name: Option<String>,
+    employee_team: Option<String>,
+    last_sync_at: Option<String>,
+    queued_events: usize,
+    last_error: Option<String>,
+    agent_version: String,
+    policy: Policy,
+}
+
+impl Default for AgentStatus {
+    fn default() -> Self {
+        Self {
+            state: "unregistered".into(),
+            server_url: None,
+            device_id: None,
+            employee_name: None,
+            employee_team: None,
+            last_sync_at: None,
+            queued_events: 0,
+            last_error: None,
+            agent_version: AGENT_VERSION.into(),
+            policy: Policy::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AgentEvent {
+    event_id: String,
+    occurred_at: String,
+    event_type: String,
+    app_name: String,
+    process_name: String,
+    duration_seconds: i64,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveSession {
+    app_name: String,
+    process_name: String,
+    started_at: Instant,
+    occurred_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapConfig {
+    server_url: Option<String>,
+    registration_code: Option<String>,
+}
+
+struct Core {
+    db: Connection,
+    http: Client,
+    status: AgentStatus,
+    token: Option<String>,
+    active_session: Option<ActiveSession>,
+    idle_started: Option<Instant>,
+    last_heartbeat: Instant,
+    pending_registration_code: Option<String>,
+    last_auto_enroll_attempt: Instant,
+}
+
+struct AgentState {
+    core: Arc<Mutex<Core>>,
+}
+
+#[derive(Serialize)]
+struct EnrollRequest {
+    registration_code: String,
+    hostname: String,
+    os_version: String,
+    agent_version: String,
+}
+
+#[derive(Deserialize)]
+struct EnrollResponse {
+    device_id: String,
+    device_token: String,
+    employee: Employee,
+    policy: Policy,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct Employee {
+    id: String,
+    name: String,
+    team: String,
+}
+
+#[derive(Serialize)]
+struct EventsRequest {
+    events: Vec<AgentEventPayload>,
+}
+
+#[derive(Clone, Serialize)]
+struct AgentEventPayload {
+    event_id: String,
+    occurred_at: String,
+    #[serde(rename = "type")]
+    event_type: String,
+    app_name: String,
+    process_name: String,
+    duration_seconds: i64,
+}
+
+#[derive(Serialize)]
+struct HeartbeatRequest {
+    agent_version: String,
+    queued_events: usize,
+}
+
+#[derive(Deserialize)]
+struct HeartbeatResponse {
+    policy: Policy,
+}
+
+impl Core {
+    fn new(db_path: PathBuf) -> Result<Self, String> {
+        if let Some(parent) = db_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let db = Connection::open(db_path).map_err(|error| error.to_string())?;
+        db.execute_batch(
+            "CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS events (
+               event_id TEXT PRIMARY KEY,
+               occurred_at TEXT NOT NULL,
+               event_type TEXT NOT NULL,
+               app_name TEXT NOT NULL,
+               process_name TEXT NOT NULL,
+               duration_seconds INTEGER NOT NULL,
+               uploaded INTEGER NOT NULL DEFAULT 0
+             );",
+        )
+        .map_err(|error| error.to_string())?;
+
+        let server_url = read_config(&db, "server_url");
+        let device_id = read_config(&db, "device_id");
+        let employee_name = read_config(&db, "employee_name");
+        let employee_team = read_config(&db, "employee_team");
+        let token = device_id.as_ref().and_then(|id| load_secret(id));
+        let mut status = AgentStatus::default();
+        status.server_url = server_url;
+        status.device_id = device_id;
+        status.employee_name = employee_name;
+        status.employee_team = employee_team;
+        status.queued_events = pending_count(&db);
+        if status.device_id.is_some() && token.is_some() {
+            status.state = "offline".into();
+        }
+
+        Ok(Self {
+            db,
+            http: Client::builder()
+                .timeout(Duration::from_secs(8))
+                .build()
+                .map_err(|error| error.to_string())?,
+            status,
+            token,
+            active_session: None,
+            idle_started: None,
+            last_heartbeat: Instant::now() - Duration::from_secs(60),
+            pending_registration_code: None,
+            last_auto_enroll_attempt: Instant::now() - Duration::from_secs(60),
+        })
+    }
+
+    fn load_bootstrap(&mut self, resource_dir: PathBuf) {
+        if self.status.device_id.is_some() || self.token.is_some() {
+            return;
+        }
+        let config_path = resource_dir.join("agent-config.json");
+        let Ok(contents) = fs::read_to_string(config_path) else {
+            return;
+        };
+        let Ok(config) = serde_json::from_str::<BootstrapConfig>(&contents) else {
+            self.status.last_error = Some("安装包注册配置无法读取".into());
+            self.status.state = "error".into();
+            return;
+        };
+        if let Some(server_url) = config.server_url.filter(|value| !value.trim().is_empty()) {
+            let normalized = server_url.trim().trim_end_matches('/').to_string();
+            self.status.server_url = Some(normalized.clone());
+            let _ = self.save_config("server_url", &normalized);
+        }
+        self.pending_registration_code = config
+            .registration_code
+            .filter(|value| !value.trim().is_empty());
+    }
+
+    fn save_config(&self, key: &str, value: &str) -> Result<(), String> {
+        self.db.execute("INSERT INTO config (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, value]).map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn clear_config(&self) -> Result<(), String> {
+        self.db
+            .execute("DELETE FROM config", [])
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    fn queue_event(&mut self, event: AgentEvent) -> Result<(), String> {
+        self.db.execute(
+            "INSERT OR IGNORE INTO events (event_id, occurred_at, event_type, app_name, process_name, duration_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![event.event_id, event.occurred_at, event.event_type, event.app_name, event.process_name, event.duration_seconds],
+        ).map_err(|error| error.to_string())?;
+        let removed = self.db.execute(
+            "DELETE FROM events WHERE uploaded = 0 AND event_id IN (SELECT event_id FROM events WHERE uploaded = 0 ORDER BY occurred_at ASC LIMIT -1 OFFSET ?1)",
+            params![MAX_PENDING_EVENTS],
+        ).map_err(|error| error.to_string())?;
+        if removed > 0 {
+            self.status.last_error = Some("本地缓存已达到上限，最早活动记录已被丢弃".into());
+        }
+        self.status.queued_events = pending_count(&self.db);
+        Ok(())
+    }
+
+    fn pending_events(&self, limit: usize) -> Result<Vec<AgentEventPayload>, String> {
+        let mut statement = self.db.prepare("SELECT event_id, occurred_at, event_type, app_name, process_name, duration_seconds FROM events WHERE uploaded = 0 ORDER BY occurred_at ASC LIMIT ?1").map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map(params![limit as i64], |row| {
+                Ok(AgentEventPayload {
+                    event_id: row.get(0)?,
+                    occurred_at: row.get(1)?,
+                    event_type: row.get(2)?,
+                    app_name: row.get(3)?,
+                    process_name: row.get(4)?,
+                    duration_seconds: row.get(5)?,
+                })
+            })
+            .map_err(|error| error.to_string())?;
+        rows.map(|row| row.map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    fn mark_uploaded(&mut self, ids: &[String]) -> Result<(), String> {
+        for id in ids {
+            self.db
+                .execute("DELETE FROM events WHERE event_id = ?1", params![id])
+                .map_err(|error| error.to_string())?;
+        }
+        self.status.queued_events = pending_count(&self.db);
+        Ok(())
+    }
+
+    fn api_url(&self, path: &str) -> Result<String, String> {
+        self.status
+            .server_url
+            .clone()
+            .map(|url| format!("{}{}", url.trim_end_matches('/'), path))
+            .ok_or_else(|| "server URL is not configured".into())
+    }
+
+    fn flush_events(&mut self) -> Result<(), String> {
+        if self.token.is_none()
+            || self.status.device_id.is_none()
+            || self.status.server_url.is_none()
+            || self.status.queued_events == 0
+        {
+            return Ok(());
+        }
+        let events = self.pending_events(100)?;
+        if events.is_empty() {
+            return Ok(());
+        }
+        let token = self.token.clone().unwrap_or_default();
+        let response = self
+            .http
+            .post(self.api_url("/api/agent/events")?)
+            .bearer_auth(token)
+            .json(&EventsRequest {
+                events: events.clone(),
+            })
+            .send()
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("事件上传失败：HTTP {}", response.status()));
+        }
+        self.mark_uploaded(
+            &events
+                .iter()
+                .map(|event| event.event_id.clone())
+                .collect::<Vec<_>>(),
+        )?;
+        Ok(())
+    }
+
+    fn send_heartbeat(&mut self) -> Result<(), String> {
+        if self.token.is_none()
+            || self.status.device_id.is_none()
+            || self.status.server_url.is_none()
+        {
+            return Ok(());
+        }
+        let token = self.token.clone().unwrap_or_default();
+        let response = self
+            .http
+            .post(self.api_url("/api/agent/heartbeat")?)
+            .bearer_auth(token)
+            .json(&HeartbeatRequest {
+                agent_version: AGENT_VERSION.into(),
+                queued_events: self.status.queued_events,
+            })
+            .send()
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("心跳同步失败：HTTP {}", response.status()));
+        }
+        let body: HeartbeatResponse = response.json().map_err(|error| error.to_string())?;
+        self.status.policy = body.policy;
+        self.status.last_sync_at = Some(Utc::now().to_rfc3339());
+        self.status.last_error = None;
+        self.status.state = "online".into();
+        self.last_heartbeat = Instant::now();
+        Ok(())
+    }
+
+    fn finish_session(&mut self, ended_at: Instant) -> Result<(), String> {
+        let Some(session) = self.active_session.take() else {
+            return Ok(());
+        };
+        let duration = ended_at.duration_since(session.started_at).as_secs() as i64;
+        self.queue_event(AgentEvent {
+            event_id: Uuid::new_v4().to_string(),
+            occurred_at: session.occurred_at,
+            event_type: "app_session".into(),
+            app_name: session.app_name,
+            process_name: session.process_name,
+            duration_seconds: duration,
+        })
+    }
+
+    fn enroll_from_code(
+        &mut self,
+        server_url: &str,
+        registration_code: &str,
+    ) -> Result<(), String> {
+        let normalized_url = server_url.trim().trim_end_matches('/').to_string();
+        if normalized_url.is_empty() {
+            return Err("服务地址不能为空".into());
+        }
+        let hostname = hostname::get()
+            .map_err(|error| error.to_string())?
+            .to_string_lossy()
+            .into_owned();
+        let response = self
+            .http
+            .post(format!("{normalized_url}/api/agent/enroll"))
+            .json(&EnrollRequest {
+                registration_code: registration_code.trim().to_uppercase(),
+                hostname,
+                os_version: "Windows 10/11".into(),
+                agent_version: AGENT_VERSION.into(),
+            })
+            .send()
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("注册失败：HTTP {}", response.status()));
+        }
+        let enrolled: EnrollResponse = response.json().map_err(|error| error.to_string())?;
+        store_secret(&enrolled.device_id, &enrolled.device_token)?;
+        self.save_config("server_url", &normalized_url)?;
+        self.save_config("device_id", &enrolled.device_id)?;
+        self.save_config("employee_name", &enrolled.employee.name)?;
+        self.save_config("employee_team", &enrolled.employee.team)?;
+        self.token = Some(enrolled.device_token);
+        self.status.server_url = Some(normalized_url);
+        self.status.device_id = Some(enrolled.device_id);
+        self.status.employee_name = Some(enrolled.employee.name);
+        self.status.employee_team = Some(enrolled.employee.team);
+        self.status.policy = enrolled.policy;
+        self.status.state = "online".into();
+        self.status.last_error = None;
+        self.status.last_sync_at = Some(Utc::now().to_rfc3339());
+        self.pending_registration_code = None;
+        Ok(())
+    }
+
+    fn try_auto_enroll(&mut self) {
+        let Some(code) = self.pending_registration_code.clone() else {
+            return;
+        };
+        let Some(server_url) = self.status.server_url.clone() else {
+            self.status.state = "error".into();
+            self.status.last_error = Some("安装包缺少服务地址".into());
+            return;
+        };
+        if self.last_auto_enroll_attempt.elapsed() < Duration::from_secs(30) {
+            return;
+        }
+        self.last_auto_enroll_attempt = Instant::now();
+        if let Err(error) = self.enroll_from_code(&server_url, &code) {
+            self.status.state = "error".into();
+            self.status.last_error = Some(error);
+        }
+    }
+
+    fn tick(&mut self) {
+        if self.status.device_id.is_none() || self.token.is_none() {
+            self.try_auto_enroll();
+            self.status.queued_events = pending_count(&self.db);
+            return;
+        }
+
+        let now = Instant::now();
+        if !within_work_hours(&self.status.policy) {
+            let _ = self.finish_session(now);
+            self.idle_started = None;
+        } else {
+            let idle_seconds = system_idle_seconds();
+            let idle_limit = self.status.policy.idle_threshold_seconds;
+            if idle_seconds >= idle_limit {
+                if self.idle_started.is_none() {
+                    let _ = self.finish_session(now);
+                    self.idle_started = Some(now);
+                    let _ = self.queue_event(AgentEvent {
+                        event_id: Uuid::new_v4().to_string(),
+                        occurred_at: Utc::now().to_rfc3339(),
+                        event_type: "idle".into(),
+                        app_name: "Idle".into(),
+                        process_name: "system".into(),
+                        duration_seconds: idle_seconds as i64,
+                    });
+                }
+            } else if let Some((app_name, process_name)) = foreground_application() {
+                self.idle_started = None;
+                let changed = self
+                    .active_session
+                    .as_ref()
+                    .map(|session| session.process_name != process_name)
+                    .unwrap_or(true);
+                if changed {
+                    let _ = self.finish_session(now);
+                    self.active_session = Some(ActiveSession {
+                        app_name,
+                        process_name,
+                        started_at: now,
+                        occurred_at: Utc::now().to_rfc3339(),
+                    });
+                }
+            }
+        }
+
+        if now.duration_since(self.last_heartbeat).as_secs()
+            >= self.status.policy.heartbeat_interval_seconds
+        {
+            let result = self.flush_events().and_then(|_| self.send_heartbeat());
+            if let Err(error) = result {
+                self.status.state = "offline".into();
+                self.status.last_error = Some(error);
+            }
+        }
+        self.status.queued_events = pending_count(&self.db);
+    }
+}
+
+fn read_config(db: &Connection, key: &str) -> Option<String> {
+    db.query_row(
+        "SELECT value FROM config WHERE key = ?1",
+        params![key],
+        |row| row.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+fn pending_count(db: &Connection) -> usize {
+    db.query_row(
+        "SELECT COUNT(*) FROM events WHERE uploaded = 0",
+        [],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+    .max(0) as usize
+}
+
+fn within_work_hours(policy: &Policy) -> bool {
+    fn parse_minutes(value: &str) -> Option<u32> {
+        let mut parts = value.split(':');
+        let hour = parts.next()?.parse::<u32>().ok()?;
+        let minute = parts.next()?.parse::<u32>().ok()?;
+        (hour < 24 && minute < 60).then_some(hour * 60 + minute)
+    }
+    let Some(start) = parse_minutes(&policy.work_hours_start) else {
+        return true;
+    };
+    let Some(end) = parse_minutes(&policy.work_hours_end) else {
+        return true;
+    };
+    let now = Local::now().time();
+    let current = now.hour() * 60 + now.minute();
+    current >= start && current < end
+}
+
+fn store_secret(device_id: &str, token: &str) -> Result<(), String> {
+    keyring::Entry::new(KEYRING_SERVICE, device_id)
+        .map_err(|error| error.to_string())?
+        .set_password(token)
+        .map_err(|error| error.to_string())
+}
+
+fn load_secret(device_id: &str) -> Option<String> {
+    keyring::Entry::new(KEYRING_SERVICE, device_id)
+        .ok()?
+        .get_password()
+        .ok()
+}
+
+fn remove_secret(device_id: &str) {
+    if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, device_id) {
+        let _ = entry.delete_credential();
+    }
+}
+
+#[cfg(windows)]
+fn foreground_application() -> Option<(String, String)> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowThreadProcessId,
+    };
+
+    unsafe {
+        let window = GetForegroundWindow();
+        if window.is_null() {
+            return None;
+        }
+        let mut process_id = 0u32;
+        GetWindowThreadProcessId(window, &mut process_id);
+        if process_id == 0 {
+            return None;
+        }
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+        if handle.is_null() {
+            return None;
+        }
+        let mut buffer = [0u16; 1024];
+        let mut length = buffer.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length);
+        CloseHandle(handle);
+        if ok == 0 || length == 0 {
+            return None;
+        }
+        let path = OsString::from_wide(&buffer[..length as usize])
+            .to_string_lossy()
+            .into_owned();
+        let process_name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
+        Some((
+            process_name.trim_end_matches(".exe").to_string(),
+            process_name,
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+fn foreground_application() -> Option<(String, String)> {
+    None
+}
+
+#[cfg(windows)]
+fn system_idle_seconds() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::GetTickCount64;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+    unsafe {
+        let mut info = LASTINPUTINFO {
+            cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+            dwTime: 0,
+        };
+        if GetLastInputInfo(&mut info) == 0 {
+            return 0;
+        }
+        let now_ms = GetTickCount64();
+        now_ms.saturating_sub(info.dwTime as u64) / 1000
+    }
+}
+
+#[cfg(not(windows))]
+fn system_idle_seconds() -> u64 {
+    0
+}
+
+#[cfg(windows)]
+fn enable_startup(app: &AppHandle) {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
+    use winreg::RegKey;
+    if let Ok(executable) = app.path().executable() {
+        if let Ok(run_key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            KEY_WRITE,
+        ) {
+            let command = format!("\"{}\"", executable.to_string_lossy());
+            let _ = run_key.set_value("AIJinyiweiAgent", &command);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn enable_startup(_app: &AppHandle) {}
+
+#[tauri::command]
+fn get_agent_status(state: State<'_, AgentState>) -> Result<AgentStatus, String> {
+    Ok(state
+        .core
+        .lock()
+        .map_err(|error| error.to_string())?
+        .status
+        .clone())
+}
+
+#[tauri::command]
+fn enroll_agent(
+    server_url: String,
+    registration_code: String,
+    state: State<'_, AgentState>,
+) -> Result<AgentStatus, String> {
+    let mut core = state.core.lock().map_err(|error| error.to_string())?;
+    core.enroll_from_code(&server_url, &registration_code)?;
+    Ok(core.status.clone())
+}
+
+#[tauri::command]
+fn clear_registration(state: State<'_, AgentState>) -> Result<AgentStatus, String> {
+    let mut core = state.core.lock().map_err(|error| error.to_string())?;
+    if let Some(device_id) = core.status.device_id.clone() {
+        remove_secret(&device_id);
+    }
+    core.clear_config()?;
+    core.token = None;
+    core.status = AgentStatus::default();
+    Ok(core.status.clone())
+}
+
+fn start_worker(app: AppHandle, core: Arc<Mutex<Core>>) {
+    thread::spawn(move || loop {
+        if let Ok(mut runtime) = core.lock() {
+            runtime.tick();
+            let _ = app.emit("agent-status", runtime.status.clone());
+        }
+        thread::sleep(Duration::from_secs(1));
+    });
+}
+
+fn create_tray(app: &AppHandle) -> Result<(), tauri::Error> {
+    let show = MenuItem::with_id(app, "show", "打开 Agent", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "退出 Agent", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+    TrayIconBuilder::with_id("main")
+        .menu(&menu)
+        .tooltip("AI锦衣卫 Agent")
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .build(app)?;
+    Ok(())
+}
+
+pub fn run() {
+    tauri::Builder::default()
+        .setup(|app| {
+            let data_dir = app
+                .path()
+                .app_data_dir()
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
+            let mut runtime = Core::new(data_dir.join("agent.sqlite")).map_err(|error| {
+                Box::new(std::io::Error::new(std::io::ErrorKind::Other, error))
+                    as Box<dyn std::error::Error>
+            })?;
+            let resource_dir = app
+                .path()
+                .resource_dir()
+                .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
+            runtime.load_bootstrap(resource_dir);
+            let core = Arc::new(Mutex::new(runtime));
+            app.manage(AgentState { core: core.clone() });
+            enable_startup(app.handle());
+            create_tray(app.handle())?;
+            start_worker(app.handle().clone(), core);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_agent_status,
+            enroll_agent,
+            clear_registration
+        ])
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running AI锦衣卫 Agent");
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn main() {
+    run();
+}
