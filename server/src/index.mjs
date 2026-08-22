@@ -49,6 +49,7 @@ const hash = (value) => createHash("sha256").update(value).digest("hex");
 const newId = (prefix) => `${prefix}_${randomBytes(12).toString("hex")}`;
 const newToken = () => randomBytes(32).toString("base64url");
 const newRegistrationCode = () => `JY-${randomBytes(5).toString("hex").toUpperCase()}`;
+const newBrowserPairingCode = () => `BP-${randomBytes(5).toString("hex").toUpperCase()}`;
 
 function createSchema(db) {
   db.exec(`
@@ -69,6 +70,25 @@ function createSchema(db) {
       expires_at TEXT NOT NULL,
       used_at TEXT,
       created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS browser_pairing_codes (
+      id TEXT PRIMARY KEY,
+      code_hash TEXT NOT NULL UNIQUE,
+      device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+      expires_at TEXT NOT NULL,
+      used_at TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS browser_tokens (
+      id TEXT PRIMARY KEY,
+      token_hash TEXT NOT NULL UNIQUE,
+      device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+      browser_name TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      revoked_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS devices (
@@ -308,11 +328,21 @@ function bearerToken(request) {
 function deviceFromRequest(db, request) {
   const token = bearerToken(request);
   if (!token) return null;
-  return db.prepare(`
+  const device = db.prepare(`
     SELECT d.*, e.name AS employee_name, e.team AS employee_team
     FROM devices d JOIN employees e ON e.id = d.employee_id
     WHERE d.token_hash = ? AND d.disabled_at IS NULL
   `).get(hash(token));
+  if (device) return { ...device, auth_kind: "device" };
+  const browser = db.prepare(`
+    SELECT d.*, e.name AS employee_name, e.team AS employee_team,
+      bt.browser_name, bt.expires_at AS browser_token_expires_at
+    FROM browser_tokens bt
+    JOIN devices d ON d.id = bt.device_id
+    JOIN employees e ON e.id = d.employee_id
+    WHERE bt.token_hash = ? AND bt.revoked_at IS NULL AND bt.expires_at > ? AND d.disabled_at IS NULL
+  `).get(hash(token), isoNow());
+  return browser ? { ...browser, auth_kind: "browser" } : null;
 }
 
 function recordAudit(db, action, actor, target, detail = "") {
@@ -1418,9 +1448,64 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         });
       }
 
+      if (method === "POST" && url.pathname === "/api/agent/browser-pairing-codes") {
+        const device = deviceFromRequest(db, request);
+        if (!device || device.auth_kind !== "device") return sendError(response, 401, "registered device token required", "unauthorized");
+        const code = newBrowserPairingCode();
+        const now = isoNow();
+        const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
+        db.prepare(
+          "INSERT INTO browser_pairing_codes (id, code_hash, device_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
+        ).run(newId("browser_pair"), hash(code), device.id, expiresAt, now);
+        recordAudit(db, "browser_pairing_code_created", device.employee_name, device.id, "short-lived browser pairing code created");
+        return sendJson(response, 201, { code, expires_at: expiresAt, device_id: device.id });
+      }
+
+      if (method === "POST" && url.pathname === "/api/agent/browser-pair") {
+        const body = await readJson(request);
+        const pairingCode = typeof body.pairing_code === "string" ? body.pairing_code.trim().toUpperCase() : "";
+        if (!/^BP-[A-F0-9]{10}$/.test(pairingCode)) return sendError(response, 400, "pairing_code is invalid", "invalid_pairing_code");
+        const pairing = db.prepare(`
+          SELECT bpc.id, bpc.device_id, bpc.expires_at, d.employee_id, d.hostname,
+            e.name AS employee_name, e.team AS employee_team
+          FROM browser_pairing_codes bpc
+          JOIN devices d ON d.id = bpc.device_id
+          JOIN employees e ON e.id = d.employee_id
+          WHERE bpc.code_hash = ? AND bpc.used_at IS NULL AND d.disabled_at IS NULL
+        `).get(hash(pairingCode));
+        if (!pairing) return sendError(response, 400, "pairing code is invalid or already used", "invalid_pairing_code");
+        if (Date.parse(pairing.expires_at) <= Date.now()) return sendError(response, 400, "pairing code has expired", "expired_pairing_code");
+        const requestedBrowserName = typeof body.browser_name === "string" ? body.browser_name.trim() : "";
+        const browserName = requestedBrowserName && !/[\r\n]/.test(requestedBrowserName)
+          ? requestedBrowserName.slice(0, 80)
+          : "Browser";
+        const browserToken = newToken();
+        const now = isoNow();
+        const expiresAt = new Date(Date.now() + 30 * 24 * 3600_000).toISOString();
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          const claim = db.prepare("UPDATE browser_pairing_codes SET used_at = ? WHERE id = ? AND used_at IS NULL").run(now, pairing.id);
+          if (Number(claim.changes) !== 1) throw new Error("pairing code was claimed concurrently");
+          db.prepare(
+            "INSERT INTO browser_tokens (id, token_hash, device_id, browser_name, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+          ).run(newId("browser_token"), hash(browserToken), pairing.device_id, browserName, expiresAt, now);
+          recordAudit(db, "browser_paired", pairing.employee_name, pairing.device_id, `browser=${browserName}`);
+          db.exec("COMMIT");
+        } catch (error) {
+          db.exec("ROLLBACK");
+          throw error;
+        }
+        return sendJson(response, 201, {
+          browser_token: browserToken,
+          expires_at: expiresAt,
+          device_id: pairing.device_id,
+          employee: { id: pairing.employee_id, name: pairing.employee_name, team: pairing.employee_team },
+        });
+      }
+
       if (method === "GET" && url.pathname === "/api/agent/policy") {
         const device = deviceFromRequest(db, request);
-        if (!device) return sendError(response, 401, "valid device token required", "unauthorized");
+        if (!device || device.auth_kind !== "device") return sendError(response, 401, "valid device token required", "unauthorized");
         return sendJson(response, 200, { policy: getPolicy(db) });
       }
 
@@ -1444,14 +1529,16 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         for (const event of body.events) {
           insert.run(event.event_id, device.id, event.occurred_at, event.type, event.app_name, event.process_name, event.context_label || event.title_hint || null, event.web_domain ? event.web_domain.trim().toLowerCase() : null, event.duration_seconds, isoNow());
         }
-        db.prepare("UPDATE devices SET status = 'online', last_heartbeat_at = ?, updated_at = ? WHERE id = ?").run(isoNow(), isoNow(), device.id);
-        if (wasOffline) recordAudit(db, "agent_online", "system", device.id, "event upload resumed");
+        if (device.auth_kind === "device") {
+          db.prepare("UPDATE devices SET status = 'online', last_heartbeat_at = ?, updated_at = ? WHERE id = ?").run(isoNow(), isoNow(), device.id);
+          if (wasOffline) recordAudit(db, "agent_online", "system", device.id, "event upload resumed");
+        }
         return sendJson(response, 202, { accepted: body.events.length, duplicate_safe: true });
       }
 
       if (method === "POST" && url.pathname === "/api/agent/heartbeat") {
         const device = deviceFromRequest(db, request);
-        if (!device) return sendError(response, 401, "valid device token required", "unauthorized");
+        if (!device || device.auth_kind !== "device") return sendError(response, 401, "valid device token required", "unauthorized");
         const wasOffline = device.status !== "online";
         const body = await readJson(request);
         const now = isoNow();

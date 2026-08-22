@@ -46,6 +46,11 @@ input:focus { border-color: #79a18c; box-shadow: 0 0 0 3px rgba(121,161,140,.14)
 .shield { display: grid; place-items: center; flex: 0 0 auto; width: 30px; height: 30px; border-radius: 9px; background: #e2f0e7; color: #3d8a5e; font-weight: 700; }
 .privacy-card h2 { margin-top: 0; }
 .error-box { margin-top: 12px; padding: 9px; border-radius: 8px; background: #fff1f0; color: #a14f4f; font-size: 10px; line-height: 1.5; }
+.pairing-help { margin: 10px 0 14px; color: #78847d; font-size: 11px; line-height: 1.7; }
+.secondary-button { margin-top: 0; padding: 8px 10px; border: 1px solid #cbdacf; border-radius: 8px; background: #edf3ee; color: #31523f; font-size: 10px; font-weight: 700; }
+.pairing-code-box { display: flex; align-items: center; gap: 9px; margin-top: 13px; padding: 10px 11px; border: 1px dashed #9bb9a6; border-radius: 9px; background: #f3faf4; }
+.pairing-code-box code { flex: 1; color: #24463b; font-size: 15px; font-weight: 800; letter-spacing: .12em; }
+.pairing-code-box small { color: #809188; font-size: 9px; white-space: nowrap; }
 footer { display: flex; align-items: center; gap: 10px; padding: 6px 3px; color: #9aa29c; font-size: 9px; }
 footer span:first-child { margin-right: auto; }
 footer button { padding: 0; border: 0; background: transparent; color: #6d8c7b; font-size: 9px; }

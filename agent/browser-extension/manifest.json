@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AI锦衣卫 Browser Source",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "只向 AI锦衣卫发送当前标签页的域名和脱敏工作来源提示。",
   "permissions": ["alarms", "storage", "tabs"],
   "host_permissions": ["http://*/*", "https://*/*"],

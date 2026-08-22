@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -216,6 +217,61 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
       body: JSON.stringify({ question: "" }),
     });
     assert.equal(invalidQuestion.response.status, 400);
+  });
+});
+
+test("pairs a browser with a short-lived scoped credential", async () => {
+  await withServer(async ({ base, app }) => {
+    const codeResult = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: { "x-admin-token": "test-admin" },
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: codeResult.body.code, hostname: "WIN-BROWSER-01", os_version: "Windows 11", agent_version: "0.1.3" }),
+    });
+    const deviceHeaders = { authorization: `Bearer ${enrolled.body.device_token}` };
+    const pairing = await jsonFetch(`${base}/api/agent/browser-pairing-codes`, {
+      method: "POST",
+      headers: deviceHeaders,
+      body: JSON.stringify({}),
+    });
+    assert.equal(pairing.response.status, 201);
+    assert.match(pairing.body.code, /^BP-[A-F0-9]{10}$/);
+
+    const paired = await jsonFetch(`${base}/api/agent/browser-pair`, {
+      method: "POST",
+      body: JSON.stringify({ pairing_code: pairing.body.code, browser_name: "Google Chrome" }),
+    });
+    assert.equal(paired.response.status, 201);
+    assert.notEqual(paired.body.browser_token, enrolled.body.device_token);
+    assert.equal(paired.body.employee.id, "employee-wei");
+
+    const browserHeaders = { authorization: `Bearer ${paired.body.browser_token}` };
+    const event = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: browserHeaders,
+      body: JSON.stringify({ events: [{
+        event_id: "browser-source-event",
+        occurred_at: new Date().toISOString(),
+        type: "app_session",
+        app_name: "Google Chrome",
+        process_name: "chrome.exe",
+        title_hint: "来源：GitHub",
+        web_domain: "github.com",
+        duration_seconds: 60,
+      }] }),
+    });
+    assert.equal(event.response.status, 202);
+    const heartbeat = await jsonFetch(`${base}/api/agent/heartbeat`, { method: "POST", headers: browserHeaders, body: JSON.stringify({ queued_events: 0 }) });
+    assert.equal(heartbeat.response.status, 401);
+    const reused = await jsonFetch(`${base}/api/agent/browser-pair`, { method: "POST", body: JSON.stringify({ pairing_code: pairing.body.code, browser_name: "Microsoft Edge" }) });
+    assert.equal(reused.response.status, 400);
+
+    app.db.prepare("UPDATE browser_tokens SET expires_at = ? WHERE token_hash = ?").run(new Date(Date.now() - 1_000).toISOString(), createHash("sha256").update(paired.body.browser_token).digest("hex"));
+    const expired = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers: browserHeaders, body: JSON.stringify({ events: [] }) });
+    assert.equal(expired.response.status, 401);
   });
 });
 

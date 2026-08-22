@@ -21,12 +21,12 @@
     <main>
       <h1>AI锦衣卫 Browser Source</h1>
       <p>Chrome 和 Edge 共用此配置。扩展只发送当前标签页的域名，以及有限的来源/项目提示，不发送完整 URL、查询参数、网页正文或键盘内容。</p>
-      <div class="notice">MVP 需要把当前设备 Token 配置到扩展中。Token 仅保存在浏览器本地存储；正式企业版应改为 Agent 一次性配对，不应通过聊天或截图传递 Token。</div>
+      <div class="notice">请先在 Windows Agent 中生成浏览器配对码，再在这里输入。配对码 10 分钟内有效且只能使用一次；扩展不会接触 Agent 的设备 Token。</div>
       <form id="form">
         <label for="serverUrl">服务地址</label>
         <input id="serverUrl" type="url" placeholder="http://192.168.5.5:8787" required />
-        <label for="deviceToken">当前设备 Token</label>
-        <input id="deviceToken" type="password" autocomplete="off" required />
+        <label for="pairingCode">浏览器配对码</label>
+        <input id="pairingCode" placeholder="BP-XXXXXXXXXX" autocomplete="off" required />
         <label for="browserName">浏览器名称</label>
         <input id="browserName" value="Google Chrome" required />
         <button type="submit">保存配置</button>

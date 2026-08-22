@@ -188,6 +188,13 @@ struct HeartbeatResponse {
     policy: Policy,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct BrowserPairingResponse {
+    code: String,
+    expires_at: String,
+    device_id: String,
+}
+
 impl Core {
     fn new(db_path: PathBuf) -> Result<Self, String> {
         if let Some(parent) = db_path.parent() {
@@ -397,6 +404,24 @@ impl Core {
         self.status.state = "online".into();
         self.last_heartbeat = Instant::now();
         Ok(())
+    }
+
+    fn create_browser_pairing_code(&self) -> Result<BrowserPairingResponse, String> {
+        let token = self
+            .token
+            .clone()
+            .ok_or_else(|| "设备尚未注册".to_string())?;
+        let response = self
+            .http
+            .post(self.api_url("/api/agent/browser-pairing-codes")?)
+            .bearer_auth(token)
+            .json(&serde_json::json!({}))
+            .send()
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("生成浏览器配对码失败：HTTP {}", response.status()));
+        }
+        response.json().map_err(|error| error.to_string())
     }
 
     fn finish_session(&mut self, ended_at: Instant) -> Result<(), String> {
@@ -1155,6 +1180,14 @@ fn enroll_agent(
 }
 
 #[tauri::command]
+fn create_browser_pairing_code(
+    state: State<'_, AgentState>,
+) -> Result<BrowserPairingResponse, String> {
+    let core = state.core.lock().map_err(|error| error.to_string())?;
+    core.create_browser_pairing_code()
+}
+
+#[tauri::command]
 fn clear_registration(state: State<'_, AgentState>) -> Result<AgentStatus, String> {
     let mut core = state.core.lock().map_err(|error| error.to_string())?;
     if let Some(device_id) = core.status.device_id.clone() {
@@ -1223,6 +1256,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_agent_status,
             enroll_agent,
+            create_browser_pairing_code,
             clear_registration
         ])
         .on_window_event(|window, event| {

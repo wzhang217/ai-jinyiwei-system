@@ -72,7 +72,13 @@ curl -X POST http://localhost:8787/api/admin/sessions \
 
 之后用返回的 Token 放在 `x-admin-session` 中访问历史、设备、事件和问答接口。`admin` 角色只能由启动 Token 使用；正式试点应设置随机的 `AGENT_SESSION_SECRET` 并接入企业登录系统。
 
-浏览器来源扩展位于 `../agent/browser-extension/`，Chrome 和 Edge 共用同一套 MV3 文件，并继续调用 `/api/agent/events`。
+浏览器来源扩展位于 `../agent/browser-extension/`，Chrome 和 Edge 共用同一套 MV3 文件，并继续调用 `/api/agent/events`。正式配对流程如下：
+
+1. 在已经注册的 Windows Agent 中点击“生成浏览器配对码”。
+2. 打开 Chrome/Edge 扩展设置，填写服务地址和 Agent 显示的 `BP-...` 配对码。
+3. 服务端通过 `POST /api/agent/browser-pair` 将 10 分钟内有效、只能使用一次的配对码换成 30 天有效的浏览器凭据。
+
+浏览器凭据只允许上传脱敏的网站来源事件，不能发送心跳、读取采集策略或生成新的配对码；扩展不会保存或要求员工粘贴 Windows Agent Token。
 
 前端默认连接真实服务端。只有在 `app/.env` 明确设置 `VITE_DEMO_MODE=true` 时才启用演示数据；推荐配置 `VITE_AGENT_API_BASE_URL` 和 `VITE_AGENT_ADMIN_TOKEN` 后使用真实数据。
 

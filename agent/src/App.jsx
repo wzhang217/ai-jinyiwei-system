@@ -51,6 +51,7 @@ export function App() {
   const [status, setStatus] = useState(fallbackStatus);
   const [serverUrl, setServerUrl] = useState("http://localhost:8787");
   const [registrationCode, setRegistrationCode] = useState("");
+  const [browserPairing, setBrowserPairing] = useState(null);
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -94,6 +95,33 @@ export function App() {
     }
   };
 
+  const createBrowserPairingCode = async () => {
+    if (!isTauri()) {
+      notify("浏览器预览不能生成真实配对码，请在 Windows Agent 中操作");
+      return;
+    }
+    setBusy(true);
+    try {
+      const pairing = await call("create_browser_pairing_code");
+      setBrowserPairing(pairing);
+      notify("配对码已生成，有效期 10 分钟");
+    } catch (error) {
+      notify(`生成配对码失败：${error}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyBrowserPairingCode = async () => {
+    if (!browserPairing?.code) return;
+    try {
+      await navigator.clipboard.writeText(browserPairing.code);
+      notify("配对码已复制");
+    } catch {
+      notify("复制失败，请手动选中配对码");
+    }
+  };
+
   const registered = Boolean(status.device_id);
   const tone = useMemo(() => status.state === "online" || status.state === "syncing" ? "green" : status.state === "offline" ? "amber" : status.state === "error" ? "red" : "gray", [status.state]);
 
@@ -126,6 +154,12 @@ export function App() {
             <div className="status-card-top"><div><div className="card-kicker">当前设备</div><h1>{status.employee_name || "已注册设备"}</h1><p>{status.employee_team || "企业工作区"} · {status.device_id}</p></div><div className={`big-status ${tone}`}><i /><strong>{statusLabel(status.state)}</strong></div></div>
             <div className="metrics"><div><span>最近同步</span><strong>{formatTime(status.last_sync_at)}</strong></div><div><span>离线队列</span><strong>{status.queued_events} 条</strong></div><div><span>工作时段</span><strong>{status.policy.work_hours_start}–{status.policy.work_hours_end}</strong></div></div>
             {status.last_error && <div className="error-box">{status.last_error}</div>}
+          </section>
+          <section className="card browser-pairing-card">
+            <div className="section-heading"><div><div className="card-kicker">浏览器来源</div><h2>连接 Chrome / Edge</h2></div><span className="policy-version">短期配对</span></div>
+            <p className="pairing-help">在浏览器扩展设置中输入此配对码。扩展只会获得独立的短期凭据，不会读取或保存 Agent 设备 Token。</p>
+            <button className="primary-button" onClick={createBrowserPairingCode} disabled={busy}>{busy ? "生成中…" : "生成浏览器配对码"}</button>
+            {browserPairing && <div className="pairing-code-box"><code>{browserPairing.code}</code><button className="secondary-button" onClick={copyBrowserPairingCode}>复制</button><small>有效至 {formatTime(browserPairing.expires_at)}</small></div>}
           </section>
           <section className="card">
             <div className="section-heading"><div><div className="card-kicker">采集策略</div><h2>当前会记录什么</h2></div><span className="policy-version">策略 v{status.policy.version}</span></div>

@@ -4,6 +4,7 @@ const ALARM_NAME = "jinyiwei-browser-sync";
 
 const defaultConfig = {
   serverUrl: "",
+  browserToken: "",
   deviceToken: "",
   browserName: "Google Chrome",
   enabled: true,
@@ -86,12 +87,13 @@ async function activeTab() {
 }
 
 async function postEvent(session, durationSeconds, config) {
-  if (!config.enabled || !config.serverUrl || !config.deviceToken || !session || !session.domain) return { skipped: true };
+  const token = config.browserToken || config.deviceToken;
+  if (!config.enabled || !config.serverUrl || !token || !session || !session.domain) return { skipped: true };
   const response = await fetch(`${config.serverUrl.replace(/\/$/, "")}/api/agent/events`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
-      authorization: `Bearer ${config.deviceToken}`,
+      authorization: `Bearer ${token}`,
     },
     body: JSON.stringify({
       events: [{
