@@ -1227,6 +1227,13 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           .flatMap((record) => record.resources || [])
           .map((resource) => [resource.name, resource]))
           .values()].slice(0, 50);
+        recordAudit(
+          db,
+          "history_asked",
+          principal.actor || "admin",
+          deviceId || "history",
+          `question_length=${body.question.trim().length}; evidence=${selectedEvidence.length}`,
+        );
         return sendJson(response, 200, {
           answer: answer.answer,
           evidence: selectedEvidence,

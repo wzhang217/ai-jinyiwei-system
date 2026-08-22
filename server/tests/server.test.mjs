@@ -204,6 +204,11 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.match(answer.body.time_range.start, /^\d{4}-\d{2}-\d{2}T/);
     assert.match(answer.body.time_range.end, /^\d{4}-\d{2}-\d{2}T/);
     assert.match(answer.body.uncertainty, /效率|绩效/);
+    const askAudit = await jsonFetch(`${base}/api/admin/audit`, { headers: { "x-admin-token": "test-admin" } });
+    const historyAskLog = askAudit.body.logs.find((log) => log.action === "history_asked");
+    assert.ok(historyAskLog);
+    assert.match(historyAskLog.detail, /question_length=|evidence=/);
+    assert.doesNotMatch(historyAskLog.detail, /最近主要做了什么/);
 
     const invalidQuestion = await jsonFetch(`${base}/api/admin/history/ask`, {
       method: "POST",

@@ -298,6 +298,7 @@ function formatAuditAction(action) {
     admin_session_created: "创建管理会话",
     registration_code_created: "生成注册码",
     agent_enrolled: "Agent 注册绑定",
+    history_asked: "查询计算机历史",
     agent_online: "Agent 上线",
     agent_offline: "Agent 离线",
     policy_changed: "修改采集策略",
