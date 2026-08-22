@@ -1420,6 +1420,23 @@ export function createAgentServer({ dbPath = process.env.AGENT_DB_PATH || defaul
   const db = new DatabaseSync(resolve(dbPath));
   createSchema(db);
   const server = createHttpServer(createRequestHandler({ db, adminToken, sessionSecret, ai, logger }));
+  let memoryWarmupRunning = false;
+  const memoryMaterializationIntervalMs = Math.max(15_000, Number(process.env.MEMORY_MATERIALIZATION_INTERVAL_MS) || 60_000);
+  const warmRecentMemorySummaries = async () => {
+    if (memoryWarmupRunning || ai.mode !== "model") return;
+    memoryWarmupRunning = true;
+    try {
+      await getMemoryRecords(db, { limit: 200, ai });
+    } catch (error) {
+      logger.warn?.(`Memory Summary materialization error: ${error.message}`);
+    } finally {
+      memoryWarmupRunning = false;
+    }
+  };
+  const memoryMaterializationTimer = setInterval(() => {
+    warmRecentMemorySummaries().catch((error) => logger.warn?.(`Memory Summary worker error: ${error.message}`));
+  }, memoryMaterializationIntervalMs);
+  memoryMaterializationTimer.unref?.();
   const generationTimer = setInterval(() => {
     processMemoryGenerationJobs(db, ai, logger).catch((error) => logger.warn?.(`Memory Summary worker error: ${error.message}`));
   }, 15_000);
@@ -1437,6 +1454,7 @@ export function createAgentServer({ dbPath = process.env.AGENT_DB_PATH || defaul
       });
     },
     close() {
+      clearInterval(memoryMaterializationTimer);
       clearInterval(generationTimer);
       db.close();
       return new Promise((resolvePromise) => server.close(() => resolvePromise()));
