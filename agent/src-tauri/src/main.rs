@@ -320,8 +320,10 @@ impl Core {
             })
             .send()
             .map_err(|error| error.to_string())?;
-        if !response.status().is_success() {
-            return Err(format!("事件上传失败：HTTP {}", response.status()));
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(format!("事件上传失败：HTTP {status}：{body}"));
         }
         self.mark_uploaded(
             &events
@@ -350,8 +352,10 @@ impl Core {
             })
             .send()
             .map_err(|error| error.to_string())?;
-        if !response.status().is_success() {
-            return Err(format!("心跳同步失败：HTTP {}", response.status()));
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().unwrap_or_default();
+            return Err(format!("心跳同步失败：HTTP {status}：{body}"));
         }
         let body: HeartbeatResponse = response.json().map_err(|error| error.to_string())?;
         self.status.policy = body.policy;
