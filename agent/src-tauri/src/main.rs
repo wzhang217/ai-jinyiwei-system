@@ -17,6 +17,7 @@ use uuid::Uuid;
 const AGENT_VERSION: &str = "0.1.0";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const MAX_PENDING_EVENTS: i64 = 10_000;
+const MAX_EVENT_DURATION_SECONDS: i64 = 86_400;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Policy {
@@ -272,7 +273,7 @@ impl Core {
                     event_type: row.get(2)?,
                     app_name: row.get(3)?,
                     process_name: row.get(4)?,
-                    duration_seconds: row.get(5)?,
+                    duration_seconds: row.get::<_, i64>(5)?.clamp(0, MAX_EVENT_DURATION_SECONDS),
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -470,7 +471,8 @@ impl Core {
                         event_type: "idle".into(),
                         app_name: "Idle".into(),
                         process_name: "system".into(),
-                        duration_seconds: idle_seconds as i64,
+                        duration_seconds: idle_seconds.min(MAX_EVENT_DURATION_SECONDS as u64)
+                            as i64,
                     });
                 }
             } else if let Some((app_name, process_name)) = foreground_application() {
@@ -615,7 +617,7 @@ fn foreground_application() -> Option<(String, String)> {
 
 #[cfg(windows)]
 fn system_idle_seconds() -> u64 {
-    use windows_sys::Win32::System::SystemInformation::GetTickCount64;
+    use windows_sys::Win32::System::SystemInformation::GetTickCount;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
     unsafe {
         let mut info = LASTINPUTINFO {
@@ -625,8 +627,11 @@ fn system_idle_seconds() -> u64 {
         if GetLastInputInfo(&mut info) == 0 {
             return 0;
         }
-        let now_ms = GetTickCount64();
-        now_ms.saturating_sub(info.dwTime as u64) / 1000
+        // LASTINPUTINFO.dwTime is a 32-bit tick count. Use the matching
+        // 32-bit counter so machines running for more than 49 days do not
+        // produce an incorrectly huge idle duration.
+        let now_ms = GetTickCount();
+        now_ms.wrapping_sub(info.dwTime) as u64 / 1000
     }
 }
 
