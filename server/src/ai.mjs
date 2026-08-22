@@ -37,7 +37,10 @@ function modelTextOrFallback(value, field, fallback) {
   if (value === undefined || value === null || (typeof value === "string" && !value.trim())) {
     return fallback;
   }
-  return validatedModelText(value, field);
+  const normalized = Array.isArray(value)
+    ? value.every((item) => typeof item === "string") ? value.join("；") : value
+    : value;
+  return validatedModelText(normalized, field);
 }
 
 function publicRecord(record) {
@@ -137,6 +140,7 @@ export function createAiService({
   maxRequestsPerMinute = Number(process.env.AI_MAX_REQUESTS_PER_MINUTE) || 30,
   maxInputRecords = Number(process.env.AI_MAX_INPUT_RECORDS) || 200,
   requestTimeoutMs = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 20_000,
+  enableThinking = process.env.AI_ENABLE_THINKING === "true",
 } = {}) {
   const canCallModel = Boolean(enabled && apiKey && typeof fetchImpl === "function");
   const callTimestamps = [];
@@ -164,6 +168,7 @@ export function createAiService({
         body: JSON.stringify({
           model,
           temperature: 0.2,
+          enable_thinking: enableThinking,
           messages,
         }),
         ...(controller ? { signal: controller.signal } : {}),

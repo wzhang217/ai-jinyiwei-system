@@ -364,6 +364,7 @@ test("configures the Qwen 3.7 Plus adapter without sending a real request", asyn
     fetchImpl: async (_url, options) => {
       const request = JSON.parse(options.body);
       assert.equal(request.model, "qwen3.7-plus");
+      assert.equal(request.enable_thinking, false);
       return {
         ok: true,
       async json() {
@@ -421,6 +422,22 @@ test("uses safe fallbacks for optional empty model fields without losing generat
   assert.equal(summary.title, "模型标题");
   assert.equal(summary.summary, "模型摘要");
   assert.equal(summary.prior_context, "规则上下文");
+});
+
+test("normalizes safe string arrays returned by the model", async () => {
+  const ai = createAiService({
+    apiKey: "test-key",
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return { choices: [{ message: { content: JSON.stringify({ title: "模型标题", important_context: ["只基于活动元数据", "不包含原始正文"] }) } }] };
+      },
+    }),
+    logger: { warn() {} },
+  });
+  const summary = await ai.summarizeMemory({ title: "规则标题", summary: "规则总结", prior_context: "规则上下文", non_obvious: "规则边界" });
+  assert.equal(summary.status, "generated");
+  assert.equal(summary.important_context, "只基于活动元数据；不包含原始正文");
 });
 
 test("rejects unsafe model summary text and falls back", async () => {
