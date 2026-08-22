@@ -675,6 +675,58 @@ function historyQueryTokens(question) {
   return [...tokens];
 }
 
+function localDayStart(milliseconds = Date.now()) {
+  const date = new Date(milliseconds);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
+
+function historyQueryTimeRange(question, now = Date.now()) {
+  const value = String(question || "").trim();
+  if (!value) return null;
+  const todayStart = localDayStart(now);
+  if (/今天|今日/.test(value)) return { start: new Date(todayStart).toISOString(), end: new Date(now).toISOString(), label: "今天" };
+  if (/昨天|昨日/.test(value)) {
+    const start = todayStart - 24 * 3600_000;
+    return { start: new Date(start).toISOString(), end: new Date(todayStart).toISOString(), label: "昨天" };
+  }
+  if (/上周/.test(value)) {
+    const currentWeekStart = todayStart - ((new Date(todayStart).getDay() + 6) % 7) * 24 * 3600_000;
+    const start = currentWeekStart - 7 * 24 * 3600_000;
+    return { start: new Date(start).toISOString(), end: new Date(currentWeekStart).toISOString(), label: "上周" };
+  }
+  if (/本周|这周|本星期/.test(value)) {
+    const start = todayStart - ((new Date(todayStart).getDay() + 6) % 7) * 24 * 3600_000;
+    return { start: new Date(start).toISOString(), end: new Date(now).toISOString(), label: "本周" };
+  }
+  const recent = value.match(/(?:最近|近|过去)\s*(\d{1,3})\s*(分钟|小时|天|周)/);
+  if (recent) {
+    const amount = Number(recent[1]);
+    const units = { 分钟: 60_000, 小时: 3600_000, 天: 24 * 3600_000, 周: 7 * 24 * 3600_000 };
+    const start = now - amount * units[recent[2]];
+    return { start: new Date(start).toISOString(), end: new Date(now).toISOString(), label: `${recent[1]}${recent[2]}` };
+  }
+  const dateMatch = value.match(/(20\d{2})[-年\/]\s*(\d{1,2})[-月\/]\s*(\d{1,2})日?/);
+  if (dateMatch) {
+    const startDate = new Date(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]));
+    const start = startDate.getTime();
+    if (Number.isFinite(start)) return { start: new Date(start).toISOString(), end: new Date(start + 24 * 3600_000).toISOString(), label: `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` };
+  }
+  return null;
+}
+
+function filterHistoryRecordsByTime(records, range) {
+  if (!range) return records;
+  const start = Date.parse(range.start);
+  const end = Date.parse(range.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return records;
+  return records.filter((record) => {
+    const recordStart = Date.parse(record.started_at || "");
+    const recordEnd = Date.parse(record.ended_at || "") || recordStart;
+    return Number.isFinite(recordStart) && recordEnd >= start && recordStart < end;
+  });
+}
+
 export function rankHistoryRecords(question, records = []) {
   const tokens = historyQueryTokens(question);
   return records
@@ -1214,8 +1266,10 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const limit = Math.min(Math.max(Number(body.limit) || 200, 1), 2000);
         const deviceId = typeof body.device_id === "string" && body.device_id.trim() ? body.device_id.trim() : null;
         const records = await getMemoryRecords(db, { deviceId, limit, ai, principal });
-        const rankedRecords = rankHistoryRecords(body.question.trim(), records);
-        const answer = await ai.answerHistory({ question: body.question.trim(), records: rankedRecords });
+        const queryTimeRange = historyQueryTimeRange(body.question.trim());
+        const timeScopedRecords = filterHistoryRecordsByTime(records, queryTimeRange);
+        const rankedRecords = rankHistoryRecords(body.question.trim(), timeScopedRecords);
+        const answer = await ai.answerHistory({ question: body.question.trim(), records: rankedRecords, timeRange: queryTimeRange });
         const evidenceIds = Array.isArray(answer.evidence_ids) ? answer.evidence_ids : [];
         const evidence = evidenceIds.map((id) => rankedRecords.find((record) => record.id === id)).filter(Boolean);
         const selectedEvidence = evidence.length ? evidence : rankedRecords.slice(0, 3);
@@ -1243,6 +1297,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           citations,
           resources,
           time_range: evidenceTimeRange(selectedEvidence),
+          query_time_range: queryTimeRange,
           caveats: [answer.caveat || "答案只基于活动元数据和 Memory Summary。"],
           uncertainty: answer.uncertainty || "应用活动只能说明上下文变化，不能单独证明工作效率或绩效。",
           model: answer.model_name || ai.model,

@@ -198,7 +198,7 @@ export async function askLiveHistory(question, options = {}) {
       ...(options.limit ? { limit: options.limit } : {}),
     }),
   });
-  const timeRange = body.time_range || null;
+  const timeRange = body.query_time_range || body.time_range || null;
   const rangeText = timeRange?.start && timeRange?.end
     ? `时间范围：${formatTime(timeRange.start)}–${formatTime(timeRange.end)}`
     : "时间范围：暂无可用证据";

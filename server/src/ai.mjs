@@ -99,6 +99,15 @@ function fallbackSummary(input) {
 }
 
 function fallbackAnswer(question, records) {
+  if (!records.length) {
+    return {
+      answer: "在所查询的时间范围内没有找到可用的 Memory Summary。",
+      evidence_ids: [],
+      caveat: "当前时间范围内没有足够的活动元数据，系统没有用其他时间的记录替代答案。",
+      uncertainty: "没有可用证据，无法判断该时间范围内的工作主题。",
+      ...evidenceMetadata(records),
+    };
+  }
   const evidence = records.slice(0, 3);
   const evidenceIds = evidence.map((record) => record.id);
   const applications = [...new Set(evidence.flatMap((record) => record.application_names || []))];
@@ -223,15 +232,16 @@ export function createAiService({
         return { ...fallback, status: "fallback", model_name: "rules-v1", retryable: true };
       }
     },
-    async answerHistory({ question, records }) {
+    async answerHistory({ question, records, timeRange = null }) {
       const fallback = fallbackAnswer(question, records);
-      if (!canCallModel) return { ...fallback, status: "fallback", model_name: "rules-v1" };
+      if (!canCallModel || !records.length) return { ...fallback, status: "fallback", model_name: "rules-v1" };
       try {
         const result = await complete(createPrompt({
           system: "你是企业 Computer History 的 History Skill。只根据提供的 Memory Summary 元数据回答问题。禁止编造文件、网页、聊天、键盘或绩效信息。只返回 JSON：answer 字符串、evidence_ids 数组、caveat 字符串、uncertainty 字符串。evidence_ids 只能使用输入记录的 id。答案应尽量明确时间范围、涉及应用、项目/工作标识和网站域名；缺少证据时要在 uncertainty 中说明。",
           input: {
             task: "answer_history_question",
             question: text(question),
+            time_range: timeRange,
             records: records.slice(0, Math.max(1, maxInputRecords)).map(publicRecord),
           },
         }));

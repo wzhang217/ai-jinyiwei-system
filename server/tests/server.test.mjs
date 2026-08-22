@@ -248,6 +248,44 @@ test("allows an admin to configure 24-hour collection", async () => {
   });
 });
 
+test("filters History Skill evidence by the requested time range", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-TIME-RANGE", os_version: "Windows 11", agent_version: "0.1.3" }),
+    });
+    const headers = { authorization: `Bearer ${enrolled.body.device_token}` };
+    const now = Date.now();
+    for (const [eventId, occurredAt, appName] of [
+      ["today-event", new Date(now - 5 * 60_000).toISOString(), "Visual Studio Code"],
+      ["old-event", new Date(now - 3 * 24 * 3600_000).toISOString(), "WPS"],
+    ]) {
+      const result = await jsonFetch(`${base}/api/agent/events`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ events: [{ event_id: eventId, occurred_at: occurredAt, type: "app_session", app_name: appName, process_name: `${appName}.exe`, duration_seconds: 60 }] }),
+      });
+      assert.equal(result.response.status, 202);
+    }
+    const answer = await jsonFetch(`${base}/api/admin/history/ask`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ question: "今天主要做了什么？" }),
+    });
+    assert.equal(answer.response.status, 200);
+    assert.equal(answer.body.query_time_range.label, "今天");
+    assert.ok(answer.body.evidence.length >= 1);
+    assert.ok(answer.body.evidence.every((record) => record.started_at >= answer.body.query_time_range.start && record.started_at < answer.body.query_time_range.end));
+    assert.ok(!answer.body.evidence.some((record) => record.title.includes("WPS")));
+  });
+});
+
 test("classifies project-management and collaboration sources without raw page content", async () => {
   await withServer(async ({ base }) => {
     const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
