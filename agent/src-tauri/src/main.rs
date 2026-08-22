@@ -776,6 +776,15 @@ fn extract_project_identifier(title: &str) -> Option<String> {
     {
         return None;
     }
+    if candidate.rsplit_once('.').is_some_and(|(_, extension)| {
+        [
+            "txt", "md", "rs", "js", "jsx", "ts", "tsx", "json", "csv", "py", "java", "cs", "go",
+            "html", "css", "sql", "docx", "xlsx", "pptx",
+        ]
+        .contains(&extension.to_lowercase().as_str())
+    }) {
+        return None;
+    }
     sanitize_label(candidate, "项目：")
 }
 
