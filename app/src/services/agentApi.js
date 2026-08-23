@@ -309,7 +309,13 @@ function normalizeLiveRecord(record) {
     sourceKinds: record.source_kinds || [],
     sourceTypes: record.source_types || [],
     resourceTypes: record.resource_types || [],
+    activityFragmentCount: record.activity_fragment_count || (record.activity_sequence || []).length,
+    summaryActivityCount: record.summary_activity_count || (record.summary_activity_sequence || record.activity_sequence || []).length,
     activitySequence: (record.activity_sequence || []).map((item) => ({
+      ...item,
+      time: formatTime(item.occurred_at || item.time),
+    })),
+    summaryActivitySequence: (record.summary_activity_sequence || record.activity_sequence || []).map((item) => ({
       ...item,
       time: formatTime(item.occurred_at || item.time),
     })),

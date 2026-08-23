@@ -15,7 +15,7 @@ export function recordToMarkdown(record) {
   const citations = (record.citations || []).map((item) => `- ${item.label} — ${item.detail}`).join("\n");
   const timeline = (record.timeline || []).map((item) => `- ${item.time} · ${item.text}`).join("\n");
   const resources = (record.resources || []).map((item) => `- ${item.name} — ${item.path}`).join("\n");
-  const sequence = (record.activitySequence || record.activity_sequence || []).map((item) => {
+  const sequence = (record.summaryActivitySequence || record.summary_activity_sequence || record.activitySequence || record.activity_sequence || []).map((item) => {
     const minutes = Math.max(1, Math.round(Number(item.duration_seconds || 0) / 60));
     const labels = Array.isArray(item.context_labels)
       ? item.context_labels

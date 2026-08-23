@@ -73,6 +73,9 @@ function shanghaiDateTime(value) {
 }
 
 function publicRecord(record) {
+  const summarySequence = Array.isArray(record.summary_activity_sequence)
+    ? record.summary_activity_sequence
+    : (record.activity_sequence || []);
   return {
     id: record.id,
     record_type: record.record_type,
@@ -96,7 +99,9 @@ function publicRecord(record) {
     ended_at_shanghai: shanghaiDateTime(record.ended_at),
     source_record_count: Array.isArray(record.source_record_ids) ? record.source_record_ids.length : 0,
     source_event_count: Array.isArray(record.source_event_ids) ? record.source_event_ids.length : 0,
-    activity_sequence: (record.activity_sequence || []).slice(0, 100).map((item) => ({
+    activity_fragment_count: Number(record.activity_fragment_count || (record.activity_sequence || []).length),
+    summary_activity_count: Number(record.summary_activity_count || summarySequence.length),
+    activity_sequence: summarySequence.slice(0, 40).map((item) => ({
       occurred_at: item?.occurred_at,
       occurred_at_shanghai: shanghaiDateTime(item?.occurred_at),
       duration_seconds: item?.duration_seconds,
@@ -297,7 +302,7 @@ export function createAiService({
       if (!canCallModel) return { ...fallback, status: "fallback", model_name: "rules-v1" };
       try {
         const result = await complete(createPrompt({
-          system: "你是企业 Computer History 的 Memory Summary 生成器。只根据输入的活动元数据生成 JSON。时间优先使用 *_shanghai 字段，统一按东八区表达。禁止猜测文件内容、聊天正文、网页正文、键盘输入、截图内容或绩效结论。只返回 title、description、summary、prior_context、important_context、confidence 字段。不要输出 URL、文件路径、原始窗口标题或敏感正文。标题必须是可读的工作主题，例如‘文件、文档、其他、沟通活动’或‘开发、浏览器、沟通活动’，不能只使用某个网站域名、单个应用名或员工姓名。描述和 summary 必须尽量包含东八区时间范围、涉及应用、按时间顺序的活动片段、应用切换次数、采集来源类型，以及资源类型（项目、文档、代码仓库、网站、沟通工具）和可见的网站/项目标识；资源类型只能使用输入中已有的证据，没有证据的内容明确说未记录。",
+          system: "你是企业 Computer History 的 Memory Summary 生成器。只根据输入的活动元数据生成 JSON。时间优先使用 *_shanghai 字段，统一按东八区表达。禁止猜测文件内容、聊天正文、网页正文、键盘输入、截图内容或绩效结论。只返回 title、description、summary、prior_context、important_context、confidence 字段。不要输出 URL、文件路径、原始窗口标题或敏感正文。输入中的 context_labels 可能包含本地脱敏后生成的项目、来源、操作、状态和资源分类；它们是允许使用的结构化事实，但不能扩展推断成正文或具体用户输入。标题必须是可读的工作主题，例如‘ai-jinyiwei-system 构建发布’、‘文件、文档、沟通活动’或‘开发、浏览器、沟通活动’，不能只使用某个网站域名、单个应用名或员工姓名。输入中的 activity_sequence 已经是按应用阶段压缩后的摘要序列；不要逐条罗列重复域名。描述和 summary 应优先写成 1-2 段面向管理者的工作叙事，包含东八区时间范围、主要应用和应用阶段顺序、应用切换次数、采集来源类型，以及资源类型（项目、文档、代码仓库、网站、沟通工具）和可见的网站/项目标识。若有操作或状态标签，应使用‘查看/构建/代码协作’等脱敏分类描述，不要声称看到了页面正文或键盘输入。最多列出 6 个代表性网站或工作标识，其余用‘等’概括；资源类型只能使用输入中已有的证据，没有证据的内容明确说未记录。",
           input: { task: "summarize_memory", record: publicRecord(input) },
         }));
         if (!result || typeof result !== "object") throw new Error("AI summary was not valid JSON");

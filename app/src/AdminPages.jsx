@@ -508,7 +508,7 @@ function MemoryDrawer({ record, onClose, onExport, onNavigate }) {
   const resources = record.resources || [];
   const citations = record.citations || [];
   const timeline = record.timeline || [];
-  const sequence = record.activitySequence || record.activity_sequence || [];
+  const sequence = record.summaryActivitySequence || record.summary_activity_sequence || record.activitySequence || record.activity_sequence || [];
   const sourceTypes = record.sourceTypes || record.source_types || [];
   const model = record.summaryModel || "rules-v1";
   const prompt = record.promptVersion || record.prompt_version || "memory-v1";

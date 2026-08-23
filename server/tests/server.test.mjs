@@ -840,6 +840,83 @@ test("classifies project-management and collaboration sources without raw page c
   });
 });
 
+test("preserves structured redacted work labels for manager summaries", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-STRUCTURED-LABELS", os_version: "Windows 11", agent_version: "0.1.9" }),
+    });
+    const eventResponse = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${enrolled.body.device_token}` },
+      body: JSON.stringify({ events: [{
+        event_id: "structured-label-event",
+        occurred_at: new Date(Date.now() - 15 * 60_000).toISOString(),
+        type: "app_session",
+        app_name: "Microsoft Edge",
+        process_name: "msedge.exe",
+        source_kind: "browser_native",
+        context_label: "来源：GitHub · 项目：ai-jinyiwei-system · 操作：构建发布 · 状态：成功 · 资源：构建产物",
+        web_domain: "github.com",
+        duration_seconds: 600,
+      }] }),
+    });
+    assert.equal(eventResponse.response.status, 202);
+    const history = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    const leaf = history.body.records.find((record) => record.source_event_ids?.includes("structured-label-event"));
+    assert.ok(leaf);
+    assert.deepEqual(leaf.context_labels, [
+      "来源：GitHub",
+      "项目：ai-jinyiwei-system",
+      "操作：构建发布",
+      "状态：成功",
+      "资源：构建产物",
+    ]);
+    assert.ok(leaf.resources.some((resource) => resource.name === "项目：ai-jinyiwei-system"));
+    assert.ok(leaf.resources.some((resource) => resource.name === "操作：构建发布"));
+    assert.match(leaf.title, /ai-jinyiwei-system 构建发布/);
+    assert.ok(!JSON.stringify(leaf).includes("https://github.com"));
+  });
+});
+
+test("compresses repeated browser observations for summaries but preserves app switches", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-SUMMARY-SEQUENCE", os_version: "Windows 11", agent_version: "0.1.8" }),
+    });
+    const headers = { authorization: `Bearer ${enrolled.body.device_token}` };
+    const start = Date.now() - 20 * 60_000;
+    const events = [
+      { event_id: "summary-edge-one", occurred_at: new Date(start).toISOString(), type: "app_session", app_name: "Microsoft Edge", process_name: "msedge.exe", web_domain: "gitee.com", duration_seconds: 60 },
+      { event_id: "summary-edge-two", occurred_at: new Date(start + 60_000).toISOString(), type: "app_session", app_name: "Microsoft Edge", process_name: "msedge.exe", web_domain: "baidu.com", duration_seconds: 60 },
+      { event_id: "summary-wechat", occurred_at: new Date(start + 120_000).toISOString(), type: "app_session", app_name: "Weixin", process_name: "Weixin.exe", duration_seconds: 60 },
+    ];
+    const uploaded = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers, body: JSON.stringify({ events }) });
+    assert.equal(uploaded.response.status, 202);
+    const history = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    const leaf = history.body.records.find((record) => record.source_event_ids?.includes("summary-edge-one"));
+    assert.ok(leaf);
+    assert.equal(leaf.activity_fragment_count, 3);
+    assert.equal(leaf.summary_activity_count, 2);
+    assert.equal(leaf.summary_activity_sequence.length, 2);
+    assert.deepEqual(leaf.summary_activity_sequence[0].web_domains.sort(), ["baidu.com", "gitee.com"]);
+    assert.equal(leaf.summary_activity_sequence[1].app, "微信/企业微信");
+  });
+});
+
 test("classifies Tencent Meeting as a communication activity", async () => {
   await withServer(async ({ base }) => {
     const code = await jsonFetch(`${base}/api/admin/registration-codes`, {

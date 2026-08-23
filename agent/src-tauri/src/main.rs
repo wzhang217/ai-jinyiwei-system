@@ -14,7 +14,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
-const AGENT_VERSION: &str = "0.1.8";
+const AGENT_VERSION: &str = "0.1.9";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const MAX_PENDING_EVENTS: i64 = 10_000;
 // A resumed/sleeping Windows session must not create a full-day idle span
@@ -935,15 +935,29 @@ fn foreground_application() -> Option<ForegroundActivity> {
             None
         };
 
-        let context_label = title
+        let browser_metadata = if is_browser_process(&app_name, &process_name) {
+            native_browser_metadata(window)
+        } else {
+            None
+        };
+        let title_context_label = title
             .as_deref()
             .and_then(|value| sanitize_context_label(&app_name, &process_name, value));
+        let context_label = merge_context_labels([
+            title_context_label,
+            browser_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.context_label.clone()),
+        ]);
         let title_domain = title
             .as_deref()
             .filter(|_| is_browser_process(&app_name, &process_name))
             .and_then(extract_explicit_web_domain);
         let web_domain = if is_browser_process(&app_name, &process_name) {
-            native_browser_domain(window).or(title_domain)
+            browser_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.domain.clone())
+                .or(title_domain)
         } else {
             None
         };
@@ -964,7 +978,15 @@ fn foreground_application() -> Option<ForegroundActivity> {
 }
 
 #[cfg(windows)]
-fn native_browser_domain(window: windows_sys::Win32::Foundation::HWND) -> Option<String> {
+struct BrowserMetadata {
+    domain: Option<String>,
+    context_label: Option<String>,
+}
+
+#[cfg(windows)]
+fn native_browser_metadata(
+    window: windows_sys::Win32::Foundation::HWND,
+) -> Option<BrowserMetadata> {
     use windows::core::BSTR;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{
@@ -999,17 +1021,27 @@ fn native_browser_domain(window: windows_sys::Win32::Foundation::HWND) -> Option
         let condition = automation.CreateTrueCondition().ok()?;
         let elements = root.FindAll(TreeScope_Descendants, &condition).ok()?;
         let length = elements.Length().ok()?.clamp(0, 300);
+        let mut domain = None;
+        let mut labels = Vec::new();
         for index in 0..length {
             let element = elements.GetElement(index).ok()?;
             let control_type = element.CurrentControlType().ok()?;
             let name = String::try_from(element.CurrentName().ok()?).unwrap_or_default();
             let automation_id =
                 String::try_from(element.CurrentAutomationId().ok()?).unwrap_or_default();
-            let value = element
-                .GetCurrentPropertyValue(UIA_ValueValuePropertyId)
-                .ok()
-                .and_then(variant_text);
             let descriptor = format!("{} {}", name, automation_id).to_lowercase();
+            let value = if descriptor.contains("address")
+                || descriptor.contains("omnibox")
+                || descriptor.contains("地址")
+                || descriptor.contains("搜索栏")
+            {
+                element
+                    .GetCurrentPropertyValue(UIA_ValueValuePropertyId)
+                    .ok()
+                    .and_then(variant_text)
+            } else {
+                None
+            };
             let looks_like_address_bar = descriptor.contains("address")
                 || descriptor.contains("omnibox")
                 || descriptor.contains("地址")
@@ -1019,20 +1051,21 @@ fn native_browser_domain(window: windows_sys::Win32::Foundation::HWND) -> Option
                     .map(|text| text.contains("http://") || text.contains("https://"))
                     .unwrap_or(false);
             if !looks_like_address_bar {
+                append_semantic_labels(&mut labels, &name);
                 continue;
             }
-            if let Some(domain) = value
-                .as_deref()
-                .and_then(extract_explicit_web_domain)
-                .or_else(|| extract_explicit_web_domain(&name))
-            {
-                // The raw address bar value is used only in memory to derive a
-                // normalized host. It is never stored or sent to the server.
-                return Some(domain);
+            if domain.is_none() {
+                domain = value
+                    .as_deref()
+                    .and_then(extract_explicit_web_domain)
+                    .or_else(|| extract_explicit_web_domain(&name));
             }
             let _ = control_type;
         }
-        None
+        Some(BrowserMetadata {
+            domain,
+            context_label: (!labels.is_empty()).then(|| labels.join(" · ")),
+        })
     })();
     unsafe { CoUninitialize() };
     result
@@ -1054,6 +1087,7 @@ fn is_browser_process(app_name: &str, process_name: &str) -> bool {
 #[cfg(windows)]
 fn sanitize_context_label(app_name: &str, process_name: &str, title: &str) -> Option<String> {
     let value = format!("{} {}", app_name, process_name).to_lowercase();
+    let mut labels = Vec::new();
 
     if is_browser_process(app_name, process_name) {
         let lower_title = title.to_lowercase();
@@ -1076,10 +1110,12 @@ fn sanitize_context_label(app_name: &str, process_name: &str, title: &str) -> Op
             ("teams", "来源：Teams"),
         ] {
             if lower_title.contains(needle) {
-                return Some(label.into());
+                append_unique_label(&mut labels, label);
+                break;
             }
         }
-        return None;
+        append_semantic_labels(&mut labels, title);
+        return (!labels.is_empty()).then(|| labels.join(" · "));
     }
 
     if value.contains("code.exe")
@@ -1089,13 +1125,209 @@ fn sanitize_context_label(app_name: &str, process_name: &str, title: &str) -> Op
         || value.contains("pycharm")
         || value.contains("android studio")
     {
-        return extract_project_identifier(title);
+        if let Some(project) = extract_project_identifier(title) {
+            append_unique_label(&mut labels, &project);
+        }
+        if let Some(resource) = infer_resource_label(title) {
+            append_unique_label(&mut labels, &resource);
+        }
+        return (!labels.is_empty()).then(|| labels.join(" · "));
     }
 
     if is_document_process(&value) {
-        return extract_document_identifier(title);
+        if let Some(document) = extract_document_identifier(title) {
+            append_unique_label(&mut labels, &document);
+        }
+        append_unique_label(&mut labels, "资源：文档");
+        return Some(labels.join(" · "));
     }
 
+    None
+}
+
+#[cfg(windows)]
+fn merge_context_labels(values: [Option<String>; 2]) -> Option<String> {
+    let mut labels = Vec::new();
+    for value in values.into_iter().flatten() {
+        for label in value.split(" · ") {
+            append_unique_label(&mut labels, label);
+        }
+    }
+    (!labels.is_empty()).then(|| labels.join(" · "))
+}
+
+#[cfg(windows)]
+fn append_unique_label(labels: &mut Vec<String>, value: &str) {
+    let normalized = value.trim();
+    if normalized.is_empty()
+        || normalized.len() > 120
+        || normalized.contains('\n')
+        || normalized.contains('\r')
+        || normalized.contains("http://")
+        || normalized.contains("https://")
+        || normalized.contains('/')
+        || normalized.contains('\\')
+        || labels.iter().any(|item| item == normalized)
+    {
+        return;
+    }
+    labels.push(normalized.to_string());
+}
+
+#[cfg(windows)]
+fn append_semantic_labels(labels: &mut Vec<String>, text: &str) {
+    let lower = text.to_lowercase();
+    if let Some(project) = extract_repository_identifier(text) {
+        append_unique_label(labels, &project);
+    }
+    if let Some(operation) = infer_operation_label(&lower) {
+        append_unique_label(labels, operation);
+    }
+    if let Some(status) = infer_status_label(&lower) {
+        append_unique_label(labels, status);
+    }
+    if let Some(resource) = infer_resource_label(text) {
+        append_unique_label(labels, &resource);
+    }
+}
+
+#[cfg(windows)]
+fn extract_repository_identifier(text: &str) -> Option<String> {
+    for candidate in text.split(|character: char| {
+        !(character.is_ascii_alphanumeric() || matches!(character, '/' | '_' | '-' | '.'))
+    }) {
+        let mut parts = candidate.split('/');
+        let Some(owner) = parts.next().map(str::trim) else {
+            continue;
+        };
+        let Some(repository) = parts.next().map(str::trim) else {
+            continue;
+        };
+        if parts.next().is_some()
+            || owner.is_empty()
+            || repository.is_empty()
+            || !is_safe_identifier_part(owner)
+            || !is_safe_identifier_part(repository)
+            || owner.eq_ignore_ascii_case("http")
+            || owner.eq_ignore_ascii_case("https")
+            || repository.eq_ignore_ascii_case("com")
+        {
+            continue;
+        }
+        return sanitize_label(repository, "项目：");
+    }
+    None
+}
+
+#[cfg(windows)]
+fn is_safe_identifier_part(value: &str) -> bool {
+    value.len() <= 80
+        && value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
+        })
+}
+
+#[cfg(windows)]
+fn infer_operation_label(lower_text: &str) -> Option<&'static str> {
+    if [
+        "actions",
+        "workflow",
+        "build",
+        "msi",
+        "artifact",
+        "构建",
+        "安装包",
+        "流水线",
+    ]
+    .iter()
+    .any(|needle| lower_text.contains(needle))
+    {
+        return Some("操作：构建发布");
+    }
+    if ["pull request", "merge request", "commit", "提交", "分支"]
+        .iter()
+        .any(|needle| lower_text.contains(needle))
+    {
+        return Some("操作：代码协作");
+    }
+    if ["issue", "问题", "bug", "缺陷"]
+        .iter()
+        .any(|needle| lower_text.contains(needle))
+    {
+        return Some("操作：问题跟踪");
+    }
+    if ["readme", "documentation", "docs", "文档"]
+        .iter()
+        .any(|needle| lower_text.contains(needle))
+    {
+        return Some("操作：查看文档");
+    }
+    None
+}
+
+#[cfg(windows)]
+fn infer_status_label(lower_text: &str) -> Option<&'static str> {
+    if ["failed", "failure", "error", "失败", "错误"]
+        .iter()
+        .any(|needle| lower_text.contains(needle))
+    {
+        return Some("状态：失败");
+    }
+    if [
+        "success",
+        "successful",
+        "succeeded",
+        "passed",
+        "successfully",
+        "成功",
+        "通过",
+    ]
+    .iter()
+    .any(|needle| lower_text.contains(needle))
+    {
+        return Some("状态：成功");
+    }
+    if ["running", "in progress", "queued", "进行中", "排队"]
+        .iter()
+        .any(|needle| lower_text.contains(needle))
+    {
+        return Some("状态：进行中");
+    }
+    None
+}
+
+#[cfg(windows)]
+fn infer_resource_label(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    if [
+        ".rs",
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        "cargo.toml",
+        "package.json",
+        "source code",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return Some("资源：代码".into());
+    }
+    if [
+        ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".pdf", "文档",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return Some("资源：文档".into());
+    }
+    if ["artifact", "安装包", "下载"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        return Some("资源：构建产物".into());
+    }
     None
 }
 
@@ -1465,7 +1697,10 @@ pub fn main() {
 
 #[cfg(all(test, windows))]
 mod windows_metadata_tests {
-    use super::{extract_explicit_web_domain, sanitize_context_label};
+    use super::{
+        extract_explicit_web_domain, extract_repository_identifier, infer_operation_label,
+        infer_status_label, sanitize_context_label,
+    };
 
     #[test]
     fn extracts_only_the_host_from_browser_title_text() {
@@ -1497,6 +1732,29 @@ mod windows_metadata_tests {
         assert_eq!(
             sanitize_context_label("Chrome", "chrome.exe", "ChatGPT - github.com"),
             Some("来源：GitHub".to_string())
+        );
+    }
+
+    #[test]
+    fn derives_redacted_project_operation_and_status_labels() {
+        let title = "Build AI锦衣卫 Windows Agent · wzhang217/ai-jinyiwei-system · GitHub Actions · Success";
+        assert_eq!(
+            extract_repository_identifier(title),
+            Some("项目：ai-jinyiwei-system".to_string())
+        );
+        assert_eq!(
+            infer_operation_label(&title.to_lowercase()),
+            Some("操作：构建发布")
+        );
+        assert_eq!(
+            infer_status_label(&title.to_lowercase()),
+            Some("状态：成功")
+        );
+        assert_eq!(
+            sanitize_context_label("Chrome", "chrome.exe", title),
+            Some(
+                "来源：GitHub · 项目：ai-jinyiwei-system · 操作：构建发布 · 状态：成功".to_string()
+            )
         );
     }
 }

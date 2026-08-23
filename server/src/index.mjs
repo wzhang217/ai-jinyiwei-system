@@ -682,6 +682,9 @@ function metadataResource(label) {
   if (value.startsWith("文档：")) return { name: value, path: "脱敏文档标识", type: "document", source_type: "文档" };
   if (value.startsWith("文件：") || value.startsWith("文件夹：")) return { name: value, path: "脱敏文件标识", type: "document", source_type: "文档" };
   if (value.startsWith("来源：")) return { name: value, path: "允许的来源提示", type: "metadata", source_type: "网站" };
+  if (value.startsWith("操作：")) return { name: value, path: "脱敏操作分类", type: "metadata", source_type: "工作操作" };
+  if (value.startsWith("状态：")) return { name: value, path: "脱敏状态分类", type: "metadata", source_type: "工作状态" };
+  if (value.startsWith("资源：")) return { name: value, path: "脱敏资源分类", type: "metadata", source_type: "工作资源" };
   return { name: value, path: "脱敏工作标识", type: "metadata", source_type: "项目" };
 }
 
@@ -747,6 +750,8 @@ function workThemeTitle(employeeName, {
   const labels = contextLabels.filter((label) => typeof label === "string");
   const types = new Set(resourceTypes.filter(Boolean));
   const hasLabel = (prefix) => labels.some((label) => label.startsWith(prefix));
+  const projectLabel = labels.find((label) => label.startsWith("项目："));
+  const operationLabel = labels.find((label) => label.startsWith("操作："));
   const appendTheme = (theme) => {
     if (!themes.includes(theme)) themes.push(theme);
   };
@@ -757,6 +762,12 @@ function workThemeTitle(employeeName, {
   if (types.has("沟通工具")) appendTheme("沟通");
   if (themes.length > 1 && themes.includes("其他")) {
     themes.splice(themes.indexOf("其他"), 1);
+  }
+  if (operationLabel && projectLabel) {
+    return `${employeeName} · ${projectLabel.slice(3)} ${operationLabel.slice(3)}`;
+  }
+  if (operationLabel) {
+    return `${employeeName} · ${operationLabel.slice(3)}活动`;
   }
   if (themes.length) return `${employeeName} · ${themes.slice(0, 4).join("、")}${themes.length > 4 ? "等" : ""}活动`;
   const apps = applicationNames.filter(Boolean);
@@ -882,6 +893,67 @@ function coalesceOverlappingActivityRows(rows) {
   return compact;
 }
 
+// Keep the raw activity_sequence for evidence and source tracing, but give
+// summaries a task-shaped sequence: adjacent observations from the same
+// foreground application form one stage, while returning to an app after a
+// different app still creates a new stage. Browser domain changes are kept as
+// a small set on that stage instead of becoming dozens of repeated Edge rows.
+function buildSummaryActivitySequence(rows) {
+  const stages = [];
+  for (const row of rows) {
+    const occurredAtMs = Date.parse(row.occurred_at);
+    if (!Number.isFinite(occurredAtMs)) continue;
+    const durationSeconds = Math.max(0, Number(row.duration_seconds) || 0);
+    const endMs = occurredAtMs + durationSeconds * 1000;
+    const appName = row.type === "idle" ? "Idle" : row.app_name;
+    const processName = row.process_name;
+    const stageKey = `${row.type}\u001f${appName}\u001f${processName}`;
+    const previous = stages.at(-1);
+    const previousGapSeconds = previous
+      ? Math.max(0, (occurredAtMs - previous.endMs) / 1000)
+      : Infinity;
+    if (!previous || previous.key !== stageKey || previousGapSeconds > 90) {
+      stages.push({
+        key: stageKey,
+        occurred_at: row.occurred_at,
+        endMs,
+        duration_seconds: durationSeconds,
+        app: row.type === "idle" ? "系统空闲" : displayApplicationName(row.app_name),
+        app_name: row.app_name,
+        context_kind: row.type === "idle" ? "系统" : applicationContext(row.app_name, row.process_name),
+        context_labels: splitContextLabels(row.context_label),
+        web_domains: row.web_domain ? [row.web_domain] : [],
+        source_kinds: [row.source_kind || sourceKindForEvent(row)],
+      });
+      continue;
+    }
+
+    previous.endMs = Math.max(previous.endMs, endMs);
+    previous.duration_seconds = Math.max(0, Math.round((previous.endMs - Date.parse(previous.occurred_at)) / 1000));
+    previous.context_labels = [...new Set([
+      ...previous.context_labels,
+      ...splitContextLabels(row.context_label),
+    ])].slice(0, 8);
+    if (row.web_domain && !previous.web_domains.includes(row.web_domain)) {
+      previous.web_domains = [...previous.web_domains, row.web_domain].slice(0, 8);
+    }
+    const sourceKind = row.source_kind || sourceKindForEvent(row);
+    if (!previous.source_kinds.includes(sourceKind)) previous.source_kinds.push(sourceKind);
+  }
+
+  return stages.map(({ key, endMs, context_labels, web_domains, source_kinds, ...stage }) => ({
+    ...stage,
+    duration_seconds: Math.max(0, Math.round((endMs - Date.parse(stage.occurred_at)) / 1000)),
+    context_label: context_labels.join(" · ") || null,
+    context_labels,
+    web_domain: web_domains.length === 1 ? web_domains[0] : null,
+    web_domains,
+    source_kind: source_kinds
+      .sort((left, right) => sourceKindPriority(right) - sourceKindPriority(left))[0] || "desktop_app",
+    source_kinds,
+  }));
+}
+
 function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = null, team = null } = {}) {
   const episodes = [];
   let current = null;
@@ -955,6 +1027,7 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
       const webDomains = [...new Set(activityRows.map((row) => row.web_domain).filter((value) => typeof value === "string" && value.trim()))];
       const sourceKinds = [...new Set(activityRows.map((row) => row.source_kind || sourceKindForEvent(row)))];
       const sourceTypes = [...new Set(sourceKinds.map(sourceKindLabel))];
+      const summaryActivitySequence = buildSummaryActivitySequence(activityRows);
       const activitySequence = activityRows.map((row) => {
         const rowContextLabels = splitContextLabels(row.context_label);
         return ({
@@ -1051,12 +1124,15 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         source_kinds: sourceKinds,
         source_types: sourceTypes,
         activity_sequence: activitySequence,
+        summary_activity_sequence: summaryActivitySequence,
+        activity_fragment_count: activityCount,
+        summary_activity_count: summaryActivitySequence.length,
         duration_seconds: durationSeconds,
         started_at: start,
         ended_at: end,
         summary: episode.isIdle
           ? `这是一条基于系统空闲状态生成的活动元数据记录，时间范围为${timeRange}。`
-          : `${episode.employeeName} 在 ${contextKinds.join("、") || "工作"}上下文中连续活动 ${readableDuration}（${timeRange}），期间按顺序记录 ${displayApps.join("、")} 等 ${activityCount} 个去重活动片段，并发生 ${contextSwitches} 次应用切换。来源类型包括 ${sourceTypes.join("、")}；${sourceDetail}该摘要只基于活动元数据生成。`,
+          : `${episode.employeeName} 在 ${contextKinds.join("、") || "工作"}上下文中连续活动 ${readableDuration}（${timeRange}），按 ${summaryActivitySequence.length} 个应用阶段概括（原始采集片段 ${activityCount} 个），发生 ${contextSwitches} 次应用切换。来源类型包括 ${sourceTypes.join("、")}；${sourceDetail}该摘要只基于活动元数据生成。`,
         prior_context: "来源于 Windows Agent 的前台应用活动采集；工作标识来自允许的开发工具窗口标题脱敏结果，网站只保留域名。",
         important_context: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论；系统不保存原始窗口标题、完整 URL、页面正文或聊天正文。",
         non_obvious: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论；系统不保存原始窗口标题、完整 URL、页面正文或聊天正文。",
@@ -1181,6 +1257,7 @@ function semanticGroupsForText(value) {
 
 function historyRecordSemanticText(record) {
   const sequence = Array.isArray(record?.activity_sequence) ? record.activity_sequence : [];
+  const summarySequence = Array.isArray(record?.summary_activity_sequence) ? record.summary_activity_sequence : [];
   const timeline = Array.isArray(record?.timeline) ? record.timeline : [];
   const resources = Array.isArray(record?.resources) ? record.resources : [];
   const citations = Array.isArray(record?.citations) ? record.citations : [];
@@ -1203,6 +1280,14 @@ function historyRecordSemanticText(record) {
       item?.web_domain,
       item?.source_kind,
     ]),
+    summarySequence.flatMap((item) => [
+      item?.app,
+      item?.context_kind,
+      item?.context_label,
+      item?.context_labels,
+      item?.web_domain,
+      item?.web_domains,
+    ]),
     timeline.flatMap((item) => [item?.app, item?.text, item?.source_kind]),
     resources.map((item) => item?.name),
     citations.map((item) => [item?.label, item?.detail]),
@@ -1211,6 +1296,7 @@ function historyRecordSemanticText(record) {
 
 function semanticRecordFields(record) {
   const sequence = Array.isArray(record?.activity_sequence) ? record.activity_sequence : [];
+  const summarySequence = Array.isArray(record?.summary_activity_sequence) ? record.summary_activity_sequence : [];
   const timeline = Array.isArray(record?.timeline) ? record.timeline : [];
   return [
     [record?.title, 7],
@@ -1228,6 +1314,14 @@ function semanticRecordFields(record) {
       item?.context_labels,
       item?.web_domain,
     ].flat(Infinity).filter(Boolean).join(" ")).join(" "), 4],
+    [summarySequence.map((item) => [
+      item?.app,
+      item?.context_kind,
+      item?.context_label,
+      item?.context_labels,
+      item?.web_domain,
+      item?.web_domains,
+    ].flat(Infinity).filter(Boolean).join(" ")).join(" "), 5],
     [timeline.map((item) => item?.text).join(" "), 2],
   ];
 }
@@ -1446,6 +1540,7 @@ function buildRollupRecords(leafRecords, scope = "window") {
     const sourceEventIds = [...new Set(records.flatMap((record) => record.source_event_ids || []))];
     const timeline = records.flatMap((record) => record.timeline || []).sort((left, right) => Date.parse(left.occurred_at) - Date.parse(right.occurred_at));
     const activitySequence = records.flatMap((record) => record.activity_sequence || []).sort((left, right) => Date.parse(left.occurred_at) - Date.parse(right.occurred_at));
+    const summaryActivitySequence = records.flatMap((record) => record.summary_activity_sequence || record.activity_sequence || []).sort((left, right) => Date.parse(left.occurred_at) - Date.parse(right.occurred_at));
     const resources = [...new Map(records.flatMap((record) => record.resources || []).map((item) => [item.name, item])).values()];
     const resourceTypes = [...new Set(records.flatMap((record) => record.resource_types || []).filter(Boolean))];
     const citations = [...new Map(records.flatMap((record) => record.citations || []).map((item) => [`${item.label}:${item.detail}`, item])).values()];
@@ -1482,6 +1577,9 @@ function buildRollupRecords(leafRecords, scope = "window") {
       source_kinds: sourceKinds,
       source_types: sourceTypes,
       activity_sequence: activitySequence,
+      summary_activity_sequence: summaryActivitySequence,
+      activity_fragment_count: records.reduce((sum, record) => sum + Number(record.activity_fragment_count || record.activity_sequence?.length || 0), 0),
+      summary_activity_count: summaryActivitySequence.length,
       duration_seconds: durationSeconds,
       started_at: new Date(periodStartMs).toISOString(),
       ended_at: new Date(periodEndMs).toISOString(),
@@ -1596,6 +1694,7 @@ async function materializeMemoryRecords(db, baseRecords, ai, { deferModel = fals
           || JSON.stringify(existingPayload.resources || []) !== JSON.stringify(baseRecord.resources || [])
         ))
         || !Array.isArray(existingPayload.activity_sequence)
+        || !Array.isArray(existingPayload.summary_activity_sequence)
         || !Array.isArray(existingPayload.source_kinds)
         || !Array.isArray(existingPayload.source_types)
         || !Array.isArray(existingPayload.resource_types)
