@@ -72,9 +72,11 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.equal(enrolled.response.status, 201);
     assert.equal(enrolled.body.employee.id, "employee-chen");
 
+    const testNow = new Date();
+    testNow.setUTCHours(12, 0, 0, 0);
     const event = {
       event_id: "event-1",
-      occurred_at: new Date().toISOString(),
+      occurred_at: testNow.toISOString(),
       type: "app_session",
       app_name: "Visual Studio Code",
       process_name: "Code.exe",
@@ -97,7 +99,7 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
 
     const adjacentEvent = {
       event_id: "event-2",
-      occurred_at: new Date(Date.now() - 1_000).toISOString(),
+      occurred_at: new Date(testNow.getTime() - 1_000).toISOString(),
       type: "app_session",
       app_name: "Google Chrome",
       process_name: "chrome.exe",
@@ -110,7 +112,7 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
 
     const earlierEvent = {
       event_id: "event-0",
-      occurred_at: new Date(Date.now() - 20 * 60_000).toISOString(),
+      occurred_at: new Date(testNow.getTime() - 20 * 60_000).toISOString(),
       type: "app_session",
       app_name: "Windows Explorer",
       process_name: "explorer.exe",
@@ -352,6 +354,51 @@ test("allows an admin to configure 24-hour collection", async () => {
       body: JSON.stringify({ work_hours_start: "18:00", work_hours_end: "09:00" }),
     });
     assert.equal(invalid.response.status, 400);
+  });
+});
+
+test("enforces application and website exclusion policy for uploaded events", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const updated = await jsonFetch(`${base}/api/admin/policy`, {
+      method: "PUT",
+      headers: adminHeaders,
+      body: JSON.stringify({
+        work_hours_start: "00:00",
+        work_hours_end: "24:00",
+        excluded_processes: ["passwordmanager.exe"],
+        excluded_domains: ["private.example.com"],
+      }),
+    });
+    assert.equal(updated.response.status, 200);
+    assert.deepEqual(updated.body.policy.excluded_processes, ["passwordmanager.exe"]);
+    assert.deepEqual(updated.body.policy.excluded_domains, ["private.example.com"]);
+
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-EXCLUSION", os_version: "Windows 11", agent_version: "0.1.3" }),
+    });
+    const headers = { authorization: `Bearer ${enrolled.body.device_token}` };
+    const uploaded = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ events: [
+        { event_id: "excluded-process", occurred_at: new Date().toISOString(), type: "app_session", app_name: "Password Manager", process_name: "PasswordManager.exe", duration_seconds: 30 },
+        { event_id: "excluded-domain", occurred_at: new Date().toISOString(), type: "app_session", app_name: "Chrome", process_name: "chrome.exe", web_domain: "mail.private.example.com", duration_seconds: 30 },
+        { event_id: "allowed-event", occurred_at: new Date().toISOString(), type: "app_session", app_name: "Visual Studio Code", process_name: "Code.exe", context_label: "项目：AI锦衣卫系统", duration_seconds: 30 },
+      ] }),
+    });
+    assert.equal(uploaded.response.status, 202);
+    assert.equal(uploaded.body.accepted, 1);
+    assert.equal(uploaded.body.filtered, 2);
+
+    const events = await jsonFetch(`${base}/api/admin/events`, { headers: adminHeaders });
+    assert.deepEqual(events.body.events.map((event) => event.event_id), ["allowed-event"]);
   });
 });
 

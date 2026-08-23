@@ -23,6 +23,8 @@ const defaultPolicy = {
   heartbeat_interval_seconds: 60,
   work_hours_start: "09:00",
   work_hours_end: "18:00",
+  excluded_processes: [],
+  excluded_domains: [],
   version: 1,
 };
 
@@ -206,7 +208,9 @@ function createSchema(db) {
   for (const employee of defaultEmployees) employeeInsert.run(...employee, createdAt);
 
   const policyInsert = db.prepare("INSERT OR IGNORE INTO policies (key, value) VALUES (?, ?)");
-  for (const [key, value] of Object.entries(defaultPolicy)) policyInsert.run(key, String(value));
+  for (const [key, value] of Object.entries(defaultPolicy)) {
+    policyInsert.run(key, Array.isArray(value) ? JSON.stringify(value) : String(value));
+  }
 }
 
 function ensureColumn(db, table, column, definition) {
@@ -218,6 +222,15 @@ function ensureColumn(db, table, column, definition) {
 function getPolicy(db) {
   const rows = db.prepare("SELECT key, value FROM policies").all();
   return rows.reduce((policy, row) => {
+    if (["excluded_processes", "excluded_domains"].includes(row.key)) {
+      try {
+        const parsed = JSON.parse(row.value);
+        policy[row.key] = Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+      } catch {
+        policy[row.key] = [];
+      }
+      return policy;
+    }
     policy[row.key] = ["idle_threshold_seconds", "heartbeat_interval_seconds", "version"].includes(row.key)
       ? Number(row.value)
       : row.value;
@@ -413,7 +426,33 @@ function validatePolicyUpdate(body) {
   const end = parsePolicyMinutes(body.work_hours_end, { allowEndOfDay: true });
   if (start === null || end === null) return "work hours must use HH:MM format";
   if (start >= end) return "work_hours_end must be later than work_hours_start";
+  if (!isValidPolicyList(body.excluded_processes, { kind: "process" })) return "excluded_processes is invalid";
+  if (!isValidPolicyList(body.excluded_domains, { kind: "domain" })) return "excluded_domains is invalid";
   return null;
+}
+
+function isValidPolicyList(value, { kind }) {
+  if (!Array.isArray(value) || value.length > 100) return false;
+  return value.every((item) => {
+    if (typeof item !== "string" || !item.trim() || item.length > 120 || /[\r\n]/.test(item)) return false;
+    if (kind === "domain") return isSafeWebDomain(item);
+    return /^[a-z0-9_.-]+$/i.test(item.trim());
+  });
+}
+
+function policyDomainMatches(domain, excludedDomains = []) {
+  const normalized = String(domain || "").trim().toLowerCase();
+  if (!normalized) return false;
+  return excludedDomains.some((excluded) => {
+    const value = String(excluded || "").trim().toLowerCase();
+    return normalized === value || normalized.endsWith(`.${value}`);
+  });
+}
+
+function eventExcludedByPolicy(event, policy) {
+  const processName = String(event.process_name || "").trim().toLowerCase();
+  const excludedProcesses = (policy.excluded_processes || []).map((item) => String(item).trim().toLowerCase());
+  return excludedProcesses.includes(processName) || policyDomainMatches(event.web_domain, policy.excluded_domains);
 }
 
 function isSafeWebDomain(value) {
@@ -1300,14 +1339,40 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
         const body = await readJson(request);
-        const validationError = validatePolicyUpdate(body);
-        if (validationError) return sendError(response, 400, validationError, "invalid_policy");
         const current = getPolicy(db);
-        const version = Number(current.version || 0) + 1;
-        db.prepare("UPDATE policies SET value = ? WHERE key = ?").run(body.work_hours_start, "work_hours_start");
-        db.prepare("UPDATE policies SET value = ? WHERE key = ?").run(body.work_hours_end, "work_hours_end");
-        db.prepare("UPDATE policies SET value = ? WHERE key = ?").run(String(version), "version");
-        recordAudit(db, "policy_changed", "admin", "agent_policy", `work hours changed to ${body.work_hours_start}-${body.work_hours_end}`);
+        const nextPolicy = {
+          work_hours_start: body?.work_hours_start,
+          work_hours_end: body?.work_hours_end,
+          excluded_processes: body?.excluded_processes ?? current.excluded_processes ?? [],
+          excluded_domains: body?.excluded_domains ?? current.excluded_domains ?? [],
+        };
+        const validationError = validatePolicyUpdate(nextPolicy);
+        if (validationError) return sendError(response, 400, validationError, "invalid_policy");
+        const changed = [
+          ["work_hours_start", nextPolicy.work_hours_start],
+          ["work_hours_end", nextPolicy.work_hours_end],
+          ["excluded_processes", JSON.stringify(nextPolicy.excluded_processes.map((item) => item.trim().toLowerCase()))],
+          ["excluded_domains", JSON.stringify(nextPolicy.excluded_domains.map((item) => item.trim().toLowerCase()))],
+        ].filter(([key, value]) => {
+          const currentValue = ["excluded_processes", "excluded_domains"].includes(key)
+            ? JSON.stringify(current[key] || [])
+            : String(current[key] ?? "");
+          return currentValue !== String(value);
+        });
+        if (changed.length > 0) {
+          for (const [key, value] of changed) {
+            db.prepare("UPDATE policies SET value = ? WHERE key = ?").run(value, key);
+          }
+          const version = Number(current.version || 0) + 1;
+          db.prepare("UPDATE policies SET value = ? WHERE key = ?").run(String(version), "version");
+          recordAudit(
+            db,
+            "policy_changed",
+            "admin",
+            "agent_policy",
+            `work hours=${nextPolicy.work_hours_start}-${nextPolicy.work_hours_end}; excluded processes=${nextPolicy.excluded_processes.length}; excluded domains=${nextPolicy.excluded_domains.length}`,
+          );
+        }
         return sendJson(response, 200, { policy: getPolicy(db) });
       }
 
@@ -1612,6 +1677,8 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const body = await readJson(request);
         const validationError = validateEvents(body);
         if (validationError) return sendError(response, 400, validationError);
+        const policy = getPolicy(db);
+        const acceptedEvents = body.events.filter((event) => !eventExcludedByPolicy(event, policy));
         const insert = db.prepare(`
           INSERT INTO events
             (event_id, device_id, occurred_at, type, app_name, process_name, context_label, web_domain, duration_seconds, received_at)
@@ -1622,14 +1689,18 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
             duration_seconds = MAX(events.duration_seconds, excluded.duration_seconds),
             received_at = excluded.received_at
         `);
-        for (const event of body.events) {
+        for (const event of acceptedEvents) {
           insert.run(event.event_id, device.id, event.occurred_at, event.type, event.app_name, event.process_name, event.context_label || event.title_hint || null, event.web_domain ? event.web_domain.trim().toLowerCase() : null, event.duration_seconds, isoNow());
         }
         if (device.auth_kind === "device") {
           db.prepare("UPDATE devices SET status = 'online', last_heartbeat_at = ?, updated_at = ? WHERE id = ?").run(isoNow(), isoNow(), device.id);
           if (wasOffline) recordAudit(db, "agent_online", "system", device.id, "event upload resumed");
         }
-        return sendJson(response, 202, { accepted: body.events.length, duplicate_safe: true });
+        return sendJson(response, 202, {
+          accepted: acceptedEvents.length,
+          filtered: body.events.length - acceptedEvents.length,
+          duplicate_safe: true,
+        });
       }
 
       if (method === "POST" && url.pathname === "/api/agent/heartbeat") {

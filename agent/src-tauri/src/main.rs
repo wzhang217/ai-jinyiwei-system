@@ -26,6 +26,10 @@ struct Policy {
     heartbeat_interval_seconds: u64,
     work_hours_start: String,
     work_hours_end: String,
+    #[serde(default)]
+    excluded_processes: Vec<String>,
+    #[serde(default)]
+    excluded_domains: Vec<String>,
     version: u64,
 }
 
@@ -36,6 +40,8 @@ impl Default for Policy {
             heartbeat_interval_seconds: 60,
             work_hours_start: "09:00".into(),
             work_hours_end: "18:00".into(),
+            excluded_processes: Vec::new(),
+            excluded_domains: Vec::new(),
             version: 1,
         }
     }
@@ -650,27 +656,31 @@ impl Core {
                 let _ = self.checkpoint_idle_session(now);
             } else if let Some(activity) = foreground_application() {
                 let _ = self.finish_idle_session(now);
-                let changed = self
-                    .active_session
-                    .as_ref()
-                    .map(|session| {
-                        session.process_name != activity.process_name
-                            || session.context_label != activity.context_label
-                            || session.web_domain != activity.web_domain
-                    })
-                    .unwrap_or(true);
-                if changed {
+                if activity_excluded(&activity, &self.status.policy) {
                     let _ = self.finish_session(now);
-                    self.active_session = Some(ActiveSession {
-                        event_id: Uuid::new_v4().to_string(),
-                        app_name: activity.app_name,
-                        process_name: activity.process_name,
-                        context_label: activity.context_label,
-                        web_domain: activity.web_domain,
-                        started_at: now,
-                        occurred_at: Utc::now().to_rfc3339(),
-                        last_emitted_duration: 0,
-                    });
+                } else {
+                    let changed = self
+                        .active_session
+                        .as_ref()
+                        .map(|session| {
+                            session.process_name != activity.process_name
+                                || session.context_label != activity.context_label
+                                || session.web_domain != activity.web_domain
+                        })
+                        .unwrap_or(true);
+                    if changed {
+                        let _ = self.finish_session(now);
+                        self.active_session = Some(ActiveSession {
+                            event_id: Uuid::new_v4().to_string(),
+                            app_name: activity.app_name,
+                            process_name: activity.process_name,
+                            context_label: activity.context_label,
+                            web_domain: activity.web_domain,
+                            started_at: now,
+                            occurred_at: Utc::now().to_rfc3339(),
+                            last_emitted_duration: 0,
+                        });
+                    }
                 }
             }
             let _ = self.checkpoint_session(now);
@@ -754,6 +764,26 @@ fn within_work_hours(policy: &Policy) -> bool {
         return true;
     }
     current >= start && current < end
+}
+
+fn activity_excluded(activity: &ForegroundActivity, policy: &Policy) -> bool {
+    let process_name = activity.process_name.trim().to_lowercase();
+    if policy
+        .excluded_processes
+        .iter()
+        .any(|excluded| excluded.trim().eq_ignore_ascii_case(&process_name))
+    {
+        return true;
+    }
+
+    let Some(domain) = activity.web_domain.as_deref() else {
+        return false;
+    };
+    let domain = domain.trim().to_lowercase();
+    policy.excluded_domains.iter().any(|excluded| {
+        let excluded = excluded.trim().to_lowercase();
+        domain == excluded || domain.ends_with(&format!(".{excluded}"))
+    })
 }
 
 fn store_secret(device_id: &str, token: &str) -> Result<(), String> {

@@ -702,7 +702,7 @@ function PolicyEditor({ onToast }) {
   }, []);
 
   const save = async () => {
-    const nextPolicy = allDay ? { work_hours_start: "00:00", work_hours_end: "24:00" } : policy;
+    const nextPolicy = allDay ? { ...policy, work_hours_start: "00:00", work_hours_end: "24:00" } : policy;
     setSaving(true);
     setError("");
     try {
@@ -719,7 +719,52 @@ function PolicyEditor({ onToast }) {
 
   return <SectionCard title="采集策略" description="统一控制应用、网页和文件元数据的采集范围"><div className="policy-grid"><PolicyItem icon={<Browser size={19} />} title="应用与窗口" detail="所有公司管理设备" enabled /><PolicyItem icon={<Globe size={19} />} title="浏览器域名和标题" detail="去除查询参数和 Token" enabled /><PolicyItem icon={<FileText size={19} />} title="文件元数据" detail="仅文件名、扩展名和脱敏路径" enabled /><PolicyItem icon={<DeviceMobile size={19} />} title="截图、键盘和剪贴板" detail="系统级禁止" enabled={false} /></div><div className="policy-time-settings"><div><strong>应用活动采集时间</strong><small>{allDay ? "全天运行，适合当前联调测试" : "只在工作时间内记录应用活动"}</small></div><label className="policy-checkbox"><input type="checkbox" checked={allDay} onChange={(event) => setAllDay(event.target.checked)} /><span>24 小时测试模式</span></label>{!allDay && <div className="policy-time-inputs"><label>开始<input type="time" value={policy.work_hours_start} onChange={(event) => setPolicy((current) => ({ ...current, work_hours_start: event.target.value }))} /></label><span>至</span><label>结束<input type="time" value={policy.work_hours_end} onChange={(event) => setPolicy((current) => ({ ...current, work_hours_end: event.target.value }))} /></label></div>}</div>{error && <div className="error-box">策略保存失败：{error}</div>}<div className="policy-save-row"><small>{loading ? "正在读取服务端策略…" : agentApiEnabled ? `策略版本 v${policy.version || 1}` : "当前为演示模式，未连接服务端"}</small><button className="primary-button" disabled={loading || saving} onClick={save}>{saving ? "保存中…" : "保存采集策略"}</button></div></SectionCard>;
 }
-function ExclusionPolicy({ onToast }) { return <SectionCard title="应用与网站排除" description="被排除的来源不会进入活动事件或 Memory Summary"><div className="exclusion-list"><ExclusionRow name="个人银行与支付网站" type="网站分类" enabled /><ExclusionRow name="密码管理器" type="应用分类" enabled /><ExclusionRow name="敏感客户项目目录" type="文件路径" enabled /><ExclusionRow name="社交与娱乐分类" type="默认分类" enabled={false} /></div><button className="outline-button" onClick={() => onToast("新增排除规则需要输入来源")}><Plus size={16} />新增排除规则</button></SectionCard>; }
+function ExclusionPolicy({ onToast }) {
+  const [policy, setPolicy] = useState({ excluded_processes: [], excluded_domains: [] });
+  const [loading, setLoading] = useState(agentApiEnabled);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!agentApiEnabled) return undefined;
+    getLivePolicy()
+      .then((nextPolicy) => setPolicy({
+        ...nextPolicy,
+        excluded_processes: nextPolicy.excluded_processes || [],
+        excluded_domains: nextPolicy.excluded_domains || [],
+      }))
+      .catch((requestError) => setError(requestError.message))
+      .finally(() => setLoading(false));
+    return undefined;
+  }, []);
+
+  const updateList = (key, value) => {
+    setPolicy((current) => ({
+      ...current,
+      [key]: value.split(",").map((item) => item.trim().toLowerCase()).filter(Boolean),
+    }));
+  };
+
+  const save = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      const saved = agentApiEnabled ? await updateLivePolicy(policy) : policy;
+      setPolicy({
+        ...saved,
+        excluded_processes: saved.excluded_processes || [],
+        excluded_domains: saved.excluded_domains || [],
+      });
+      onToast("排除策略已保存，后续采集将跳过这些来源");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <SectionCard title="应用与网站排除" description="被排除的来源不会进入活动事件或 Memory Summary"><div className="exclusion-editor"><label>排除的进程（逗号分隔）<input value={policy.excluded_processes.join(", ")} placeholder="passwordmanager.exe, private.exe" onChange={(event) => updateList("excluded_processes", event.target.value)} /></label><label>排除的网站域名（逗号分隔）<input value={policy.excluded_domains.join(", ")} placeholder="bank.example.com, personal.example" onChange={(event) => updateList("excluded_domains", event.target.value)} /></label></div><small className="policy-hint">支持子域名匹配；只对保存后的新事件生效，不删除历史数据。</small>{error && <div className="error-box">排除策略保存失败：{error}</div>}<div className="policy-save-row"><small>{loading ? "正在读取服务端策略…" : agentApiEnabled ? `策略版本 v${policy.version || 1}` : "当前为演示模式，未连接服务端"}</small><button className="primary-button" disabled={loading || saving} onClick={save}>{saving ? "保存中…" : "保存排除策略"}</button></div></SectionCard>;
+}
 function ExclusionRow({ name, type, enabled }) { return <div className="exclusion-row"><span className={`exclusion-switch ${enabled ? "on" : ""}`}><i /></span><span><strong>{name}</strong><small>{type}</small></span><button className="row-action"><ArrowSquareOut size={15} /></button></div>; }
 function RetentionPolicy({ onToast }) {
   const defaultCutoff = new Date(Date.now() - 90 * 24 * 3600_000).toISOString().slice(0, 10);
