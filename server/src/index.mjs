@@ -643,18 +643,27 @@ function applicationContext(appName, processName) {
 
 function metadataResource(label) {
   const value = String(label || "");
-  if (value.startsWith("项目：")) return { name: value, path: "脱敏项目标识", type: "code" };
-  if (value.startsWith("文档：")) return { name: value, path: "脱敏文档标识", type: "document" };
-  if (value.startsWith("文件：") || value.startsWith("文件夹：")) return { name: value, path: "脱敏文件标识", type: "document" };
-  if (value.startsWith("来源：")) return { name: value, path: "允许的来源提示", type: "metadata" };
-  return { name: value, path: "脱敏工作标识", type: "metadata" };
+  if (value.startsWith("项目：")) return { name: value, path: "脱敏项目标识", type: "code", source_type: "代码仓库" };
+  if (value.startsWith("文档：")) return { name: value, path: "脱敏文档标识", type: "document", source_type: "文档" };
+  if (value.startsWith("文件：") || value.startsWith("文件夹：")) return { name: value, path: "脱敏文件标识", type: "document", source_type: "文档" };
+  if (value.startsWith("来源：")) return { name: value, path: "允许的来源提示", type: "metadata", source_type: "网站" };
+  return { name: value, path: "脱敏工作标识", type: "metadata", source_type: "项目" };
 }
 
 function applicationResource(applicationName) {
+  const context = applicationContext(applicationName, "");
+  const sourceType = context === "沟通"
+    ? "沟通工具"
+    : context === "文档"
+      ? "文档"
+      : context === "项目管理"
+        ? "项目"
+        : "应用元数据";
   return {
     name: applicationName,
     path: "前台应用元数据",
     type: "application",
+    source_type: sourceType,
   };
 }
 
@@ -671,7 +680,7 @@ function sourceKindLabel(sourceKind) {
 function contextResource(label) {
   const resource = metadataResource(label);
   return String(label || "").startsWith("来源：")
-    ? { ...resource, path: "脱敏网站来源提示", type: "website" }
+    ? { ...resource, path: "脱敏网站来源提示", type: "website", source_type: "网站" }
     : resource;
 }
 
@@ -912,8 +921,9 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
       const resources = [...new Map([
         ...(episode.isIdle ? [] : applicationNames.map(applicationResource)),
         ...contextLabels.map(contextResource),
-        ...webDomains.map((domain) => ({ name: domain, path: "仅域名元数据", type: "website" })),
+        ...webDomains.map((domain) => ({ name: domain, path: "仅域名元数据", type: "website", source_type: "网站" })),
       ].map((item) => [item.name, item])).values()];
+      const resourceTypes = [...new Set(resources.map((resource) => resource.source_type).filter(Boolean))];
       const citations = [...new Map(episode.rows.map((row) => [row.process_name, {
         label: row.hostname,
         detail: `${episode.employeeName} · ${row.process_name}`,
@@ -952,6 +962,7 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         non_obvious: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论；系统不保存原始窗口标题、完整 URL、页面正文或聊天正文。",
         timeline,
         resources,
+        resource_types: resourceTypes,
         citations,
         source_event_ids: [...new Set(episode.rows.map((row) => row.source_event_id || row.event_id))],
         confidence: 1,
@@ -1082,6 +1093,7 @@ function historyRecordSemanticText(record) {
     record?.web_domains,
     record?.source_kinds,
     record?.source_types,
+    record?.resource_types,
     record?.application_names,
     sequence.flatMap((item) => [item?.app, item?.context_kind, item?.context_label, item?.web_domain, item?.source_kind]),
     timeline.flatMap((item) => [item?.app, item?.text, item?.source_kind]),
@@ -1100,6 +1112,7 @@ function semanticRecordFields(record) {
     [record?.web_domains?.join(" "), 6],
     [record?.application_names?.join(" "), 5],
     [record?.source_types?.join(" "), 4],
+    [record?.resource_types?.join(" "), 5],
     [record?.source_kinds?.join(" "), 3],
     [sequence.map((item) => [item?.app, item?.context_kind, item?.context_label, item?.web_domain].filter(Boolean).join(" ")).join(" "), 4],
     [timeline.map((item) => item?.text).join(" "), 2],
@@ -1321,6 +1334,7 @@ function buildRollupRecords(leafRecords, scope = "window") {
     const timeline = records.flatMap((record) => record.timeline || []).sort((left, right) => Date.parse(left.occurred_at) - Date.parse(right.occurred_at));
     const activitySequence = records.flatMap((record) => record.activity_sequence || []).sort((left, right) => Date.parse(left.occurred_at) - Date.parse(right.occurred_at));
     const resources = [...new Map(records.flatMap((record) => record.resources || []).map((item) => [item.name, item])).values()];
+    const resourceTypes = [...new Set(records.flatMap((record) => record.resource_types || []).filter(Boolean))];
     const citations = [...new Map(records.flatMap((record) => record.citations || []).map((item) => [`${item.label}:${item.detail}`, item])).values()];
     const periodStartMs = Math.min(...records.map((record) => Date.parse(record.started_at)));
     const periodEndMs = Math.max(...records.map((record) => Date.parse(record.ended_at)));
@@ -1361,6 +1375,7 @@ function buildRollupRecords(leafRecords, scope = "window") {
       non_obvious: "汇总记录用于帮助理解连续工作上下文，不代表工作效率或绩效结论；系统不保存原始窗口标题、完整 URL、页面正文或聊天正文。",
       timeline,
       resources,
+      resource_types: resourceTypes,
       citations,
       source_event_ids: sourceEventIds,
       source_record_ids: records.map((record) => record.id),

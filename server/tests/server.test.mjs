@@ -695,6 +695,7 @@ test("classifies project-management and collaboration sources without raw page c
     assert.deepEqual(leaf.context_kinds, ["项目管理"]);
     assert.deepEqual(leaf.web_domains, ["jira.example.com"]);
     assert.deepEqual(leaf.source_kinds, ["browser_extension"]);
+    assert.deepEqual(leaf.resource_types.sort(), ["网站", "项目"]);
     assert.deepEqual(leaf.source_types, ["浏览器扩展"]);
     assert.equal(leaf.activity_sequence.length, 1);
     assert.equal(leaf.activity_sequence[0].source_kind, "browser_extension");

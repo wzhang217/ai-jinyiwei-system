@@ -11,6 +11,7 @@ export function recordToMarkdown(record) {
   const webDomains = (record.webDomains || record.web_domains || []).join(", ");
   const sourceKinds = (record.sourceKinds || record.source_kinds || []).join(", ");
   const sourceTypes = (record.sourceTypes || record.source_types || []).join(", ");
+  const resourceTypes = (record.resourceTypes || record.resource_types || []).join(", ");
   const citations = (record.citations || []).map((item) => `- ${item.label} — ${item.detail}`).join("\n");
   const timeline = (record.timeline || []).map((item) => `- ${item.time} · ${item.text}`).join("\n");
   const resources = (record.resources || []).map((item) => `- ${item.name} — ${item.path}`).join("\n");
@@ -30,6 +31,7 @@ context_labels: [${contextLabels}]
 web_domains: [${webDomains}]
 source_kinds: [${sourceKinds}]
 source_types: [${sourceTypes}]
+resource_types: [${resourceTypes}]
 duration: ${record.duration}
 record_type: ${record.recordType}
 rollup_scope: ${record.rollupScope || ""}

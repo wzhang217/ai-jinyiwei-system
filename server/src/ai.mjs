@@ -73,6 +73,7 @@ function publicRecord(record) {
     web_domains: record.web_domains || [],
     source_kinds: record.source_kinds || [],
     source_types: record.source_types || [],
+    resource_types: record.resource_types || [],
     context_switches: record.context_switches || 0,
     duration_seconds: record.duration_seconds || 0,
     started_at: record.started_at,
@@ -92,6 +93,10 @@ function publicRecord(record) {
       source_kind: item?.source_kind,
     })),
     resource_names: (record.resources || []).map((item) => item?.name).filter(Boolean).slice(0, 100),
+    resource_details: (record.resources || []).map((item) => ({
+      name: item?.name,
+      source_type: item?.source_type,
+    })).filter((item) => item.name).slice(0, 100),
     citation_labels: (record.citations || []).map((item) => item?.label).filter(Boolean).slice(0, 100),
     timeline: (record.timeline || []).slice(0, 100).map((item) => ({
       occurred_at: item?.occurred_at,
@@ -238,7 +243,7 @@ export function createAiService({
       if (!canCallModel) return { ...fallback, status: "fallback", model_name: "rules-v1" };
       try {
         const result = await complete(createPrompt({
-          system: "你是企业 Computer History 的 Memory Summary 生成器。只根据输入的活动元数据生成 JSON。时间优先使用 *_shanghai 字段，统一按东八区表达。禁止猜测文件内容、聊天正文、网页正文、键盘输入、截图内容或绩效结论。只返回 title、description、summary、prior_context、important_context、confidence 字段。不要输出 URL、文件路径、原始窗口标题或敏感正文。标题必须是可读的工作主题，例如‘文件、文档、其他、沟通活动’或‘开发、浏览器、沟通活动’，不能只使用某个网站域名、单个应用名或员工姓名。描述和 summary 必须尽量包含东八区时间范围、涉及应用、按时间顺序的活动片段、应用切换次数、来源类型和可见的网站/项目标识；没有证据的内容明确说未记录。",
+          system: "你是企业 Computer History 的 Memory Summary 生成器。只根据输入的活动元数据生成 JSON。时间优先使用 *_shanghai 字段，统一按东八区表达。禁止猜测文件内容、聊天正文、网页正文、键盘输入、截图内容或绩效结论。只返回 title、description、summary、prior_context、important_context、confidence 字段。不要输出 URL、文件路径、原始窗口标题或敏感正文。标题必须是可读的工作主题，例如‘文件、文档、其他、沟通活动’或‘开发、浏览器、沟通活动’，不能只使用某个网站域名、单个应用名或员工姓名。描述和 summary 必须尽量包含东八区时间范围、涉及应用、按时间顺序的活动片段、应用切换次数、采集来源类型，以及资源类型（项目、文档、代码仓库、网站、沟通工具）和可见的网站/项目标识；资源类型只能使用输入中已有的证据，没有证据的内容明确说未记录。",
           input: { task: "summarize_memory", record: publicRecord(input) },
         }));
         if (!result || typeof result !== "object") throw new Error("AI summary was not valid JSON");

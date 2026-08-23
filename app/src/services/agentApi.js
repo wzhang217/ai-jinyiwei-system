@@ -280,7 +280,10 @@ function normalizeLiveRecord(record) {
     promptVersion: record.prompt_version || record.promptVersion || "",
     userId: record.user_id,
     applications: record.applications || [],
-    resources: record.resources || [],
+    resources: (record.resources || []).map((resource) => ({
+      ...resource,
+      path: resource.source_type ? `${resource.path} · ${resource.source_type}` : resource.path,
+    })),
     timeline: (record.timeline || []).map((item) => ({
       ...item,
       time: formatTime(item.occurred_at || item.time),
@@ -297,6 +300,7 @@ function normalizeLiveRecord(record) {
     webDomains: record.web_domains || [],
     sourceKinds: record.source_kinds || [],
     sourceTypes: record.source_types || [],
+    resourceTypes: record.resource_types || [],
     activitySequence: (record.activity_sequence || []).map((item) => ({
       ...item,
       time: formatTime(item.occurred_at || item.time),
