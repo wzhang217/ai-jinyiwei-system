@@ -180,7 +180,11 @@ export async function getLiveEvents(limit = 200) {
 
 export async function getLiveHistory(limit = 200) {
   const body = await request(`/api/admin/history?limit=${limit}`);
-  return body.records.map(normalizeLiveRecord);
+  return {
+    records: (body.records || []).map(normalizeLiveRecord),
+    generatedAt: body.generated_at || null,
+    model: body.model || null,
+  };
 }
 
 export async function getLiveHistorySources(recordId) {
@@ -315,6 +319,7 @@ function applicationKey(appName) {
   if (normalized.includes("chrome")) return "chrome";
   if (normalized.includes("360se")) return "browser360";
   if (normalized.includes("code") || normalized.includes("visual studio")) return "vscode";
+  if (normalized.includes("wemeet") || normalized.includes("tencentmeeting") || normalized.includes("腾讯会议")) return "tencent_meeting";
   if (normalized.includes("wechat") || normalized.includes("weixin") || normalized.includes("企业微信")) return "wechat";
   if (normalized.includes("slack")) return "slack";
   if (normalized.includes("teams")) return "teams";

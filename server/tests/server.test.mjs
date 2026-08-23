@@ -834,6 +834,41 @@ test("classifies project-management and collaboration sources without raw page c
   });
 });
 
+test("classifies Tencent Meeting as a communication activity", async () => {
+  await withServer(async ({ base }) => {
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: { "x-admin-token": "test-admin" },
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-MEETING", os_version: "Windows 11", agent_version: "0.1.8" }),
+    });
+    const eventId = "tencent-meeting-event";
+    const eventResponse = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${enrolled.body.device_token}` },
+      body: JSON.stringify({ events: [{
+        event_id: eventId,
+        occurred_at: new Date(Date.now() - 60_000).toISOString(),
+        type: "app_session",
+        app_name: "WemeetApp",
+        process_name: "wemeetapp.exe",
+        duration_seconds: 60,
+      }] }),
+    });
+    assert.equal(eventResponse.response.status, 202);
+    const history = await jsonFetch(`${base}/api/admin/history`, { headers: { "x-admin-token": "test-admin" } });
+    const leaf = history.body.records.find((record) => record.source_event_ids?.includes(eventId));
+    assert.ok(leaf);
+    assert.deepEqual(leaf.applications, ["tencent_meeting"]);
+    assert.deepEqual(leaf.application_names, ["腾讯会议"]);
+    assert.deepEqual(leaf.context_kinds, ["沟通"]);
+    assert.match(leaf.title, /沟通/);
+  });
+});
+
 test("normalizes legacy idle and browser source kinds from event evidence", async () => {
   await withServer(async ({ base }) => {
     const adminHeaders = { "x-admin-token": "test-admin" };

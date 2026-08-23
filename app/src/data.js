@@ -4,6 +4,7 @@ export const applications = {
   edge: { name: "Microsoft Edge", kind: "浏览器", color: "#0b8f8f" },
   browser360: { name: "360 浏览器", kind: "浏览器", color: "#2e9b61" },
   vscode: { name: "VS Code", kind: "开发工具", color: "#007acc" },
+  tencent_meeting: { name: "腾讯会议", kind: "沟通", color: "#2f80ed" },
   finder: { name: "Finder", kind: "文件资源", color: "#4c9aff" },
   explorer: { name: "Windows 文件资源管理器", kind: "文件资源", color: "#3b82d0" },
   archive360: { name: "360 压缩", kind: "文件资源", color: "#2f80ed" },

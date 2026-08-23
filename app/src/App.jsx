@@ -88,6 +88,7 @@ const appIcon = (appKey, size = 22) => {
     edge: Browser,
     browser360: Browser,
     vscode: FileCode,
+    tencent_meeting: ChatCircleDots,
     finder: FolderOpen,
     explorer: FolderOpen,
     archive360: Archive,
@@ -154,9 +155,9 @@ function App() {
     if (!agentApiEnabled) return;
     setLiveRefreshing(true);
     try {
-      const records = await getLiveHistory();
-      setLiveRecords(records);
-      setLiveUpdatedAt(new Date());
+      const snapshot = await getLiveHistory();
+      setLiveRecords(snapshot.records);
+      setLiveUpdatedAt(snapshot.generatedAt || new Date().toISOString());
       setLiveError("");
     } catch (error) {
       setLiveError(error.message);

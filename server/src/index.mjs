@@ -603,6 +603,7 @@ function applicationKey(appName) {
   if (normalized.includes("chrome")) return "chrome";
   if (normalized.includes("360se")) return "browser360";
   if (normalized.includes("code") || normalized.includes("visual studio")) return "vscode";
+  if (normalized.includes("wemeet") || normalized.includes("tencentmeeting") || normalized.includes("腾讯会议")) return "tencent_meeting";
   if (normalized.includes("wechat") || normalized.includes("weixin") || normalized.includes("企业微信")) return "wechat";
   if (normalized.includes("slack")) return "slack";
   if (normalized.includes("teams")) return "teams";
@@ -631,6 +632,7 @@ function displayApplicationName(appName) {
   if (normalized.includes("edge") || normalized.includes("msedge")) return "Microsoft Edge";
   if (normalized.includes("360se")) return "360 浏览器";
   if (normalized.includes("code") || normalized.includes("visual studio")) return "Visual Studio Code";
+  if (normalized.includes("wemeet") || normalized.includes("tencentmeeting") || normalized.includes("腾讯会议")) return "腾讯会议";
   if (normalized.includes("wechat") || normalized.includes("weixin") || normalized.includes("企业微信")) return "微信/企业微信";
   if (normalized.includes("slack")) return "Slack";
   if (normalized.includes("teams")) return "Microsoft Teams";
@@ -660,6 +662,7 @@ function displayApplicationName(appName) {
 function applicationContext(appName, processName) {
   const normalized = `${appName || ""} ${processName || ""}`.toLowerCase();
   if (normalized.includes("jira") || normalized.includes("linear") || normalized.includes("trello") || normalized.includes("asana") || normalized.includes("clickup") || normalized.includes("monday")) return "项目管理";
+  if (normalized.includes("wemeet") || normalized.includes("tencentmeeting") || normalized.includes("腾讯会议")) return "沟通";
   if (normalized.includes("wechat") || normalized.includes("weixin") || normalized.includes("企业微信") || normalized.includes("slack") || normalized.includes("teams") || normalized.includes("feishu") || normalized.includes("lark") || normalized.includes("dingtalk")) return "沟通";
   if (normalized.includes("chrome") || normalized.includes("edge") || normalized.includes("360se") || normalized.includes("firefox") || normalized.includes("browser")) return "浏览器";
   if (normalized.includes("code") || normalized.includes("visual studio") || normalized.includes("idea") || normalized.includes("devenv")) return "开发";
