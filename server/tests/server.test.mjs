@@ -911,6 +911,9 @@ test("configures the Qwen 3.7 Plus adapter without sending a real request", asyn
       const request = JSON.parse(options.body);
       assert.equal(request.model, "qwen3.7-plus");
       assert.equal(request.enable_thinking, false);
+      const userMessage = JSON.parse(request.messages.at(-1).content);
+      assert.deepEqual(userMessage.record.resource_types, ["项目", "网站"]);
+      assert.deepEqual(userMessage.record.resource_details, [{ name: "项目：AI锦衣卫系统", source_type: "代码仓库" }]);
       return {
         ok: true,
       async json() {
@@ -928,6 +931,8 @@ test("configures the Qwen 3.7 Plus adapter without sending a real request", asyn
     non_obvious: "规则边界",
     employee_name: "Wei",
     application_names: ["Visual Studio Code"],
+    resource_types: ["项目", "网站"],
+    resources: [{ name: "项目：AI锦衣卫系统", source_type: "代码仓库" }],
   });
   assert.equal(ai.mode, "model");
   assert.equal(ai.model, "qwen3.7-plus");
