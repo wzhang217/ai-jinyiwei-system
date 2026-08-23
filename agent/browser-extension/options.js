@@ -13,7 +13,7 @@ async function load() {
   const config = { ...defaults, ...(stored[STORAGE_KEY] || {}) };
   document.querySelector("#serverUrl").value = config.serverUrl;
   document.querySelector("#browserName").value = config.browserName;
-  if (config.browserToken) show(`浏览器已配对，有效至 ${config.browserTokenExpiresAt ? new Date(config.browserTokenExpiresAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai" }) : "服务端返回的时间"}。如需重新配对，输入新配对码后保存。`);
+  if (config.browserToken) show(`浏览器已配对，有效至 ${config.browserTokenExpiresAt ? new Date(config.browserTokenExpiresAt).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hourCycle: "h23" }) : "服务端返回的时间"}。如需重新配对，输入新配对码后保存。`);
 }
 
 form.addEventListener("submit", async (event) => {
