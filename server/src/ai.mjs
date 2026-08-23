@@ -43,6 +43,20 @@ function modelTextOrFallback(value, field, fallback) {
   return validatedModelText(normalized, field);
 }
 
+function normalizeWorkThemeTitle(value, input, fallback) {
+  const candidate = modelTextOrFallback(value, "title", fallback);
+  const employeeName = text(input?.employee_name);
+  const withoutEmployee = candidate
+    .replace(new RegExp(`^${employeeName.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\s*[·:：-]\\s*`, "i"), "")
+    .trim();
+  const bareDomain = /^(?:[a-z0-9](?:[a-z0-9-]*\.)+[a-z]{2,}|localhost)$/i.test(withoutEmployee);
+  const applications = (input?.application_names || input?.applications || [])
+    .map((item) => text(item).toLowerCase())
+    .filter(Boolean);
+  const bareApplication = applications.some((application) => withoutEmployee.toLowerCase() === application);
+  return bareDomain || bareApplication ? fallback : candidate;
+}
+
 function shanghaiDateTime(value) {
   const date = new Date(value || "");
   if (Number.isNaN(date.getTime())) return null;
@@ -247,7 +261,7 @@ export function createAiService({
           input: { task: "summarize_memory", record: publicRecord(input) },
         }));
         if (!result || typeof result !== "object") throw new Error("AI summary was not valid JSON");
-        const title = modelTextOrFallback(result.title, "title", fallback.title);
+        const title = normalizeWorkThemeTitle(result.title, input, fallback.title);
         const description = modelTextOrFallback(result.description, "description", fallback.description);
         const summary = modelTextOrFallback(result.summary, "summary", fallback.summary);
         const priorContext = modelTextOrFallback(result.prior_context, "prior_context", fallback.prior_context);

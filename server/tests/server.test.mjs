@@ -1051,6 +1051,37 @@ test("uses safe fallbacks for optional empty model fields without losing generat
   assert.equal(summary.prior_context, "规则上下文");
 });
 
+test("keeps model titles at the work-theme level instead of a bare domain or app", async () => {
+  const ai = createAiService({
+    apiKey: "test-key",
+    enabled: true,
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return {
+          choices: [{ message: { content: JSON.stringify({
+            title: "Wei · jd.com",
+            description: "浏览器活动",
+            summary: "浏览器活动摘要",
+            prior_context: "活动元数据",
+            important_context: "不包含正文",
+          }) } }],
+        };
+      },
+    }),
+  });
+  const summary = await ai.summarizeMemory({
+    title: "Wei · 浏览器、沟通活动",
+    employee_name: "Wei",
+    application_names: ["Google Chrome", "微信/企业微信"],
+    context_kinds: ["浏览器", "沟通"],
+    web_domains: ["jd.com"],
+    summary: "规则摘要",
+  });
+  assert.equal(summary.status, "generated");
+  assert.equal(summary.title, "Wei · 浏览器、沟通活动");
+});
+
 test("normalizes safe string arrays returned by the model", async () => {
   const ai = createAiService({
     apiKey: "test-key",
