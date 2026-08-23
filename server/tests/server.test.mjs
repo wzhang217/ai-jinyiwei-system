@@ -706,6 +706,55 @@ test("classifies project-management and collaboration sources without raw page c
   });
 });
 
+test("normalizes legacy idle and browser source kinds from event evidence", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-LEGACY-SOURCE", os_version: "Windows 11", agent_version: "0.1.3" }),
+    });
+    const occurredAt = new Date(Date.now() - 12 * 60_000);
+    const uploaded = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${enrolled.body.device_token}` },
+      body: JSON.stringify({ events: [
+        {
+          event_id: "legacy-idle-source-event",
+          occurred_at: occurredAt.toISOString(),
+          type: "idle",
+          app_name: "Idle",
+          process_name: "system",
+          source_kind: "desktop_app",
+          duration_seconds: 60,
+        },
+        {
+          event_id: "legacy-browser-source-event",
+          occurred_at: new Date(occurredAt.getTime() + 90_000).toISOString(),
+          type: "app_session",
+          app_name: "Google Chrome",
+          process_name: "chrome.exe",
+          source_kind: "desktop_app",
+          web_domain: "example.com",
+          duration_seconds: 60,
+        },
+      ] }),
+    });
+    assert.equal(uploaded.response.status, 202);
+    const history = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    const idle = history.body.records.find((record) => record.activity_sequence?.[0]?.app === "系统空闲");
+    const browser = history.body.records.find((record) => record.web_domains?.includes("example.com"));
+    assert.equal(idle.activity_sequence[0].source_kind, "system_idle");
+    assert.deepEqual(idle.source_types, ["系统空闲"]);
+    assert.equal(browser.activity_sequence[0].source_kind, "browser_native");
+    assert.deepEqual(browser.source_types, ["浏览器原生"]);
+  });
+});
+
 test("coalesces overlapping native and extension browser observations", async () => {
   await withServer(async ({ base }) => {
     const adminHeaders = { "x-admin-token": "test-admin" };

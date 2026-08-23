@@ -475,13 +475,16 @@ function validateEvents(body) {
 }
 
 function sourceKindForEvent(event) {
-  if (allowedSourceKinds.has(event?.source_kind)) return event.source_kind;
   if (event?.type === "idle") return "system_idle";
   if (event?.web_domain) {
+    if (event.source_kind === "browser_extension" || event.source_kind === "browser_native") {
+      return event.source_kind;
+    }
     return event?.title_hint || String(event?.context_label || "").startsWith("来源：")
       ? "browser_extension"
       : "browser_native";
   }
+  if (allowedSourceKinds.has(event?.source_kind)) return event.source_kind;
   return "desktop_app";
 }
 
@@ -721,7 +724,9 @@ function historyEventRows(db, deviceId, principal = null, team = null) {
     ORDER BY ev.occurred_at ASC
     LIMIT 10000`;
   const rows = db.prepare(query).all(...params);
-  return rows.filter((row) => !HIDDEN_AGENT_PROCESSES.has(String(row.process_name || "").toLowerCase()));
+  return rows
+    .filter((row) => !HIDDEN_AGENT_PROCESSES.has(String(row.process_name || "").toLowerCase()))
+    .map((row) => ({ ...row, source_kind: sourceKindForEvent(row) }));
 }
 
 function splitHistoryEventRow(row) {
