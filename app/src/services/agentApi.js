@@ -140,6 +140,7 @@ export async function getLiveEvents(limit = 200) {
   const body = await request(`/api/admin/events?limit=${limit}`);
   return body.events.map((event) => ({
     ...event,
+    captureSource: event.source_kind ? sourceKindLabels[event.source_kind] || "活动元数据" : "活动元数据",
     id: `live-${event.event_id}`,
     day: formatDay(event.occurred_at),
     time: formatTime(event.occurred_at),

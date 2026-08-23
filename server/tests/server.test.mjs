@@ -476,6 +476,42 @@ test("enforces application and website exclusion policy for uploaded events", as
   });
 });
 
+test("normalizes legacy browser events in the live diagnostics response", async () => {
+  await withServer(async ({ base, app }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({
+        registration_code: code.body.code,
+        hostname: "WIN-DIAGNOSTIC-SOURCE",
+        os_version: "Windows 11",
+        agent_version: "0.1.8",
+      }),
+    });
+    app.db.prepare("INSERT INTO events (event_id, device_id, occurred_at, type, app_name, process_name, source_kind, web_domain, duration_seconds, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").run(
+      "legacy-browser-diagnostic",
+      enrolled.body.device_id,
+      new Date(Date.now() - 2 * 60_000).toISOString(),
+      "app_session",
+      "msedge",
+      "msedge.exe",
+      "desktop_app",
+      "example.com",
+      60,
+      new Date().toISOString(),
+    );
+
+    const events = await jsonFetch(`${base}/api/admin/events`, { headers: adminHeaders });
+    const event = events.body.events.find((item) => item.event_id === "legacy-browser-diagnostic");
+    assert.equal(event.source_kind, "browser_native");
+  });
+});
+
 test("filters History Skill evidence by the requested time range", async () => {
   await withServer(async ({ base }) => {
     const adminHeaders = { "x-admin-token": "test-admin" };

@@ -1972,7 +1972,14 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const query = `SELECT ev.*, d.employee_id, e.name AS employee_name, d.hostname
           FROM events ev JOIN devices d ON d.id = ev.device_id JOIN employees e ON e.id = d.employee_id
           WHERE ${conditions.join(" AND ")} ORDER BY ev.occurred_at DESC LIMIT ${limit}`;
-        const events = db.prepare(query).all(...params);
+        const events = db.prepare(query).all(...params).map((event) => ({
+          ...event,
+          // Older Agent builds stored browser events as desktop_app even
+          // though they already carried a validated domain. Normalize the
+          // diagnostic response the same way as History so the UI reports the
+          // effective capture source, not the stale persisted value.
+          source_kind: sourceKindForEvent(event),
+        }));
         return sendJson(response, 200, { events });
       }
 

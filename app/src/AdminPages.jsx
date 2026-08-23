@@ -603,8 +603,8 @@ function DevicesPage({ role, query, target, onToast }) {
       : <EmptyState title="暂无 Agent 版本数据" />;
   const diagnosticRows = liveEvents === null && demoMode
     ? <><DiagnosticRow icon={<CheckCircle size={18} weight="fill" />} title="活动事件批次上传成功" detail="WIN-WEI-01 · 2 分钟前 · 24 条事件" /><DiagnosticRow icon={<WarningCircle size={18} weight="fill" />} title="浏览器扩展版本不一致" detail="WIN-MING-03 · 7 分钟前 · 页面标题可能缺失" /><DiagnosticRow icon={<WarningCircle size={18} weight="fill" />} title="设备离线超过 2 小时" detail="WIN-JIA-05 · 2 小时前 · 本地缓存 44 条" /></>
-    : liveEvents?.length
-      ? liveEvents.slice(0, 6).map((event) => <DiagnosticRow key={event.id} icon={event.type === "idle" ? <WarningCircle size={18} weight="fill" /> : <CheckCircle size={18} weight="fill" />} title={event.type === "idle" ? "系统空闲事件" : `活动事件：${event.app_name}`} detail={`${event.hostname || "设备"} · ${event.time || "刚刚"} · ${event.duration}`} />)
+      : liveEvents?.length
+        ? liveEvents.slice(0, 6).map((event) => <DiagnosticRow key={event.id} icon={event.type === "idle" ? <WarningCircle size={18} weight="fill" /> : <CheckCircle size={18} weight="fill" />} title={event.type === "idle" ? "系统空闲事件" : `活动事件：${event.app_name}`} detail={`${event.hostname || "设备"} · ${event.time || "刚刚"} · ${event.duration} · ${event.captureSource || "活动元数据"}`} />)
       : <EmptyState title="暂无真实采集事件" />;
   useEffect(() => {
     const nextDevice = scopedDevices.find((device) => device.id === target);
