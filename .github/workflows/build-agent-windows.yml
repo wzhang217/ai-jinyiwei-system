@@ -44,6 +44,10 @@ jobs:
         run: cargo check --target x86_64-pc-windows-msvc --locked
         working-directory: agent/src-tauri
 
+      - name: Test Windows metadata capture helpers
+        run: cargo test --target x86_64-pc-windows-msvc --locked --no-fail-fast
+        working-directory: agent/src-tauri
+
       - name: Write enrollment config
         shell: pwsh
         run: |

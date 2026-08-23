@@ -1462,3 +1462,41 @@ pub fn run() {
 pub fn main() {
     run();
 }
+
+#[cfg(all(test, windows))]
+mod windows_metadata_tests {
+    use super::{extract_explicit_web_domain, sanitize_context_label};
+
+    #[test]
+    fn extracts_only_the_host_from_browser_title_text() {
+        assert_eq!(
+            extract_explicit_web_domain("GitHub - https://github.com/openai/project/issues/1"),
+            Some("github.com".to_string())
+        );
+        assert_eq!(
+            extract_explicit_web_domain("Microsoft Edge | jd.com"),
+            Some("jd.com".to_string())
+        );
+    }
+
+    #[test]
+    fn rejects_non_domain_text() {
+        assert_eq!(
+            extract_explicit_web_domain("C:\\Users\\Wei\\report.docx"),
+            None
+        );
+        assert_eq!(extract_explicit_web_domain("搜索栏"), None);
+    }
+
+    #[test]
+    fn keeps_only_allowlisted_context_labels() {
+        assert_eq!(
+            sanitize_context_label("Code", "Code.exe", "AI锦衣卫系统 - Visual Studio Code"),
+            Some("项目：AI锦衣卫系统".to_string())
+        );
+        assert_eq!(
+            sanitize_context_label("Chrome", "chrome.exe", "ChatGPT - github.com"),
+            Some("来源：GitHub".to_string())
+        );
+    }
+}
