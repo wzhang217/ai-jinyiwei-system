@@ -1082,6 +1082,44 @@ test("keeps model titles at the work-theme level instead of a bare domain or app
   assert.equal(summary.title, "Wei · 浏览器、沟通活动");
 });
 
+test("fills missing time and activity sequence facts into a generated summary", async () => {
+  const ai = createAiService({
+    apiKey: "test-key",
+    enabled: true,
+    fetchImpl: async () => ({
+      ok: true,
+      async json() {
+        return { choices: [{ message: { content: JSON.stringify({
+          title: "开发、浏览器活动",
+          description: "模型描述",
+          summary: "模型摘要",
+          prior_context: "活动元数据",
+          important_context: "不包含正文",
+        }) } }] };
+      },
+    }),
+  });
+  const summary = await ai.summarizeMemory({
+    title: "Wei · 开发、浏览器活动",
+    employee_name: "Wei",
+    started_at: "2026-08-23T01:00:00.000Z",
+    ended_at: "2026-08-23T01:10:00.000Z",
+    application_names: ["Visual Studio Code", "Google Chrome"],
+    context_kinds: ["开发", "浏览器"],
+    context_switches: 1,
+    source_types: ["桌面应用", "浏览器原生"],
+    resource_types: ["网站"],
+    web_domains: ["github.com"],
+    activity_sequence: [
+      { occurred_at: "2026-08-23T01:00:00.000Z", app: "Visual Studio Code", duration_seconds: 300 },
+      { occurred_at: "2026-08-23T01:05:00.000Z", app: "Google Chrome", duration_seconds: 300 },
+    ],
+  });
+  assert.match(summary.description, /活动证据：东八区/);
+  assert.match(summary.description, /Visual Studio Code → Google Chrome/);
+  assert.match(summary.summary, /应用切换 1 次/);
+});
+
 test("normalizes safe string arrays returned by the model", async () => {
   const ai = createAiService({
     apiKey: "test-key",

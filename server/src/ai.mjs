@@ -123,6 +123,39 @@ function publicRecord(record) {
   };
 }
 
+function metadataEvidenceSentence(input) {
+  const record = publicRecord(input);
+  const facts = [];
+  if (record.started_at_shanghai && record.ended_at_shanghai) {
+    facts.push(`东八区 ${record.started_at_shanghai} 至 ${record.ended_at_shanghai}`);
+  }
+  const sequence = (record.activity_sequence || [])
+    .map((item) => text(item?.app))
+    .filter(Boolean);
+  if (sequence.length) facts.push(`应用顺序：${sequence.join(" → ")}`);
+  if (Object.prototype.hasOwnProperty.call(input || {}, "context_switches")) {
+    facts.push(`应用切换 ${Number(input.context_switches || 0)} 次`);
+  }
+  if (record.context_kinds?.length) facts.push(`工作上下文：${record.context_kinds.join("、")}`);
+  if (record.source_types?.length) facts.push(`采集来源：${record.source_types.join("、")}`);
+  if (record.resource_types?.length) facts.push(`资源类型：${record.resource_types.join("、")}`);
+  if (record.web_domains?.length) facts.push(`网站域名：${record.web_domains.join("、")}`);
+  return facts.length ? `活动证据：${facts.join("；")}。` : "";
+}
+
+function enrichModelTextWithEvidence(value, input) {
+  const evidence = metadataEvidenceSentence(input);
+  if (!evidence) return value;
+  const record = publicRecord(input);
+  const missingTime = Boolean(record.started_at_shanghai && !value.includes("东八区"));
+  const missingSequence = (record.activity_sequence || []).length > 1
+    && !value.includes("应用顺序")
+    && !value.includes("→");
+  const missingSwitchCount = Object.prototype.hasOwnProperty.call(input || {}, "context_switches")
+    && !value.includes("切换");
+  return missingTime || missingSequence || missingSwitchCount ? `${value} ${evidence}` : value;
+}
+
 function evidenceMetadata(records) {
   const starts = records.map((record) => Date.parse(record.started_at)).filter(Number.isFinite);
   const ends = records.map((record) => Date.parse(record.ended_at)).filter(Number.isFinite);
@@ -262,8 +295,8 @@ export function createAiService({
         }));
         if (!result || typeof result !== "object") throw new Error("AI summary was not valid JSON");
         const title = normalizeWorkThemeTitle(result.title, input, fallback.title);
-        const description = modelTextOrFallback(result.description, "description", fallback.description);
-        const summary = modelTextOrFallback(result.summary, "summary", fallback.summary);
+        const description = enrichModelTextWithEvidence(modelTextOrFallback(result.description, "description", fallback.description), input);
+        const summary = enrichModelTextWithEvidence(modelTextOrFallback(result.summary, "summary", fallback.summary), input);
         const priorContext = modelTextOrFallback(result.prior_context, "prior_context", fallback.prior_context);
         const importantContextValue = result.important_context ?? result.non_obvious;
         const importantContext = modelTextOrFallback(importantContextValue, "important_context", fallback.important_context);
