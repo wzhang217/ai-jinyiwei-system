@@ -449,6 +449,63 @@ test("filters History Skill evidence by the requested time range", async () => {
   });
 });
 
+test("recalls persisted Memory Summary records beyond the recent activity window", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-LONG-MEMORY", os_version: "Windows 11", agent_version: "0.1.4" }),
+    });
+    const deviceHeaders = { authorization: `Bearer ${enrolled.body.device_token}` };
+    const oldEvent = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: deviceHeaders,
+      body: JSON.stringify({ events: [{
+        event_id: "long-memory-old-wps",
+        occurred_at: new Date(Date.now() - 14 * 24 * 3600_000).toISOString(),
+        type: "app_session",
+        app_name: "WPS",
+        process_name: "wps.exe",
+        duration_seconds: 300,
+      }] }),
+    });
+    assert.equal(oldEvent.response.status, 202);
+
+    // Materialize and persist the old Memory Summary first.
+    const oldHistory = await jsonFetch(`${base}/api/admin/history?limit=200`, { headers: adminHeaders });
+    assert.equal(oldHistory.response.status, 200);
+    assert.ok(oldHistory.body.records.some((record) => record.title.includes("WPS")));
+
+    const currentEvent = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: deviceHeaders,
+      body: JSON.stringify({ events: [{
+        event_id: "long-memory-current-code",
+        occurred_at: new Date().toISOString(),
+        type: "app_session",
+        app_name: "Visual Studio Code",
+        process_name: "Code.exe",
+        duration_seconds: 60,
+      }] }),
+    });
+    assert.equal(currentEvent.response.status, 202);
+
+    const answer = await jsonFetch(`${base}/api/admin/history/ask`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ question: "WPS 之前做了什么？" }),
+    });
+    assert.equal(answer.response.status, 200);
+    assert.ok(answer.body.evidence.some((record) => record.title.includes("WPS")));
+    assert.ok(answer.body.evidence.some((record) => record.started_at < new Date(Date.now() - 24 * 3600_000).toISOString()));
+  });
+});
+
 test("keeps History Skill answers inside the requested team scope", async () => {
   await withServer(async ({ base }) => {
     const adminHeaders = { "x-admin-token": "test-admin" };

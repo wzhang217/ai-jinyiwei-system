@@ -16,6 +16,7 @@ import {
   DotsThree,
   DownloadSimple,
   File,
+  FileCode,
   FileText,
   FolderOpen,
   FigmaLogo,
@@ -35,6 +36,7 @@ import {
   ShieldCheck,
   Sparkle,
   Tag,
+  TerminalWindow,
   UserCircle,
   UsersThree,
   WarningCircle,
@@ -69,22 +71,17 @@ async function exportRecordWithAudit(record, notify) {
   }
 }
 
-const appMarks = { edge: "e", browser360: "360", wps: "W", vscode: "VS", explorer: "▰", terminal: ">_" };
-
 const appIcon = (appKey, size = 22) => {
   const app = applications[appKey] || applications.codex;
-  if (appMarks[appKey]) {
-    return <span className={`app-icon app-icon-mark app-icon-${appKey}`} style={{ "--app-color": app.color, "--app-size": `${size}px`, width: size, height: size }} title={app.name}><span>{appMarks[appKey]}</span></span>;
-  }
   const AppIcon = {
     codex: Sparkle,
     chrome: GoogleChromeLogo,
     edge: Browser,
     browser360: Browser,
-    vscode: Code,
+    vscode: FileCode,
     finder: FolderOpen,
     explorer: FolderOpen,
-    terminal: Monitor,
+    terminal: TerminalWindow,
     wechat: ChatCircleDots,
     slack: ChatCircleDots,
     teams: UsersThree,
@@ -97,7 +94,7 @@ const appIcon = (appKey, size = 22) => {
     excel: MicrosoftExcelLogo,
     powerpoint: MicrosoftPowerpointLogo,
   }[appKey] || Monitor;
-  return <span className="app-icon" style={{ "--app-color": app.color, width: size, height: size }} title={app.name}><AppIcon size={Math.max(12, Math.round(size * 0.62))} weight="fill" /></span>;
+  return <span className={`app-icon app-icon-${appKey}`} style={{ "--app-color": app.color, width: size, height: size }} title={app.name}><AppIcon size={Math.max(12, Math.round(size * 0.62))} weight="fill" /></span>;
 };
 
 function App() {

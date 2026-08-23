@@ -38,7 +38,7 @@ AGENT_ADMIN_TOKEN=dev-admin-token
 
 启动后可在服务端终端看到 `AI provider: qwen3.7-plus`。如果显示 `rules-v1`，说明没有读取到 API Key；这不影响 Agent 采集，但不会调用 Qwen。
 
-`GET /api/admin/history` 会将 Leaf Summary 持久化到 `memory_summaries` 表；`POST /api/admin/history/ask` 使用这些摘要返回答案和证据记录。模型输入只包含应用、时长、切换、脱敏标识和网站域名等活动元数据。
+`GET /api/admin/history` 会将 Leaf/Rollup Summary 持久化到 `memory_summaries` 表；`POST /api/admin/history/ask` 默认会在留存窗口内召回已持久化的 Memory Summary，再结合最近活动覆盖更新的记录进行排序和问答，不只搜索最近一页活动。模型输入只包含应用、时长、切换、脱敏标识和网站域名等活动元数据。
 
 采集策略中的 `activity_checkpoint_seconds` 控制同一活动区间的实时更新间隔，默认 15 秒，可在管理后台设置为 15、30 或 60 秒；`heartbeat_interval_seconds` 仍独立控制设备心跳，默认 60 秒。修改策略后，已注册 Agent 会在下一次心跳拉取新策略。
 

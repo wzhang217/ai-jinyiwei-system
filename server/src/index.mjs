@@ -173,6 +173,7 @@ function createSchema(db) {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
   `);
 
   ensureColumn(db, "events", "context_label", "TEXT");
@@ -188,6 +189,16 @@ function createSchema(db) {
   ensureColumn(db, "memory_summaries", "source_event_ids", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "memory_summaries", "citations", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "memory_summaries", "citations_json", "TEXT NOT NULL DEFAULT '[]'");
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_memory_summaries_started_at
+      ON memory_summaries (started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_summaries_employee_started_at
+      ON memory_summaries (employee_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_summaries_device_started_at
+      ON memory_summaries (device_id, started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_memory_summaries_rollup_scope
+      ON memory_summaries (rollup_scope, started_at DESC);
+  `);
   db.exec(`
     UPDATE memory_summaries
     SET period_start = COALESCE(NULLIF(period_start, ''), started_at, ''),
@@ -1210,14 +1221,88 @@ export async function processMemoryGenerationJobs(db, ai, logger = console, { li
 }
 
 async function getMemoryRecords(db, { deviceId = null, limit = 200, ai, principal = null, team = null }) {
-  const leafRecords = await materializeMemoryRecords(db, buildHistoryRecords(db, { deviceId, limit, principal, team }), ai);
+  const requestedLimit = Math.min(Math.max(Number(limit) || 200, 1), 2000);
+  // Keep fresh materialization bounded: querying older history should reuse
+  // persisted summaries instead of issuing a model request for every old
+  // event window on each question.
+  const freshLimit = Math.min(requestedLimit, 200);
+  const leafRecords = await materializeMemoryRecords(db, buildHistoryRecords(db, { deviceId, limit: freshLimit, principal, team }), ai);
   const rollupRecords = [];
   for (const scope of ["window", "six_hour", "hourly", "daily", "weekly", "team_weekly"]) {
     rollupRecords.push(...await materializeMemoryRecords(db, buildRollupRecords(leafRecords, scope), ai));
   }
-  return [...leafRecords, ...rollupRecords]
+
+  const persistedRecords = readPersistedMemoryRecords(db, {
+    deviceId,
+    principal,
+    team,
+    limit: requestedLimit,
+  });
+  // The freshly materialized records win over the stored payload so an
+  // active session's growing duration and current AI status are visible
+  // immediately, while older summaries remain searchable across history.
+  const merged = new Map(persistedRecords.map((record) => [record.id, record]));
+  for (const record of [...leafRecords, ...rollupRecords]) merged.set(record.id, record);
+
+  return [...merged.values()]
     .sort((left, right) => Date.parse(right.started_at) - Date.parse(left.started_at))
-    .slice(0, Math.min(Math.max(Number(limit) || 200, 1), 2000));
+    .slice(0, requestedLimit);
+}
+
+function parseJsonArray(value) {
+  if (Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function readPersistedMemoryRecords(db, { deviceId = null, principal = null, team = null, limit = 2000 } = {}) {
+  const scope = scopePredicate(principal, { deviceAlias: "d", employeeAlias: "e" });
+  const conditions = [scope.sql];
+  const params = [...scope.params];
+  if (deviceId) {
+    conditions.push("ms.device_id = ?");
+    params.push(deviceId);
+  }
+  if (team) {
+    conditions.push("e.team = ?");
+    params.push(team);
+  }
+  const safeLimit = Math.min(Math.max(Number(limit) || 2000, 1), 2000);
+  const rows = db.prepare(`
+    SELECT ms.id, ms.payload_json, ms.status, ms.model_name, ms.prompt_version,
+           ms.generated_at, ms.updated_at, ms.source_event_ids_json,
+           ms.source_record_ids_json, ms.citations_json
+    FROM memory_summaries ms
+    JOIN devices d ON d.id = ms.device_id
+    JOIN employees e ON e.id = ms.employee_id
+    WHERE ${conditions.join(" AND ")}
+    ORDER BY ms.started_at DESC
+    LIMIT ${safeLimit}
+  `).all(...params);
+
+  return rows.map((row) => {
+    try {
+      const payload = JSON.parse(row.payload_json);
+      if (!payload || typeof payload !== "object" || !payload.id) return null;
+      return {
+        ...payload,
+        source_event_ids: parseJsonArray(payload.source_event_ids || row.source_event_ids_json),
+        source_record_ids: parseJsonArray(payload.source_record_ids || row.source_record_ids_json),
+        citations: Array.isArray(payload.citations) ? payload.citations : parseJsonArray(row.citations_json),
+        summary_status: payload.summary_status || row.status,
+        summary_model: payload.summary_model || row.model_name,
+        prompt_version: payload.prompt_version || row.prompt_version,
+        generated_at: payload.generated_at || row.generated_at,
+        updated_at: payload.updated_at || row.updated_at,
+      };
+    } catch {
+      return null;
+    }
+  }).filter(Boolean);
 }
 
 function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, logger = console }) {
@@ -1464,7 +1549,10 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         if (typeof body.question !== "string" || !body.question.trim() || body.question.length > 500) {
           return sendError(response, 400, "question must be a non-empty string of at most 500 characters", "invalid_question");
         }
-        const limit = Math.min(Math.max(Number(body.limit) || 200, 1), 2000);
+        // History Skill searches persisted Memory Summary records across the
+        // retention window by default; the timeline keeps its smaller recent
+        // response through the GET endpoint above.
+        const limit = Math.min(Math.max(Number(body.limit) || 2000, 1), 2000);
         const deviceId = typeof body.device_id === "string" && body.device_id.trim() ? body.device_id.trim() : null;
         const requestedTeam = typeof body.team === "string" && body.team.trim() ? body.team.trim().slice(0, 120) : null;
         const effectiveTeam = principal.role === "manager" ? principal.team : principal.role === "employee" ? null : requestedTeam;
