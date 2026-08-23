@@ -113,6 +113,16 @@ const appIcon = (appKey, size = 22) => {
   return <span className={`app-icon app-icon-${appKey}`} style={{ "--app-color": app.color, width: size, height: size }} title={app.name}><AppIcon size={Math.max(12, Math.round(size * 0.62))} weight="fill" /></span>;
 };
 
+const summaryStatusText = (status) => ({
+  generated: "AI 已生成",
+  window_pending: "等待10分钟窗口",
+  queued: "排队中",
+  running: "生成中",
+  retrying: "重试中",
+  failed: "生成失败",
+  fallback: "规则兜底",
+}[status] || "状态未知");
+
 function App() {
   const [role, setRole] = useState("admin");
   const [activeNav, setActiveNav] = useState("overview");
@@ -153,6 +163,12 @@ function App() {
     const timer = window.setInterval(refreshLiveRecords, 15000);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!selectedRecord || !liveRecords) return;
+    const refreshedRecord = liveRecords.find((record) => record.id === selectedRecord.id);
+    if (refreshedRecord) setSelectedRecord(refreshedRecord);
+  }, [liveRecords, selectedRecord?.id]);
 
   useEffect(() => {
     if (!agentApiEnabled) return undefined;
@@ -274,7 +290,8 @@ function DayGroup({ day, records, expanded, onToggle, onOpen, onExport, onToast 
 function RecordCard({ record, onOpen, onExport, onToast }) {
   const stats = getRecordStats(record);
   const scopeLabel = { window: "连续汇总", six_hour: "6 小时汇总", hourly: "小时汇总", daily: "每日汇总", weekly: "每周汇总", team_weekly: "团队周汇总" }[record.rollupScope] || "汇总";
-  return <article className="record-card"><div className="record-rail"><span className="record-time">{record.time}</span><span className="record-dot" /></div><div className="record-main"><div className="record-heading"><div className="record-title-wrap"><h3>{record.title}</h3><span className={`record-type ${record.recordType}`}>{record.recordType === "rollup" ? scopeLabel : "活动"} · {record.duration}</span></div><div className="record-actions"><button title="查看完整 Memory Summary" onClick={onOpen}><ArrowSquareOut size={18} /></button><button title="导出 Markdown" onClick={onExport}><DownloadSimple size={18} /></button><button title="更多操作" onClick={() => onToast("更多操作将在审计和归档策略中提供")}><DotsThree size={20} /></button></div></div><p className="record-description">{record.description}</p><div className="record-footer"><div className="app-stack">{record.applications.slice(0, 5).map((key) => <span key={key}>{appIcon(key, 23)}</span>)}</div><div className="record-stats"><span><FileText size={15} />{stats.resources} 个资源</span><span><Clock size={15} />{stats.durationReadable}</span>{record.contextSwitches > 0 && <span><Tag size={15} />切换 {record.contextSwitches} 次</span>}<span className="confidence"><CheckCircle size={15} weight="fill" />{stats.confidence}</span></div></div></div></article>;
+  const sourceTypes = (record.sourceTypes || []).slice(0, 2);
+  return <article className="record-card"><div className="record-rail"><span className="record-time">{record.time}</span><span className="record-dot" /></div><div className="record-main"><div className="record-heading"><div className="record-title-wrap"><h3>{record.title}</h3><span className={`record-type ${record.recordType}`}>{record.recordType === "rollup" ? scopeLabel : "活动"} · {record.duration}</span><span className={`record-status ${record.summaryStatus || "generated"}`}>{summaryStatusText(record.summaryStatus || "generated")}</span></div><div className="record-actions"><button title="查看完整 Memory Summary" onClick={onOpen}><ArrowSquareOut size={18} /></button><button title="导出 Markdown" onClick={onExport}><DownloadSimple size={18} /></button><button title="更多操作" onClick={() => onToast("更多操作将在审计和归档策略中提供")}><DotsThree size={20} /></button></div></div><p className="record-description">{record.description}</p>{sourceTypes.length ? <div className="record-source-line">{sourceTypes.map((sourceType) => <span key={sourceType}><Tag size={12} />{sourceType}</span>)}</div> : null}<div className="record-footer"><div className="app-stack">{record.applications.slice(0, 5).map((key) => <span key={key}>{appIcon(key, 23)}</span>)}</div><div className="record-stats"><span><FileText size={15} />{stats.resources} 个资源</span><span><Clock size={15} />{stats.durationReadable}</span>{record.contextSwitches > 0 && <span><Tag size={15} />切换 {record.contextSwitches} 次</span>}<span className="confidence"><CheckCircle size={15} weight="fill" />{stats.confidence}</span></div></div></div></article>;
 }
 
 function RecordDetail({ record, onClose, onExport, onToast }) {
@@ -296,15 +313,7 @@ function RecordDetail({ record, onClose, onExport, onToast }) {
       setSourceLoading(false);
     }
   };
-  const summaryStatusLabel = {
-    generated: "AI 已生成",
-    window_pending: "等待10分钟窗口",
-    queued: "排队中",
-    running: "生成中",
-    retrying: "重试中",
-    failed: "生成失败",
-    fallback: "规则兜底",
-  }[record.summaryStatus] || "状态未知";
+  const summaryStatusLabel = summaryStatusText(record.summaryStatus);
   return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="detail-panel" role="dialog" aria-modal="true" aria-label="Memory Summary 详情"><div className="detail-topbar"><div><span className="detail-kicker"><Sparkle size={14} weight="fill" />MEMORY SUMMARY</span><h2>{record.title}</h2><p>{record.time} · {record.duration} · {record.recordType === "rollup" ? rollupLabel : "Leaf Summary"}</p></div><button className="detail-close" onClick={onClose}><X size={21} /></button></div><div className="detail-actions"><button className="outline-button" onClick={onExport}><DownloadSimple size={17} />导出 Markdown</button><button className="outline-button" onClick={loadSources}><FolderOpen size={17} />查看来源</button><button className="icon-button" onClick={() => onToast("当前记录已加入归档队列")}><Archive size={18} /></button></div><div className="detail-scroll">{sourceLoading && <div className="source-loading">正在读取真实来源…</div>}{sourceError && <div className="error-box">{sourceError}</div>}{sourceDetail && <DetailSection icon={<FolderOpen size={18} />} title="Source trace"><div className="source-trace"><div className="source-trace-summary">已回溯 {sourceDetail.sourceRecords.length} 个 Memory Summary、{sourceDetail.sourceEvents.length} 个原始活动事件（仅脱敏元数据）。</div>{sourceDetail.sourceRecords.map((source) => <button className="source-trace-row" key={source.id} onClick={() => onToast(`已定位到 ${source.title}`)}><Sparkle size={15} weight="fill" /><span><strong>{source.title}</strong><small>{source.time} · {source.duration}</small></span><ArrowSquareOut size={15} /></button>)}{sourceDetail.sourceEvents.map((event) => <div className="source-trace-row" key={event.event_id}><Clock size={15} /><span><strong>{event.type === "idle" ? "系统空闲" : event.app_name}</strong><small>{event.occurred_at} · {event.duration_seconds}s · {event.context_label || event.web_domain || event.process_name}</small></span></div>)}</div></DetailSection>}<div className="detail-description">{record.description}</div><div className="detail-chip-row"><span className="detail-chip"><Clock size={15} />{record.duration}</span><span className="detail-chip"><Sparkle size={15} />{record.summaryModel || "rules-v1"} · {summaryStatusLabel}</span>{record.contextKinds?.length ? <span className="detail-chip"><Tag size={15} />工作上下文：{record.contextKinds.join("、")}</span> : null}{record.contextLabels?.length ? <span className="detail-chip"><Tag size={15} />工作标识：{record.contextLabels.join("、")}</span> : null}{record.webDomains?.length ? <span className="detail-chip"><Tag size={15} />网站域名：{record.webDomains.join("、")}</span> : null}{record.contextSwitches > 0 ? <span className="detail-chip"><Tag size={15} />应用切换 {record.contextSwitches} 次</span> : null}<span className="detail-chip"><CheckCircle size={15} weight="fill" />证据置信度 {stats.confidence}</span><span className="detail-chip"><UsersThree size={15} />{employeeLabel}</span>{record.sourceTypes?.length ? <span className="detail-chip"><Tag size={15} />来源类型：{record.sourceTypes.join("、")}</span> : null}</div><DetailSection icon={<Sparkle size={18} weight="fill" />} title="Memory summary"><p>{record.summary}</p></DetailSection><DetailSection icon={<Archive size={18} />} title="Relevant prior context"><p>{record.priorContext}</p></DetailSection><DetailSection icon={<WarningCircle size={18} />} title="Important non-obvious context"><div className="uncertain-box"><WarningCircle size={17} /><p>{record.importantContext || record.nonObvious}</p></div></DetailSection><DetailSection icon={<ListBullets size={18} />} title="Recording summary"><div className="timeline-detail">{record.timeline.map((item) => <div className="timeline-row" key={`${item.time}-${item.text}`}><span>{item.time}</span><span className="timeline-bullet" />{appIcon(item.app, 22)}<p>{item.text}<small>{item.duration_seconds ? ` · ${Math.max(1, Math.round(item.duration_seconds / 60))} 分钟 · ${item.source_kind || "活动元数据"}` : ""}</small></p></div>)}</div>{record.activitySequence?.length ? <div className="sequence-note"><strong>活动顺序</strong><span>{record.activitySequence.map((item) => `${item.app}（${Math.max(1, Math.round(Number(item.duration_seconds || 0) / 60))} 分钟）`).join(" → ")}</span></div> : null}</DetailSection><DetailSection icon={<FileText size={18} />} title="Resources"><div className="resource-list">{record.resources.length ? record.resources.map((item) => <button className="resource-row" key={item.name} onClick={() => onToast(`${item.name} 已加入来源上下文`)}>{item.type === "code" ? <Code size={19} /> : item.type === "sensitive" ? <LockKey size={19} /> : <File size={19} />}<span><strong>{item.name}</strong><small>{item.path}</small></span><ArrowSquareOut size={16} /></button>) : <span className="empty-inline">当前记录没有额外资源，仅保留活动元数据。</span>}</div></DetailSection><DetailSection icon={<Key size={18} />} title="Citations"><div className="citation-list">{record.citations.length ? record.citations.map((citation) => <button className="citation-row" key={citation.label} onClick={() => onToast(`正在定位来源：${citation.label}`)}><span className="citation-icon"><FileText size={16} /></span><span><strong>{citation.label}</strong><small>{citation.detail}</small></span><ArrowSquareOut size={15} /></button>) : <span className="empty-inline">当前记录没有可展示的来源引用。</span>}</div></DetailSection><div className="detail-note"><ShieldCheck size={17} /><span>此记录只基于应用、窗口、网页和文件元数据生成，不读取聊天正文、文件正文、键盘或剪贴板。</span></div></div></aside></div>;
 }
 
