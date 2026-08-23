@@ -1274,11 +1274,11 @@ test("fills missing time and activity sequence facts into a generated summary", 
     web_domains: ["github.com"],
     activity_sequence: [
       { occurred_at: "2026-08-23T01:00:00.000Z", app: "Visual Studio Code", duration_seconds: 300 },
-      { occurred_at: "2026-08-23T01:05:00.000Z", app: "Google Chrome", duration_seconds: 300 },
+      { occurred_at: "2026-08-23T01:05:00.000Z", app: "Google Chrome", web_domain: "github.com", duration_seconds: 300 },
     ],
   });
   assert.match(summary.description, /活动证据：东八区/);
-  assert.match(summary.description, /Visual Studio Code → Google Chrome/);
+  assert.match(summary.description, /Visual Studio Code → Google Chrome · github.com/);
   assert.match(summary.summary, /应用切换 1 次/);
 });
 
