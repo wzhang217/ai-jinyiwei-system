@@ -12,7 +12,7 @@ const fallbackStatus = {
   last_error: null,
   last_browser_capture_at: null,
   last_browser_capture_source: null,
-  agent_version: "0.1.7",
+  agent_version: "0.1.8",
   policy: {
     idle_threshold_seconds: 300,
     activity_checkpoint_seconds: 15,
