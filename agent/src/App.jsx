@@ -10,6 +10,8 @@ const fallbackStatus = {
   last_sync_at: null,
   queued_events: 0,
   last_error: null,
+  last_browser_capture_at: null,
+  last_browser_capture_source: null,
   agent_version: "0.1.7",
   policy: {
     idle_threshold_seconds: 300,
@@ -153,7 +155,7 @@ export function App() {
         <>
           <section className="card status-card">
             <div className="status-card-top"><div><div className="card-kicker">当前设备</div><h1>{status.employee_name || "已注册设备"}</h1><p>{status.employee_team || "企业工作区"} · {status.device_id}</p></div><div className={`big-status ${tone}`}><i /><strong>{statusLabel(status.state)}</strong></div></div>
-            <div className="metrics"><div><span>最近同步</span><strong>{formatTime(status.last_sync_at)}</strong></div><div><span>离线队列</span><strong>{status.queued_events} 条</strong></div><div><span>工作时段</span><strong>{status.policy.work_hours_start}–{status.policy.work_hours_end}</strong></div></div>
+            <div className="metrics"><div><span>最近同步</span><strong>{formatTime(status.last_sync_at)}</strong></div><div><span>离线队列</span><strong>{status.queued_events} 条</strong></div><div><span>浏览器来源</span><strong>{status.last_browser_capture_at ? `${status.last_browser_capture_source === "browser_extension" ? "扩展" : "原生"} ${formatTime(status.last_browser_capture_at)}` : "尚未捕获"}</strong></div><div><span>工作时段</span><strong>{status.policy.work_hours_start}–{status.policy.work_hours_end}</strong></div></div>
             {status.last_error && <div className="error-box">{status.last_error}</div>}
           </section>
           <section className="card browser-pairing-card">
@@ -164,7 +166,7 @@ export function App() {
           </section>
           <section className="card">
             <div className="section-heading"><div><div className="card-kicker">采集策略</div><h2>当前会记录什么</h2></div><span className="policy-version">策略 v{status.policy.version}</span></div>
-            <div className="policy-list"><PolicyItem title="应用活动" detail={`前台应用名称和使用时长，每 ${status.policy.activity_checkpoint_seconds || 15} 秒更新活动区间`} enabled /><PolicyItem title="脱敏工作标识" detail="仅保留开发工具项目标识，不保存原始窗口标题" enabled /><PolicyItem title="网站来源" detail="仅保留域名，不保存完整 URL 或页面内容" enabled /><PolicyItem title="空闲状态" detail={`超过 ${Math.round(status.policy.idle_threshold_seconds / 60)} 分钟进入空闲`} enabled /><PolicyItem title="同步心跳" detail={`每 ${status.policy.heartbeat_interval_seconds} 秒更新设备状态`} enabled /><PolicyItem title="屏幕、键盘和聊天正文" detail="系统级禁止采集" /></div>
+            <div className="policy-list"><PolicyItem title="应用活动" detail={`前台应用名称和使用时长，每 ${status.policy.activity_checkpoint_seconds || 15} 秒更新活动区间`} enabled /><PolicyItem title="脱敏工作标识" detail="仅保留开发工具项目标识，不保存原始窗口标题" enabled /><PolicyItem title="网站来源" detail="Windows 原生读取域名；扩展仅作为兼容兜底" enabled /><PolicyItem title="空闲状态" detail={`超过 ${Math.round(status.policy.idle_threshold_seconds / 60)} 分钟进入空闲`} enabled /><PolicyItem title="同步心跳" detail={`每 ${status.policy.heartbeat_interval_seconds} 秒更新设备状态`} enabled /><PolicyItem title="屏幕、键盘和聊天正文" detail="系统级禁止采集" /></div>
           </section>
           <section className="card privacy-card"><div className="shield">✓</div><div><h2>隐私边界</h2><p>Agent 不读取键盘、剪贴板、屏幕、聊天正文、文件正文、原始窗口标题或完整网页内容；只保留有限的项目标识和网站域名。断网时数据只保存在本机队列，恢复后自动补传。</p></div></section>
         </>

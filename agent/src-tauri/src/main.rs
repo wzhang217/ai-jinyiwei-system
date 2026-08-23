@@ -67,6 +67,8 @@ struct AgentStatus {
     last_sync_at: Option<String>,
     queued_events: usize,
     last_error: Option<String>,
+    last_browser_capture_at: Option<String>,
+    last_browser_capture_source: Option<String>,
     agent_version: String,
     policy: Policy,
 }
@@ -82,6 +84,8 @@ impl Default for AgentStatus {
             last_sync_at: None,
             queued_events: 0,
             last_error: None,
+            last_browser_capture_at: None,
+            last_browser_capture_source: None,
             agent_version: AGENT_VERSION.into(),
             policy: Policy::default(),
         }
@@ -692,6 +696,10 @@ impl Core {
                 }
                 let _ = self.checkpoint_idle_session(now);
             } else if let Some(activity) = foreground_application() {
+                if activity.web_domain.is_some() {
+                    self.status.last_browser_capture_at = Some(Utc::now().to_rfc3339());
+                    self.status.last_browser_capture_source = Some(activity.source_kind.clone());
+                }
                 let _ = self.finish_idle_session(now);
                 if activity_excluded(&activity, &self.status.policy) {
                     let _ = self.finish_session(now);
