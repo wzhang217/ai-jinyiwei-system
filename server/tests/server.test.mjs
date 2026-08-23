@@ -231,6 +231,7 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.equal(leafSources.response.status, 200);
     assert.equal(leafSources.body.source_events.length, 2);
     assert.equal(leafSources.body.source_events[0].window_title, undefined);
+    assert.ok(leafSources.body.source_events.every((event) => event.source_kind));
     const summaryCount = app.db.prepare("SELECT COUNT(*) AS count FROM memory_summaries").get().count;
     assert.ok(summaryCount >= 7);
     const storedColumns = app.db.prepare("SELECT title, summary, prior_context, important_context, period_start, period_end, source_event_ids, citations, citations_json FROM memory_summaries WHERE id = ?").get(leaf.id);
