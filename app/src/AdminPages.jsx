@@ -40,6 +40,7 @@ import { historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, downloadRecordsMarkdown, getRecordStats } from "./services/historyService.js";
 import { agentApiEnabled, askLiveHistory, createRegistrationCode, demoMode, getLiveAudit, getLiveDevices, getLiveEmployees, getLiveEvents, getLivePolicy, getLiveTeams, getMemoryJobs, runRetention, updateLivePolicy } from "./services/agentApi.js";
 import { auditData, deviceData, employeeData, permissionRoles, settingsData, teamData } from "./adminData.js";
+import { SHANGHAI_TIME_ZONE, formatShanghaiTime, shanghaiDateAtStart, shanghaiDateInput, shanghaiDayKey } from "./time.js";
 
 const roleLabel = { admin: "企业管理员", manager: "直属管理者", employee: "员工", auditor: "审计员" };
 
@@ -108,20 +109,17 @@ function OverviewPage({ role, liveRecords, onNavigate, onToast }) {
   const averageWindow = leafRecords.length ? Math.round(leafRecords.reduce((sum, record) => sum + Number(record.durationSeconds || record.duration_seconds || 0), 0) / leafRecords.length / 60) : 0;
   const unknownRatio = leafRecords.length ? Math.round((leafRecords.filter((record) => (record.contextKinds || record.context_kinds || []).includes("其他")).length / leafRecords.length) * 1000) / 10 : 0;
   const trendDays = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setHours(0, 0, 0, 0);
-    date.setDate(date.getDate() - (6 - index));
-    return date;
+    return shanghaiDateAtStart(6 - index);
   });
   const trendDurations = trendDays.map((date) => leafRecords
     .filter((record) => {
       const started = new Date(record.started_at || record.startedAt || 0);
-      return started.toDateString() === date.toDateString();
+      return shanghaiDayKey(started) === shanghaiDayKey(date);
     })
     .reduce((sum, record) => sum + Number(record.durationSeconds || record.duration_seconds || 0), 0));
   const maxTrendDuration = Math.max(...trendDurations, 1);
   const trendValues = trendDurations.map((value) => Math.round((value / maxTrendDuration) * 100));
-  const trendLabels = trendDays.map((date) => date.toLocaleDateString("zh-CN", { weekday: "short" }).replace("周", "周"));
+  const trendLabels = trendDays.map((date) => date.toLocaleDateString("zh-CN", { timeZone: SHANGHAI_TIME_ZONE, weekday: "short" }).replace("周", "周"));
   const observedDevices = liveDevices || [];
   const onlineDevices = observedDevices.filter((device) => device.status === "online").length;
   const queuedEvents = observedDevices.reduce((sum, device) => sum + Number(device.cache || 0), 0);
@@ -418,14 +416,11 @@ function WorkPattern({ employee, records = [] }) {
   const switchDensity = durationSeconds ? (switches / Math.max(durationSeconds / 3600, 1 / 60)).toFixed(1) : "—";
   const unknownRatio = records.length ? `${Math.round((unknown / records.length) * 1000) / 10}%` : "—";
   const trendDays = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setHours(0, 0, 0, 0);
-    date.setDate(date.getDate() - (6 - index));
-    return date;
+    return shanghaiDateAtStart(6 - index);
   });
-  const trend = trendDays.map((date) => records.filter((record) => new Date(record.started_at || record.startedAt || 0).toDateString() === date.toDateString()).reduce((sum, record) => sum + Number(record.durationSeconds || record.duration_seconds || 0), 0));
+  const trend = trendDays.map((date) => records.filter((record) => shanghaiDayKey(record.started_at || record.startedAt || 0) === shanghaiDayKey(date)).reduce((sum, record) => sum + Number(record.durationSeconds || record.duration_seconds || 0), 0));
   const maxTrend = Math.max(...trend, 1);
-  return <SectionCard title={`${employee.name} 的工作模式`} description="趋势用于辅助理解上下文，不单独作为绩效结论"><div className="pattern-grid"><div className="pattern-card"><span>工作主题集中度</span><strong>{records.length ? `${concentration}%` : "—"}</strong><small>{records.length ? "当前可见记录" : "等待 Agent 数据"}</small></div><div className="pattern-card"><span>任务切换密度</span><strong>{switchDensity}{switchDensity === "—" ? "" : " / h"}</strong><small>只表示上下文变化</small></div><div className="pattern-card"><span>活动时长</span><strong>{durationSeconds ? `${Math.round(durationSeconds / 60)}m` : "—"}</strong><small>当前可见记录</small></div><div className="pattern-card"><span>未知活动</span><strong>{unknownRatio}</strong><small>无法可靠分类的活动</small></div></div><MiniBars values={trend.map((value) => Math.round((value / maxTrend) * 100))} labels={trendDays.map((date) => date.toLocaleDateString("zh-CN", { weekday: "short" }).replace("周", "周"))} /></SectionCard>;
+  return <SectionCard title={`${employee.name} 的工作模式`} description="趋势用于辅助理解上下文，不单独作为绩效结论"><div className="pattern-grid"><div className="pattern-card"><span>工作主题集中度</span><strong>{records.length ? `${concentration}%` : "—"}</strong><small>{records.length ? "当前可见记录" : "等待 Agent 数据"}</small></div><div className="pattern-card"><span>任务切换密度</span><strong>{switchDensity}{switchDensity === "—" ? "" : " / h"}</strong><small>只表示上下文变化</small></div><div className="pattern-card"><span>活动时长</span><strong>{durationSeconds ? `${Math.round(durationSeconds / 60)}m` : "—"}</strong><small>当前可见记录</small></div><div className="pattern-card"><span>未知活动</span><strong>{unknownRatio}</strong><small>无法可靠分类的活动</small></div></div><MiniBars values={trend.map((value) => Math.round((value / maxTrend) * 100))} labels={trendDays.map((date) => date.toLocaleDateString("zh-CN", { timeZone: SHANGHAI_TIME_ZONE, weekday: "short" }).replace("周", "周"))} /></SectionCard>;
 }
 
 function MemoryPage({ role, query, target, liveRecords, onNavigate, onToast: notify }) {
@@ -535,7 +530,7 @@ function SkillPage({ role, records, onNavigate }) {
 
 function SkillAnswer({ result, onOpen }) {
   const timeRange = result.timeRange?.start && result.timeRange?.end
-    ? `${new Date(result.timeRange.start).toLocaleString("zh-CN")} – ${new Date(result.timeRange.end).toLocaleString("zh-CN")}`
+    ? `${formatShanghaiTime(result.timeRange.start)} – ${formatShanghaiTime(result.timeRange.end)}`
     : "暂无可用时间范围";
   const applications = result.applications || [];
   const contextLabels = result.contextLabels || [];
@@ -649,7 +644,7 @@ function DevicesPage({ role, query, target, onToast }) {
 
 function RegistrationCodeModal({ employees, employeeId, expiresInSeconds, code, loading, error, onEmployeeChange, onExpiresChange, onGenerate, onCopy, onClose }) {
   const employee = employees.find((item) => item.id === employeeId);
-  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="detail-panel registration-panel" role="dialog" aria-modal="true" aria-label="生成一次性注册码"><div className="detail-topbar"><div><span className="detail-kicker"><Fingerprint size={14} />DEVICE ENROLLMENT</span><h2>生成一次性注册码</h2><p>绑定 Windows Agent 到指定员工</p></div><button className="detail-close" onClick={onClose}><X size={21} /></button></div><div className="detail-scroll"><div className="detail-description">员工安装通用 MSI 后，需要使用这里生成的注册码完成设备绑定。注册码只显示一次，不写入安装包。</div><div className="registration-form"><label>绑定员工<select value={employeeId} onChange={(event) => onEmployeeChange(event.target.value)} disabled={loading || Boolean(code)}><option value="">请选择员工</option>{employees.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.team}</option>)}</select></label><label>有效期<select value={expiresInSeconds} onChange={(event) => onExpiresChange(Number(event.target.value))} disabled={loading || Boolean(code)}><option value={3600}>1 小时</option><option value={8 * 3600}>8 小时</option><option value={24 * 3600}>24 小时</option><option value={7 * 24 * 3600}>7 天</option></select></label></div>{error && <div className="error-box">注册码生成失败：{error}</div>}{code && <div className="registration-code-box"><span>发送给 {employee?.name || "员工"}</span><strong>{code.code}</strong><small>有效至 {new Date(code.expires_at).toLocaleString("zh-CN")}</small><button className="primary-button" onClick={onCopy}><DownloadSimple size={16} />复制注册码</button></div>} {!code && !error && !employees.length && <div className="empty-state"><UsersThree size={24} /><strong>暂无可绑定员工</strong><span>请先在员工目录中创建员工。</span></div>}<div className="registration-actions">{!code && <button className="primary-button" disabled={loading || !employeeId} onClick={onGenerate}>{loading ? "生成中…" : "生成注册码"}</button>}<button className="outline-button" onClick={onClose}>关闭</button></div><div className="detail-note"><ShieldCheck size={17} /><span>注册码只用于首次绑定；后续事件使用设备 Token。管理员 Token 和 API Key 不会发送到 Agent。</span></div></div></aside></div>;
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="detail-panel registration-panel" role="dialog" aria-modal="true" aria-label="生成一次性注册码"><div className="detail-topbar"><div><span className="detail-kicker"><Fingerprint size={14} />DEVICE ENROLLMENT</span><h2>生成一次性注册码</h2><p>绑定 Windows Agent 到指定员工</p></div><button className="detail-close" onClick={onClose}><X size={21} /></button></div><div className="detail-scroll"><div className="detail-description">员工安装通用 MSI 后，需要使用这里生成的注册码完成设备绑定。注册码只显示一次，不写入安装包。</div><div className="registration-form"><label>绑定员工<select value={employeeId} onChange={(event) => onEmployeeChange(event.target.value)} disabled={loading || Boolean(code)}><option value="">请选择员工</option>{employees.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.team}</option>)}</select></label><label>有效期<select value={expiresInSeconds} onChange={(event) => onExpiresChange(Number(event.target.value))} disabled={loading || Boolean(code)}><option value={3600}>1 小时</option><option value={8 * 3600}>8 小时</option><option value={24 * 3600}>24 小时</option><option value={7 * 24 * 3600}>7 天</option></select></label></div>{error && <div className="error-box">注册码生成失败：{error}</div>}{code && <div className="registration-code-box"><span>发送给 {employee?.name || "员工"}</span><strong>{code.code}</strong><small>有效至 {formatShanghaiTime(code.expires_at)}</small><button className="primary-button" onClick={onCopy}><DownloadSimple size={16} />复制注册码</button></div>} {!code && !error && !employees.length && <div className="empty-state"><UsersThree size={24} /><strong>暂无可绑定员工</strong><span>请先在员工目录中创建员工。</span></div>}<div className="registration-actions">{!code && <button className="primary-button" disabled={loading || !employeeId} onClick={onGenerate}>{loading ? "生成中…" : "生成注册码"}</button>}<button className="outline-button" onClick={onClose}>关闭</button></div><div className="detail-note"><ShieldCheck size={17} /><span>注册码只用于首次绑定；后续事件使用设备 Token。管理员 Token 和 API Key 不会发送到 Agent。</span></div></div></aside></div>;
 }
 
 function VersionRow({ version, count, width, status }) { return <div className="version-row"><span><strong>{version}</strong><small>{count}</small></span><span className="version-track"><i style={{ width }} /></span><StatusPill status={status === "推荐" ? "online" : status === "过旧" ? "offline" : "pending"} /></div>; }
@@ -767,7 +762,7 @@ function ExclusionPolicy({ onToast }) {
 }
 function ExclusionRow({ name, type, enabled }) { return <div className="exclusion-row"><span className={`exclusion-switch ${enabled ? "on" : ""}`}><i /></span><span><strong>{name}</strong><small>{type}</small></span><button className="row-action"><ArrowSquareOut size={15} /></button></div>; }
 function RetentionPolicy({ onToast }) {
-  const defaultCutoff = new Date(Date.now() - 90 * 24 * 3600_000).toISOString().slice(0, 10);
+  const defaultCutoff = shanghaiDateInput(90);
   const [cutoff, setCutoff] = useState(defaultCutoff);
   const [preview, setPreview] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -790,7 +785,7 @@ function RetentionPolicy({ onToast }) {
       setLoading(false);
     }
   };
-  return <SectionCard title="数据保留策略" description="先预览，再由管理员确认删除；删除范围和结果会写入审计日志"><div className="retention-grid"><div><span>原始活动事件</span><strong>90 天</strong><small>到期自动删除</small></div><div><span>Leaf Summary</span><strong>1 年</strong><small>保留来源引用</small></div><div><span>Rollup Summary</span><strong>1 年</strong><small>可导出 Markdown</small></div></div><div className="policy-time-settings"><label>删除截止日期<input type="date" value={cutoff} onChange={(event) => setCutoff(event.target.value)} /></label><div className="policy-save-row"><button className="outline-button" disabled={loading || !cutoff} onClick={() => runPreview(false)}><Archive size={16} />预览删除范围</button><button className="primary-button" disabled={loading || !cutoff || !preview} onClick={() => runPreview(true)}>{loading ? "处理中…" : "确认执行删除"}</button></div></div>{error && <div className="error-box">留存操作失败：{error}</div>}{preview && <div className="deep-link-card"><Archive size={22} /><span><strong>{preview.applied ? "已执行删除" : "删除预览"}</strong><small>截止 {new Date(preview.before).toLocaleString("zh-CN")} · 活动事件 {preview.applied ? preview.deleted.events : preview.preview.events} 条 · Memory Summary {preview.applied ? preview.deleted.memory_summaries : preview.preview.memory_summaries} 条</small></span></div>}</SectionCard>;
+  return <SectionCard title="数据保留策略" description="先预览，再由管理员确认删除；删除范围和结果会写入审计日志"><div className="retention-grid"><div><span>原始活动事件</span><strong>90 天</strong><small>到期自动删除</small></div><div><span>Leaf Summary</span><strong>1 年</strong><small>保留来源引用</small></div><div><span>Rollup Summary</span><strong>1 年</strong><small>保留来源引用</small></div></div><div className="policy-time-settings"><label>删除截止日期<input type="date" value={cutoff} onChange={(event) => setCutoff(event.target.value)} /></label><div className="policy-save-row"><button className="outline-button" disabled={loading || !cutoff} onClick={() => runPreview(false)}><Archive size={16} />预览删除范围</button><button className="primary-button" disabled={loading || !cutoff || !preview} onClick={() => runPreview(true)}>{loading ? "处理中…" : "确认执行删除"}</button></div></div>{error && <div className="error-box">留存操作失败：{error}</div>}{preview && <div className="deep-link-card"><Archive size={22} /><span><strong>{preview.applied ? "已执行删除" : "删除预览"}</strong><small>截止 {formatShanghaiTime(preview.before)} · 活动事件 {preview.applied ? preview.deleted.events : preview.preview.events} 条 · Memory Summary {preview.applied ? preview.deleted.memory_summaries : preview.preview.memory_summaries} 条</small></span></div>}</SectionCard>;
 }
 
 function AuditPage({ role, query, onToast }) {

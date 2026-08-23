@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use chrono::{Local, Timelike, Utc};
+use chrono::{Timelike, Utc};
 use reqwest::blocking::Client;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,10 @@ use uuid::Uuid;
 const AGENT_VERSION: &str = "0.1.4";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const MAX_PENDING_EVENTS: i64 = 10_000;
-const MAX_EVENT_DURATION_SECONDS: i64 = 86_400;
+// A resumed/sleeping Windows session must not create a full-day idle span
+// that extends History into the future. The service keeps the last 12 hours
+// at most; all policy clock comparisons use China Standard Time (UTC+8).
+const MAX_EVENT_DURATION_SECONDS: i64 = 12 * 3600;
 const DEFAULT_ACTIVITY_CHECKPOINT_SECONDS: u64 = 15;
 
 fn default_activity_checkpoint_seconds() -> u64 {
@@ -797,7 +800,10 @@ fn within_work_hours(policy: &Policy) -> bool {
     let Some(end) = parse_minutes(&policy.work_hours_end) else {
         return true;
     };
-    let now = Local::now().time();
+    // Collection policy is evaluated in China Standard Time regardless of the
+    // Windows machine's regional timezone. Event timestamps remain UTC ISO-8601
+    // on the wire and are rendered as Asia/Shanghai in the UIs.
+    let now = (Utc::now() + chrono::Duration::hours(8)).time();
     let current = now.hour() * 60 + now.minute();
     if start == 0 && end == 24 * 60 {
         return true;

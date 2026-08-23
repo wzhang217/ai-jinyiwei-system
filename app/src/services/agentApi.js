@@ -1,3 +1,5 @@
+import { SHANGHAI_TIME_ZONE, formatShanghaiTime, shanghaiDayKey } from "../time.js";
+
 const configuredBaseUrl = (import.meta.env.VITE_AGENT_API_BASE_URL || "").trim().replace(/\/$/, "");
 const adminToken = (import.meta.env.VITE_AGENT_ADMIN_TOKEN || "").trim();
 export const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
@@ -162,7 +164,10 @@ export async function getLiveHistorySources(recordId) {
   return {
     recordId: body.record_id,
     sourceRecords: (body.source_records || []).map(normalizeLiveRecord),
-    sourceEvents: body.source_events || [],
+    sourceEvents: (body.source_events || []).map((event) => ({
+      ...event,
+      occurred_at_display: formatShanghaiTime(event.occurred_at, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+    })),
   };
 }
 
@@ -296,18 +301,18 @@ function formatDuration(seconds) {
 
 function formatTime(value) {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString("zh-CN", { timeZone: SHANGHAI_TIME_ZONE, hour: "2-digit", minute: "2-digit" });
 }
 
 function formatDay(value) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "未知日期";
-  const now = new Date();
-  if (date.toDateString() === now.toDateString()) return "今天";
-  const yesterday = new Date(now);
-  yesterday.setDate(now.getDate() - 1);
-  if (date.toDateString() === yesterday.toDateString()) return "昨天";
-  return date.toLocaleDateString("zh-CN", { month: "numeric", day: "numeric", weekday: "short" });
+  const today = shanghaiDayKey(Date.now());
+  const yesterday = shanghaiDayKey(Date.now() - 24 * 3600_000);
+  const day = shanghaiDayKey(date);
+  if (day === today) return "今天";
+  if (day === yesterday) return "昨天";
+  return date.toLocaleDateString("zh-CN", { timeZone: SHANGHAI_TIME_ZONE, month: "numeric", day: "numeric", weekday: "short" });
 }
 
 function formatRelativeTime(value) {

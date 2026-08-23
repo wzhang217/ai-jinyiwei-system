@@ -800,10 +800,13 @@ test("queues failed Qwen summaries and retries them", async () => {
     assert.equal(events.response.status, 202);
     const first = await jsonFetch(`${base}/api/admin/history`, { headers: { "x-admin-token": "test-admin" } });
     assert.equal(first.response.status, 200);
-    assert.equal(first.body.records[0].summary_status, "fallback");
+    assert.equal(first.body.records[0].summary_status, "queued");
     const queued = await jsonFetch(`${base}/api/admin/memory/jobs`, { headers: { "x-admin-token": "test-admin" } });
-    assert.equal(queued.body.jobs.filter((job) => job.status === "queued").length, 1);
-    const result = await processMemoryGenerationJobs(app.db, ai, { warn() {} });
+    assert.ok(queued.body.jobs.filter((job) => job.status === "queued").length >= 1);
+    const firstAttempt = await processMemoryGenerationJobs(app.db, ai, { warn() {} }, { limit: 1 });
+    assert.equal(firstAttempt.retried, 1);
+    app.db.prepare("UPDATE memory_generation_jobs SET next_attempt_at = ?").run(new Date().toISOString());
+    const result = await processMemoryGenerationJobs(app.db, ai, { warn() {} }, { limit: 1 });
     assert.equal(result.succeeded, 1);
     const second = await jsonFetch(`${base}/api/admin/history`, { headers: { "x-admin-token": "test-admin" } });
     assert.equal(second.body.records[0].summary_status, "generated");
@@ -878,7 +881,7 @@ test("stops requeueing a summary after five failed attempts", async () => {
       }),
     });
     const first = await jsonFetch(base + "/api/admin/history", { headers: { "x-admin-token": "test-admin" } });
-    assert.equal(first.body.records[0].summary_status, "fallback");
+    assert.equal(first.body.records[0].summary_status, "queued");
     for (let attempt = 0; attempt < 5; attempt += 1) {
       app.db.prepare("UPDATE memory_generation_jobs SET next_attempt_at = ?").run(new Date().toISOString());
       await processMemoryGenerationJobs(app.db, ai, { warn() {} });

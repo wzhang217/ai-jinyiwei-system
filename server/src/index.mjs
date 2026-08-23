@@ -30,6 +30,7 @@ const defaultPolicy = {
 };
 
 const HISTORY_WINDOW_SECONDS = 10 * 60;
+const MAX_EVENT_DURATION_SECONDS = 12 * 3600;
 const HIDDEN_AGENT_PROCESSES = new Set([
   "ai-jinyiwei-agent.exe",
   "dwm.exe",
@@ -48,6 +49,7 @@ const HIDDEN_AGENT_PROCESSES = new Set([
 ]);
 
 const isoNow = () => new Date().toISOString();
+const SHANGHAI_OFFSET_MS = 8 * 3600_000;
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const newId = (prefix) => `${prefix}_${randomBytes(12).toString("hex")}`;
 const newToken = () => randomBytes(32).toString("base64url");
@@ -212,6 +214,7 @@ function createSchema(db) {
         citations_json = CASE WHEN citations_json = '[]' THEN COALESCE(json_extract(payload_json, '$.citations'), '[]') ELSE citations_json END
     WHERE payload_json IS NOT NULL AND json_valid(payload_json)
   `);
+  purgeInvalidIdleSummaries(db);
 
   const employeeInsert = db.prepare(
     "INSERT OR IGNORE INTO employees (id, name, team, created_at) VALUES (?, ?, ?, ?)",
@@ -222,6 +225,30 @@ function createSchema(db) {
   const policyInsert = db.prepare("INSERT OR IGNORE INTO policies (key, value) VALUES (?, ?)");
   for (const [key, value] of Object.entries(defaultPolicy)) {
     policyInsert.run(key, Array.isArray(value) ? JSON.stringify(value) : String(value));
+  }
+}
+
+function purgeInvalidIdleSummaries(db) {
+  // Older Agent builds could upload a 24-hour idle event. It is retained in
+  // events for diagnostics, but must never remain as a future-looking History
+  // Summary after the duration guard was fixed.
+  const invalid = db.prepare(`
+    SELECT ms.id
+    FROM memory_summaries ms
+    WHERE EXISTS (
+      SELECT 1
+      FROM events ev
+      WHERE ev.type = 'idle'
+        AND ev.duration_seconds >= 86400
+        AND ms.source_event_ids_json LIKE '%' || ev.event_id || '%'
+    )
+  `).all();
+  if (!invalid.length) return;
+  const deleteJobs = db.prepare("DELETE FROM memory_generation_jobs WHERE summary_id = ?");
+  const deleteSummaries = db.prepare("DELETE FROM memory_summaries WHERE id = ?");
+  for (const row of invalid) {
+    deleteJobs.run(row.id);
+    deleteSummaries.run(row.id);
   }
 }
 
@@ -410,7 +437,7 @@ function validateEvents(body) {
     if (event.context_label !== undefined && event.context_label !== null && !isSafeContextLabel(event.context_label)) return "context_label is invalid";
     if (event.title_hint !== undefined && event.title_hint !== null && !isSafeContextLabel(event.title_hint)) return "title_hint is invalid";
     if (event.web_domain !== undefined && event.web_domain !== null && (typeof event.web_domain !== "string" || event.web_domain.length > 253 || !isSafeWebDomain(event.web_domain))) return "web_domain is invalid";
-    if (!Number.isInteger(event.duration_seconds) || event.duration_seconds < 0 || event.duration_seconds > 86400) return "duration_seconds is invalid";
+    if (!Number.isInteger(event.duration_seconds) || event.duration_seconds < 0 || event.duration_seconds > MAX_EVENT_DURATION_SECONDS) return "duration_seconds is invalid";
   }
   return null;
 }
@@ -798,28 +825,43 @@ function historyQueryTokens(question) {
   return [...tokens];
 }
 
-function localDayStart(milliseconds = Date.now()) {
-  const date = new Date(milliseconds);
-  date.setHours(0, 0, 0, 0);
-  return date.getTime();
+function shanghaiDateParts(milliseconds = Date.now()) {
+  const shifted = new Date(milliseconds + SHANGHAI_OFFSET_MS);
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth(),
+    day: shifted.getUTCDate(),
+    hour: shifted.getUTCHours(),
+    weekday: shifted.getUTCDay(),
+  };
+}
+
+function shanghaiDayStart(milliseconds = Date.now()) {
+  const parts = shanghaiDateParts(milliseconds);
+  return Date.UTC(parts.year, parts.month, parts.day) - SHANGHAI_OFFSET_MS;
+}
+
+function shanghaiDateKey(milliseconds) {
+  const parts = shanghaiDateParts(milliseconds);
+  return `${parts.year}-${String(parts.month + 1).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`;
 }
 
 function historyQueryTimeRange(question, now = Date.now()) {
   const value = String(question || "").trim();
   if (!value) return null;
-  const todayStart = localDayStart(now);
+  const todayStart = shanghaiDayStart(now);
   if (/今天|今日/.test(value)) return { start: new Date(todayStart).toISOString(), end: new Date(now).toISOString(), label: "今天" };
   if (/昨天|昨日/.test(value)) {
     const start = todayStart - 24 * 3600_000;
     return { start: new Date(start).toISOString(), end: new Date(todayStart).toISOString(), label: "昨天" };
   }
   if (/上周/.test(value)) {
-    const currentWeekStart = todayStart - ((new Date(todayStart).getDay() + 6) % 7) * 24 * 3600_000;
+    const currentWeekStart = todayStart - ((shanghaiDateParts(now).weekday + 6) % 7) * 24 * 3600_000;
     const start = currentWeekStart - 7 * 24 * 3600_000;
     return { start: new Date(start).toISOString(), end: new Date(currentWeekStart).toISOString(), label: "上周" };
   }
   if (/本周|这周|本星期/.test(value)) {
-    const start = todayStart - ((new Date(todayStart).getDay() + 6) % 7) * 24 * 3600_000;
+    const start = todayStart - ((shanghaiDateParts(now).weekday + 6) % 7) * 24 * 3600_000;
     return { start: new Date(start).toISOString(), end: new Date(now).toISOString(), label: "本周" };
   }
   const recent = value.match(/(?:最近|近|过去)\s*(\d{1,3})\s*(分钟|小时|天|周)/);
@@ -831,8 +873,7 @@ function historyQueryTimeRange(question, now = Date.now()) {
   }
   const dateMatch = value.match(/(20\d{2})[-年\/]\s*(\d{1,2})[-月\/]\s*(\d{1,2})日?/);
   if (dateMatch) {
-    const startDate = new Date(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3]));
-    const start = startDate.getTime();
+    const start = Date.UTC(Number(dateMatch[1]), Number(dateMatch[2]) - 1, Number(dateMatch[3])) - SHANGHAI_OFFSET_MS;
     if (Number.isFinite(start)) return { start: new Date(start).toISOString(), end: new Date(start + 24 * 3600_000).toISOString(), label: `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}` };
   }
   return null;
@@ -873,19 +914,19 @@ export function rankHistoryRecords(question, records = []) {
     .map(({ record }) => record);
 }
 
-function startOfUtcWeekMs(milliseconds) {
-  const date = new Date(milliseconds);
-  const day = date.getUTCDay();
+function startOfShanghaiWeekMs(milliseconds) {
+  const parts = shanghaiDateParts(milliseconds);
+  const day = parts.weekday;
   const daysSinceMonday = (day + 6) % 7;
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() - daysSinceMonday);
+  return Date.UTC(parts.year, parts.month, parts.day - daysSinceMonday) - SHANGHAI_OFFSET_MS;
 }
 
 function rollupBucket(record, scope) {
   const startMs = Date.parse(record.started_at);
-  const date = new Date(startMs);
-  if (scope === "hourly") return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), date.getUTCHours());
-  if (scope === "daily") return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
-  if (scope === "weekly" || scope === "team_weekly") return startOfUtcWeekMs(startMs);
+  const parts = shanghaiDateParts(startMs);
+  if (scope === "hourly") return Date.UTC(parts.year, parts.month, parts.day, parts.hour) - SHANGHAI_OFFSET_MS;
+  if (scope === "daily") return Date.UTC(parts.year, parts.month, parts.day) - SHANGHAI_OFFSET_MS;
+  if (scope === "weekly" || scope === "team_weekly") return startOfShanghaiWeekMs(startMs);
   return null;
 }
 
@@ -902,7 +943,7 @@ function buildRollupRecords(leafRecords, scope = "window") {
       const startMs = Date.parse(record.started_at);
       const endMs = Date.parse(record.ended_at);
       const gapSeconds = current ? Math.max(0, (startMs - current.endMs) / 1000) : Infinity;
-      const day = record.started_at.slice(0, 10);
+      const day = shanghaiDateKey(startMs);
       if (!current || current.deviceId !== record.device_id || current.day !== day || gapSeconds > 30 * 60) {
         flush();
         current = { deviceId: record.device_id, employeeId: record.user_id, startMs, endMs, records: [record], day };
@@ -926,7 +967,7 @@ function buildRollupRecords(leafRecords, scope = "window") {
       const endMs = Date.parse(record.ended_at);
       const gapSeconds = current ? Math.max(0, (startMs - current.endMs) / 1000) : Infinity;
       const spanSeconds = current ? Math.max(0, (startMs - current.startMs) / 1000) : Infinity;
-      const day = record.started_at.slice(0, 10);
+      const day = shanghaiDateKey(startMs);
       if (!current || current.deviceId !== record.device_id || current.day !== day || gapSeconds > 30 * 60 || spanSeconds >= 6 * 60 * 60) {
         flush();
         current = { deviceId: record.device_id, employeeId: record.user_id, startMs, endMs, records: [record], day };
@@ -1014,7 +1055,7 @@ function buildRollupRecords(leafRecords, scope = "window") {
   });
 }
 
-async function materializeMemoryRecords(db, baseRecords, ai) {
+async function materializeMemoryRecords(db, baseRecords, ai, { deferModel = false } = {}) {
   const select = db.prepare("SELECT * FROM memory_summaries WHERE id = ?");
   const insert = db.prepare(`
     INSERT INTO memory_summaries
@@ -1077,9 +1118,9 @@ async function materializeMemoryRecords(db, baseRecords, ai) {
     const exhaustedJob = job && job.status === "failed" && Number(job.attempts || 0) >= 5;
     const shouldRegenerateForModel = existing
       && ai.mode === "model"
+      && !exhaustedJob
       && (existing.status === "fallback" || existing.model_name !== ai.model)
-      && !pendingJob
-      && (!exhaustedJob || existing.model_name !== ai.model);
+      && !pendingJob;
     if (existing && existing.source_hash === sourceHash && !shouldRegenerateForModel) {
       try {
         records.push(JSON.parse(existing.payload_json));
@@ -1089,7 +1130,20 @@ async function materializeMemoryRecords(db, baseRecords, ai) {
       }
     }
 
-    const generated = await ai.summarizeMemory(aiInputForRecord(baseRecord));
+    const shouldDeferModel = deferModel && ai.mode === "model";
+    const generated = shouldDeferModel
+      ? {
+          title: baseRecord.title,
+          description: baseRecord.description,
+          summary: baseRecord.summary,
+          prior_context: baseRecord.prior_context,
+          important_context: baseRecord.important_context || baseRecord.non_obvious,
+          non_obvious: baseRecord.non_obvious || baseRecord.important_context,
+          confidence: baseRecord.confidence,
+          status: "queued",
+          model_name: ai.model,
+        }
+      : await ai.summarizeMemory(aiInputForRecord(baseRecord));
     const record = {
       ...baseRecord,
       title: generated.title || baseRecord.title,
@@ -1132,7 +1186,7 @@ async function materializeMemoryRecords(db, baseRecords, ai) {
       now,
       record.rollup_scope || "leaf",
     );
-    if (ai.mode === "model" && generated.retryable && (!exhaustedJob || existing?.model_name !== ai.model)) {
+    if (ai.mode === "model" && (shouldDeferModel || generated.retryable) && (!exhaustedJob || existing?.model_name !== ai.model)) {
       enqueueJob.run(newId("memory_job"), record.id, isoNow(), now, now);
     }
     records.push(record);
@@ -1159,6 +1213,11 @@ export async function processMemoryGenerationJobs(db, ai, logger = console, { li
         payload_json = ?, model_name = ?, status = ?, generated_at = ?, updated_at = ?
     WHERE id = ?
   `);
+  const updateSummaryStatus = db.prepare(`
+    UPDATE memory_summaries
+    SET payload_json = ?, model_name = ?, status = ?, updated_at = ?
+    WHERE id = ?
+  `);
   const markSucceeded = db.prepare("UPDATE memory_generation_jobs SET status = 'succeeded', last_error = NULL, updated_at = ? WHERE id = ?");
   const markRetry = db.prepare("UPDATE memory_generation_jobs SET attempts = ?, next_attempt_at = ?, status = ?, last_error = ?, updated_at = ? WHERE id = ?");
   let succeeded = 0;
@@ -1167,10 +1226,12 @@ export async function processMemoryGenerationJobs(db, ai, logger = console, { li
 
   for (const job of jobs) {
     markRunning.run(now, job.id);
+    let storedPayload = null;
     try {
       const stored = getSummary.get(job.summary_id);
       if (!stored) throw new Error("summary not found");
       const baseRecord = JSON.parse(stored.payload_json);
+      storedPayload = baseRecord;
       const generated = await ai.summarizeMemory(aiInputForRecord(baseRecord));
       if (generated.status !== "generated") throw new Error("model generation returned fallback");
       const record = {
@@ -1212,24 +1273,33 @@ export async function processMemoryGenerationJobs(db, ai, logger = console, { li
       const nextAttempt = new Date(Date.now() + Math.min(60 * 60, 2 ** attempts * 30) * 1000).toISOString();
       const safeMessage = String(error.message || "generation failed").slice(0, 300);
       markRetry.run(attempts, nextAttempt, exhausted ? "failed" : "retrying", safeMessage, isoNow(), job.id);
-      if (exhausted) failed += 1;
-      else retried += 1;
+      if (exhausted) {
+        if (storedPayload) {
+          const fallbackRecord = {
+            ...storedPayload,
+            summary_status: "fallback",
+            summary_model: "rules-v1",
+          };
+          updateSummaryStatus.run(JSON.stringify(fallbackRecord), "rules-v1", "fallback", isoNow(), job.summary_id);
+        }
+        failed += 1;
+      } else retried += 1;
       logger.warn?.(`Memory Summary generation ${exhausted ? "failed" : "will retry"}: ${safeMessage}`);
     }
   }
   return { processed: jobs.length, succeeded, retried, failed };
 }
 
-async function getMemoryRecords(db, { deviceId = null, limit = 200, ai, principal = null, team = null }) {
+async function getMemoryRecords(db, { deviceId = null, limit = 200, ai, principal = null, team = null, deferModel = false }) {
   const requestedLimit = Math.min(Math.max(Number(limit) || 200, 1), 2000);
   // Keep fresh materialization bounded: querying older history should reuse
   // persisted summaries instead of issuing a model request for every old
   // event window on each question.
   const freshLimit = Math.min(requestedLimit, 200);
-  const leafRecords = await materializeMemoryRecords(db, buildHistoryRecords(db, { deviceId, limit: freshLimit, principal, team }), ai);
+  const leafRecords = await materializeMemoryRecords(db, buildHistoryRecords(db, { deviceId, limit: freshLimit, principal, team }), ai, { deferModel });
   const rollupRecords = [];
   for (const scope of ["window", "six_hour", "hourly", "daily", "weekly", "team_weekly"]) {
-    rollupRecords.push(...await materializeMemoryRecords(db, buildRollupRecords(leafRecords, scope), ai));
+    rollupRecords.push(...await materializeMemoryRecords(db, buildRollupRecords(leafRecords, scope), ai, { deferModel }));
   }
 
   const persistedRecords = readPersistedMemoryRecords(db, {
@@ -1488,7 +1558,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
         const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 200, 1), 2000);
         const deviceId = url.searchParams.get("device_id") || null;
-        const records = await getMemoryRecords(db, { deviceId, limit, ai, principal });
+        const records = await getMemoryRecords(db, { deviceId, limit, ai, principal, deferModel: true });
         return sendJson(response, 200, { records, generated_at: isoNow(), model: ai.model });
       }
 
@@ -1497,7 +1567,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
         const recordId = decodeURIComponent(url.pathname.slice("/api/admin/history/".length, -"/sources".length));
         if (!recordId || recordId.length > 200) return sendError(response, 400, "record id is invalid", "invalid_record_id");
-        const records = await getMemoryRecords(db, { limit: 2000, ai, principal });
+        const records = await getMemoryRecords(db, { limit: 2000, ai, principal, deferModel: true });
         const record = records.find((item) => item.id === recordId);
         if (!record) return sendError(response, 404, "history record not found", "record_not_found");
 
@@ -1535,7 +1605,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const body = await readJson(request);
         const limit = Math.min(Math.max(Number(body.limit) || 200, 1), 2000);
         const deviceId = typeof body.device_id === "string" && body.device_id.trim() ? body.device_id.trim() : null;
-        const records = await getMemoryRecords(db, { deviceId, limit, ai, principal });
+        const records = await getMemoryRecords(db, { deviceId, limit, ai, principal, deferModel: true });
         const requestedIds = Array.isArray(body.record_ids) ? new Set(body.record_ids.filter((id) => typeof id === "string").slice(0, 200)) : null;
         const exported = requestedIds?.size ? records.filter((record) => requestedIds.has(record.id)) : records;
         recordAudit(db, "history_exported", principal.actor || "admin", deviceId || "history", `records=${exported.length}`);
@@ -1556,7 +1626,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const deviceId = typeof body.device_id === "string" && body.device_id.trim() ? body.device_id.trim() : null;
         const requestedTeam = typeof body.team === "string" && body.team.trim() ? body.team.trim().slice(0, 120) : null;
         const effectiveTeam = principal.role === "manager" ? principal.team : principal.role === "employee" ? null : requestedTeam;
-        const records = await getMemoryRecords(db, { deviceId, limit, ai, principal, team: effectiveTeam });
+        const records = await getMemoryRecords(db, { deviceId, limit, ai, principal, team: effectiveTeam, deferModel: true });
         const queryTimeRange = historyQueryTimeRange(body.question.trim());
         const timeScopedRecords = filterHistoryRecordsByTime(records, queryTimeRange);
         const rankedRecords = rankHistoryRecords(body.question.trim(), timeScopedRecords);
@@ -1836,7 +1906,7 @@ export function createAgentServer({ dbPath = process.env.AGENT_DB_PATH || defaul
     if (memoryWarmupRunning || ai.mode !== "model") return;
     memoryWarmupRunning = true;
     try {
-      await getMemoryRecords(db, { limit: 200, ai });
+      await getMemoryRecords(db, { limit: 200, ai, deferModel: true });
     } catch (error) {
       logger.warn?.(`Memory Summary materialization error: ${error.message}`);
     } finally {
