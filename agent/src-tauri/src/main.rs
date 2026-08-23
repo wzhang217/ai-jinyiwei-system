@@ -14,15 +14,21 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
-const AGENT_VERSION: &str = "0.1.3";
+const AGENT_VERSION: &str = "0.1.4";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const MAX_PENDING_EVENTS: i64 = 10_000;
 const MAX_EVENT_DURATION_SECONDS: i64 = 86_400;
-const ACTIVE_SESSION_CHECKPOINT_SECONDS: i64 = 60;
+const DEFAULT_ACTIVITY_CHECKPOINT_SECONDS: u64 = 15;
+
+fn default_activity_checkpoint_seconds() -> u64 {
+    DEFAULT_ACTIVITY_CHECKPOINT_SECONDS
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Policy {
     idle_threshold_seconds: u64,
+    #[serde(default = "default_activity_checkpoint_seconds")]
+    activity_checkpoint_seconds: u64,
     heartbeat_interval_seconds: u64,
     work_hours_start: String,
     work_hours_end: String,
@@ -37,6 +43,7 @@ impl Default for Policy {
     fn default() -> Self {
         Self {
             idle_threshold_seconds: 300,
+            activity_checkpoint_seconds: DEFAULT_ACTIVITY_CHECKPOINT_SECONDS,
             heartbeat_interval_seconds: 60,
             work_hours_start: "09:00".into(),
             work_hours_end: "18:00".into(),
@@ -132,6 +139,7 @@ struct Core {
     active_session: Option<ActiveSession>,
     idle_session: Option<IdleSession>,
     last_heartbeat: Instant,
+    last_event_flush: Instant,
     pending_registration_code: Option<String>,
     last_auto_enroll_attempt: Instant,
 }
@@ -250,6 +258,8 @@ impl Core {
             active_session: None,
             idle_session: None,
             last_heartbeat: Instant::now() - Duration::from_secs(60),
+            last_event_flush: Instant::now()
+                - Duration::from_secs(DEFAULT_ACTIVITY_CHECKPOINT_SECONDS),
             pending_registration_code: None,
             last_auto_enroll_attempt: Instant::now() - Duration::from_secs(60),
         })
@@ -484,7 +494,8 @@ impl Core {
             .duration_since(started_at)
             .as_secs()
             .min(MAX_EVENT_DURATION_SECONDS as u64) as i64;
-        if duration < ACTIVE_SESSION_CHECKPOINT_SECONDS || duration <= last_emitted_duration {
+        let checkpoint_seconds = self.activity_checkpoint_seconds();
+        if duration < checkpoint_seconds as i64 || duration <= last_emitted_duration {
             return Ok(());
         }
         self.queue_event(AgentEvent {
@@ -529,7 +540,8 @@ impl Core {
             return Ok(());
         };
         let duration = now.duration_since(started_at).as_secs() as i64;
-        if duration < ACTIVE_SESSION_CHECKPOINT_SECONDS || duration <= last_emitted_duration {
+        let checkpoint_seconds = self.activity_checkpoint_seconds();
+        if duration < checkpoint_seconds as i64 || duration <= last_emitted_duration {
             return Ok(());
         }
         self.queue_event(AgentEvent {
@@ -546,6 +558,13 @@ impl Core {
             session.last_emitted_duration = duration;
         }
         Ok(())
+    }
+
+    fn activity_checkpoint_seconds(&self) -> u64 {
+        self.status
+            .policy
+            .activity_checkpoint_seconds
+            .clamp(10, 300)
     }
 
     fn enroll_from_code(
@@ -621,6 +640,7 @@ impl Core {
         }
 
         let now = Instant::now();
+        let checkpoint_seconds = self.activity_checkpoint_seconds();
         if !within_work_hours(&self.status.policy) {
             let _ = self.finish_session(now);
             let _ = self.finish_idle_session(now);
@@ -686,14 +706,33 @@ impl Core {
             let _ = self.checkpoint_session(now);
         }
 
+        let mut sync_error = None;
+        let event_flush_due = self.status.queued_events > 0
+            && now.duration_since(self.last_event_flush).as_secs() >= checkpoint_seconds;
+        if event_flush_due {
+            match self.flush_events() {
+                Ok(()) => {
+                    self.last_event_flush = now;
+                    self.status.last_sync_at = Some(Utc::now().to_rfc3339());
+                }
+                Err(error) => sync_error = Some(error),
+            }
+        }
+
         if now.duration_since(self.last_heartbeat).as_secs()
             >= self.status.policy.heartbeat_interval_seconds
         {
-            let result = self.flush_events().and_then(|_| self.send_heartbeat());
-            if let Err(error) = result {
-                self.status.state = "offline".into();
-                self.status.last_error = Some(error);
+            if let Err(error) = self.send_heartbeat() {
+                sync_error = Some(error);
             }
+        }
+
+        if let Some(error) = sync_error {
+            self.status.state = "offline".into();
+            self.status.last_error = Some(error);
+        } else if event_flush_due {
+            self.status.state = "online".into();
+            self.status.last_error = None;
         }
         self.status.queued_events = pending_count(&self.db);
     }

@@ -10,9 +10,10 @@ const fallbackStatus = {
   last_sync_at: null,
   queued_events: 0,
   last_error: null,
-  agent_version: "0.1.3",
+  agent_version: "0.1.4",
   policy: {
     idle_threshold_seconds: 300,
+    activity_checkpoint_seconds: 15,
     heartbeat_interval_seconds: 60,
     work_hours_start: "09:00",
     work_hours_end: "18:00",
@@ -163,7 +164,7 @@ export function App() {
           </section>
           <section className="card">
             <div className="section-heading"><div><div className="card-kicker">采集策略</div><h2>当前会记录什么</h2></div><span className="policy-version">策略 v{status.policy.version}</span></div>
-            <div className="policy-list"><PolicyItem title="应用活动" detail="前台应用名称和使用时长" enabled /><PolicyItem title="脱敏工作标识" detail="仅保留开发工具项目标识，不保存原始窗口标题" enabled /><PolicyItem title="网站来源" detail="仅保留域名，不保存完整 URL 或页面内容" enabled /><PolicyItem title="空闲状态" detail={`超过 ${Math.round(status.policy.idle_threshold_seconds / 60)} 分钟进入空闲`} enabled /><PolicyItem title="同步心跳" detail={`每 ${status.policy.heartbeat_interval_seconds} 秒更新设备状态`} enabled /><PolicyItem title="屏幕、键盘和聊天正文" detail="系统级禁止采集" /></div>
+            <div className="policy-list"><PolicyItem title="应用活动" detail={`前台应用名称和使用时长，每 ${status.policy.activity_checkpoint_seconds || 15} 秒更新活动区间`} enabled /><PolicyItem title="脱敏工作标识" detail="仅保留开发工具项目标识，不保存原始窗口标题" enabled /><PolicyItem title="网站来源" detail="仅保留域名，不保存完整 URL 或页面内容" enabled /><PolicyItem title="空闲状态" detail={`超过 ${Math.round(status.policy.idle_threshold_seconds / 60)} 分钟进入空闲`} enabled /><PolicyItem title="同步心跳" detail={`每 ${status.policy.heartbeat_interval_seconds} 秒更新设备状态`} enabled /><PolicyItem title="屏幕、键盘和聊天正文" detail="系统级禁止采集" /></div>
           </section>
           <section className="card privacy-card"><div className="shield">✓</div><div><h2>隐私边界</h2><p>Agent 不读取键盘、剪贴板、屏幕、聊天正文、文件正文、原始窗口标题或完整网页内容；只保留有限的项目标识和网站域名。断网时数据只保存在本机队列，恢复后自动补传。</p></div></section>
         </>

@@ -337,15 +337,17 @@ test("allows an admin to configure 24-hour collection", async () => {
       { start: initial.body.policy.work_hours_start, end: initial.body.policy.work_hours_end },
       { start: "09:00", end: "18:00" },
     );
+    assert.equal(initial.body.policy.activity_checkpoint_seconds, 15);
 
     const updated = await jsonFetch(`${base}/api/admin/policy`, {
       method: "PUT",
       headers,
-      body: JSON.stringify({ work_hours_start: "00:00", work_hours_end: "24:00" }),
+      body: JSON.stringify({ work_hours_start: "00:00", work_hours_end: "24:00", activity_checkpoint_seconds: 30 }),
     });
     assert.equal(updated.response.status, 200);
     assert.equal(updated.body.policy.work_hours_start, "00:00");
     assert.equal(updated.body.policy.work_hours_end, "24:00");
+    assert.equal(updated.body.policy.activity_checkpoint_seconds, 30);
     assert.equal(updated.body.policy.version, 2);
 
     const invalid = await jsonFetch(`${base}/api/admin/policy`, {
@@ -354,6 +356,13 @@ test("allows an admin to configure 24-hour collection", async () => {
       body: JSON.stringify({ work_hours_start: "18:00", work_hours_end: "09:00" }),
     });
     assert.equal(invalid.response.status, 400);
+
+    const invalidCheckpoint = await jsonFetch(`${base}/api/admin/policy`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ work_hours_start: "00:00", work_hours_end: "24:00", activity_checkpoint_seconds: 5 }),
+    });
+    assert.equal(invalidCheckpoint.response.status, 400);
   });
 });
 

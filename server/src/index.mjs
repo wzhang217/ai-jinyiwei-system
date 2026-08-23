@@ -20,6 +20,7 @@ const defaultEmployees = [
 
 const defaultPolicy = {
   idle_threshold_seconds: 300,
+  activity_checkpoint_seconds: 15,
   heartbeat_interval_seconds: 60,
   work_hours_start: "09:00",
   work_hours_end: "18:00",
@@ -231,7 +232,7 @@ function getPolicy(db) {
       }
       return policy;
     }
-    policy[row.key] = ["idle_threshold_seconds", "heartbeat_interval_seconds", "version"].includes(row.key)
+    policy[row.key] = ["idle_threshold_seconds", "activity_checkpoint_seconds", "heartbeat_interval_seconds", "version"].includes(row.key)
       ? Number(row.value)
       : row.value;
     return policy;
@@ -426,6 +427,9 @@ function validatePolicyUpdate(body) {
   const end = parsePolicyMinutes(body.work_hours_end, { allowEndOfDay: true });
   if (start === null || end === null) return "work hours must use HH:MM format";
   if (start >= end) return "work_hours_end must be later than work_hours_start";
+  if (!Number.isInteger(body.activity_checkpoint_seconds) || body.activity_checkpoint_seconds < 10 || body.activity_checkpoint_seconds > 300) {
+    return "activity_checkpoint_seconds must be an integer between 10 and 300";
+  }
   if (!isValidPolicyList(body.excluded_processes, { kind: "process" })) return "excluded_processes is invalid";
   if (!isValidPolicyList(body.excluded_domains, { kind: "domain" })) return "excluded_domains is invalid";
   return null;
@@ -1343,6 +1347,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const nextPolicy = {
           work_hours_start: body?.work_hours_start,
           work_hours_end: body?.work_hours_end,
+          activity_checkpoint_seconds: body?.activity_checkpoint_seconds ?? current.activity_checkpoint_seconds ?? 15,
           excluded_processes: body?.excluded_processes ?? current.excluded_processes ?? [],
           excluded_domains: body?.excluded_domains ?? current.excluded_domains ?? [],
         };
@@ -1351,6 +1356,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const changed = [
           ["work_hours_start", nextPolicy.work_hours_start],
           ["work_hours_end", nextPolicy.work_hours_end],
+          ["activity_checkpoint_seconds", String(nextPolicy.activity_checkpoint_seconds)],
           ["excluded_processes", JSON.stringify(nextPolicy.excluded_processes.map((item) => item.trim().toLowerCase()))],
           ["excluded_domains", JSON.stringify(nextPolicy.excluded_domains.map((item) => item.trim().toLowerCase()))],
         ].filter(([key, value]) => {
@@ -1370,7 +1376,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
             "policy_changed",
             "admin",
             "agent_policy",
-            `work hours=${nextPolicy.work_hours_start}-${nextPolicy.work_hours_end}; excluded processes=${nextPolicy.excluded_processes.length}; excluded domains=${nextPolicy.excluded_domains.length}`,
+            `work hours=${nextPolicy.work_hours_start}-${nextPolicy.work_hours_end}; activity checkpoint=${nextPolicy.activity_checkpoint_seconds}s; excluded processes=${nextPolicy.excluded_processes.length}; excluded domains=${nextPolicy.excluded_domains.length}`,
           );
         }
         return sendJson(response, 200, { policy: getPolicy(db) });

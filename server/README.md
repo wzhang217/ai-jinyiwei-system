@@ -40,6 +40,8 @@ AGENT_ADMIN_TOKEN=dev-admin-token
 
 `GET /api/admin/history` 会将 Leaf Summary 持久化到 `memory_summaries` 表；`POST /api/admin/history/ask` 使用这些摘要返回答案和证据记录。模型输入只包含应用、时长、切换、脱敏标识和网站域名等活动元数据。
 
+采集策略中的 `activity_checkpoint_seconds` 控制同一活动区间的实时更新间隔，默认 15 秒，可在管理后台设置为 15、30 或 60 秒；`heartbeat_interval_seconds` 仍独立控制设备心跳，默认 60 秒。修改策略后，已注册 Agent 会在下一次心跳拉取新策略。
+
 管理后台的团队和员工目录通过 `GET /api/admin/teams`、`GET /api/admin/employees` 读取服务端组织数据，并沿用管理员、管理者和员工的服务端权限范围；前端不再把演示目录作为真实数据源。
 
 管理后台的“立即刷新”会重新读取 `GET /api/admin/history`，历史记录页的导出会调用 `POST /api/admin/history/export`，服务端返回当前权限范围内的记录并写入 `history_exported` 审计日志。设备列表读取真实心跳；超过策略心跳间隔的设备会被标记为离线，并写入 `agent_offline`，恢复心跳后写入 `agent_online`。

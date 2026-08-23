@@ -117,6 +117,7 @@ export async function updateLivePolicy(policy) {
     body: JSON.stringify({
       work_hours_start: policy.work_hours_start,
       work_hours_end: policy.work_hours_end,
+      activity_checkpoint_seconds: Number(policy.activity_checkpoint_seconds || 15),
       excluded_processes: policy.excluded_processes || [],
       excluded_domains: policy.excluded_domains || [],
     }),
