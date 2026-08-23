@@ -770,7 +770,7 @@ test("coalesces overlapping native and extension browser observations", async ()
     const history = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
     const leaf = history.body.records.find((record) => record.record_type === "leaf");
     assert.ok(leaf);
-    assert.deepEqual(leaf.source_kinds, ["browser_extension"]);
+    assert.deepEqual(leaf.source_kinds, ["browser_extension", "browser_native", "desktop_app"]);
     assert.equal(leaf.activity_sequence.length, 3);
     assert.deepEqual(leaf.source_event_ids.sort(), ["code-after-browser-event", "extension-browser-event", "native-browser-event", "second-browser-domain-event"]);
     assert.equal(leaf.activity_sequence[0].duration_seconds, 150);
