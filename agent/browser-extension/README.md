@@ -4,7 +4,7 @@
 
 - 采集当前标签页的域名；
 - GitHub、GitLab、Notion、Figma、ChatGPT、Codex、Jira、Linear、Trello、Asana、ClickUp、飞书、钉钉、Slack、Teams 只生成有限的来源/项目提示；
-- 每 60 秒用同一个 `event_id` 更新活动时长；
+- 每 30 秒用同一个 `event_id` 更新活动时长；
 - 不上传完整 URL、查询参数、网页正文、聊天正文、键盘内容、剪贴板或截图。
 
 ## 在测试电脑上加载

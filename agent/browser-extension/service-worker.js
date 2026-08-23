@@ -149,7 +149,8 @@ async function syncActiveTab() {
 }
 
 async function ensureAlarm() {
-  await chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
+  // Keep browser context close to the desktop Agent's default checkpoint.
+  await chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
 }
 
 chrome.runtime.onInstalled.addListener(() => { void ensureAlarm(); void syncActiveTab(); });
