@@ -9,6 +9,13 @@ import { createAiService } from "./ai.mjs";
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const defaultDbPath = resolve(moduleDir, "../data/agent.sqlite");
 const allowedEventTypes = new Set(["app_session", "idle"]);
+const allowedSourceKinds = new Set([
+  "desktop_app",
+  "browser_native",
+  "browser_extension",
+  "system_idle",
+  "system_app",
+]);
 
 const defaultEmployees = [
   ["employee-wei", "Wei", "研发与产品中心"],
@@ -30,6 +37,15 @@ const defaultPolicy = {
 };
 
 const HISTORY_WINDOW_SECONDS = 10 * 60;
+const AI_SUMMARY_WINDOW_SECONDS = Math.max(
+  60,
+  Number(process.env.AI_SUMMARY_WINDOW_SECONDS) || HISTORY_WINDOW_SECONDS,
+);
+const AI_ACTIVE_GRACE_SECONDS = Math.max(
+  15,
+  Number(process.env.AI_ACTIVE_GRACE_SECONDS) || 45,
+);
+const AI_GENERATION_INTERVAL_SECONDS = 15;
 const MAX_EVENT_DURATION_SECONDS = 12 * 3600;
 const HIDDEN_AGENT_PROCESSES = new Set([
   "ai-jinyiwei-agent.exe",
@@ -55,6 +71,10 @@ const newId = (prefix) => `${prefix}_${randomBytes(12).toString("hex")}`;
 const newToken = () => randomBytes(32).toString("base64url");
 const newRegistrationCode = () => `JY-${randomBytes(5).toString("hex").toUpperCase()}`;
 const newBrowserPairingCode = () => `BP-${randomBytes(5).toString("hex").toUpperCase()}`;
+
+function configuredAiGenerationBatchSize() {
+  return Math.min(Math.max(Number(process.env.AI_GENERATION_BATCH_SIZE) || 1, 1), 20);
+}
 
 function createSchema(db) {
   db.exec(`
@@ -118,6 +138,7 @@ function createSchema(db) {
       type TEXT NOT NULL CHECK (type IN ('app_session', 'idle')),
       app_name TEXT NOT NULL,
       process_name TEXT NOT NULL,
+      source_kind TEXT NOT NULL DEFAULT 'desktop_app',
       context_label TEXT,
       web_domain TEXT,
       duration_seconds INTEGER NOT NULL DEFAULT 0,
@@ -180,6 +201,7 @@ function createSchema(db) {
 
   ensureColumn(db, "events", "context_label", "TEXT");
   ensureColumn(db, "events", "web_domain", "TEXT");
+  ensureColumn(db, "events", "source_kind", "TEXT NOT NULL DEFAULT 'desktop_app'");
   ensureColumn(db, "memory_summaries", "rollup_scope", "TEXT NOT NULL DEFAULT 'window'");
   ensureColumn(db, "memory_summaries", "source_record_ids_json", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "memory_summaries", "title", "TEXT NOT NULL DEFAULT ''");
@@ -250,6 +272,15 @@ function purgeInvalidIdleSummaries(db) {
     deleteJobs.run(row.id);
     deleteSummaries.run(row.id);
   }
+}
+
+function recoverRunningMemoryJobs(db) {
+  const now = isoNow();
+  db.prepare(`
+    UPDATE memory_generation_jobs
+    SET status = 'queued', next_attempt_at = ?, last_error = COALESCE(last_error, 'recovered after server restart'), updated_at = ?
+    WHERE status = 'running'
+  `).run(now, now);
 }
 
 function ensureColumn(db, table, column, definition) {
@@ -434,12 +465,24 @@ function validateEvents(body) {
     if (typeof event.occurred_at !== "string" || Number.isNaN(Date.parse(event.occurred_at))) return "occurred_at must be an ISO date";
     if (typeof event.app_name !== "string" || event.app_name.length > 120) return "app_name is required";
     if (typeof event.process_name !== "string" || event.process_name.length > 120) return "process_name is required";
+    if (event.source_kind !== undefined && event.source_kind !== null && !allowedSourceKinds.has(event.source_kind)) return "source_kind is invalid";
     if (event.context_label !== undefined && event.context_label !== null && !isSafeContextLabel(event.context_label)) return "context_label is invalid";
     if (event.title_hint !== undefined && event.title_hint !== null && !isSafeContextLabel(event.title_hint)) return "title_hint is invalid";
     if (event.web_domain !== undefined && event.web_domain !== null && (typeof event.web_domain !== "string" || event.web_domain.length > 253 || !isSafeWebDomain(event.web_domain))) return "web_domain is invalid";
     if (!Number.isInteger(event.duration_seconds) || event.duration_seconds < 0 || event.duration_seconds > MAX_EVENT_DURATION_SECONDS) return "duration_seconds is invalid";
   }
   return null;
+}
+
+function sourceKindForEvent(event) {
+  if (allowedSourceKinds.has(event?.source_kind)) return event.source_kind;
+  if (event?.type === "idle") return "system_idle";
+  if (event?.web_domain) {
+    return event?.title_hint || String(event?.context_label || "").startsWith("来源：")
+      ? "browser_extension"
+      : "browser_native";
+  }
+  return "desktop_app";
 }
 
 function isSafeContextLabel(value) {
@@ -536,6 +579,10 @@ function applicationKey(appName) {
   if (normalized.includes("powerpnt") || normalized.includes("powerpoint")) return "powerpoint";
   if (normalized.includes("notion")) return "notion";
   if (normalized.includes("figma")) return "figma";
+  if (normalized.includes("360zip")) return "archive360";
+  if (normalized.includes("doubao")) return "doubao";
+  if (normalized.includes("namiai")) return "namiai";
+  if (normalized.includes("360tray")) return "security360";
   if (normalized.includes("finder")) return "finder";
   if (normalized.includes("explorer")) return "explorer";
   if (normalized.includes("terminal") || normalized.includes("powershell") || normalized.includes("cmd.exe")) return "terminal";
@@ -565,6 +612,10 @@ function displayApplicationName(appName) {
   if (normalized.includes("powerpnt") || normalized.includes("powerpoint")) return "Microsoft PowerPoint";
   if (normalized.includes("notion")) return "Notion";
   if (normalized.includes("figma")) return "Figma";
+  if (normalized.includes("360zip")) return "360 压缩";
+  if (normalized.includes("doubao")) return "豆包";
+  if (normalized.includes("namiai")) return "Namiai";
+  if (normalized.includes("360tray")) return "360 安全卫士";
   if (normalized.includes("explorer")) return "Windows 文件资源管理器";
   if (normalized.includes("terminal") || normalized.includes("powershell") || normalized.includes("cmd.exe")) return "Windows 终端";
   if (normalized.includes("codex") || normalized.includes("chatgpt")) return "Codex";
@@ -577,9 +628,12 @@ function applicationContext(appName, processName) {
   if (normalized.includes("wechat") || normalized.includes("weixin") || normalized.includes("企业微信") || normalized.includes("slack") || normalized.includes("teams") || normalized.includes("feishu") || normalized.includes("lark") || normalized.includes("dingtalk")) return "沟通";
   if (normalized.includes("chrome") || normalized.includes("edge") || normalized.includes("360se") || normalized.includes("firefox") || normalized.includes("browser")) return "浏览器";
   if (normalized.includes("code") || normalized.includes("visual studio") || normalized.includes("idea") || normalized.includes("devenv")) return "开发";
+  if (normalized.includes("doubao") || normalized.includes("namiai") || normalized.includes("codex") || normalized.includes("chatgpt")) return "AI 工作台";
+  if (normalized.includes("360zip")) return "文件";
   if (normalized.includes("wps") || normalized.includes("word") || normalized.includes("excel") || normalized.includes("powerpoint") || normalized.includes("notion")) return "文档";
   if (normalized.includes("explorer") || normalized.includes("finder")) return "文件";
   if (normalized.includes("terminal") || normalized.includes("powershell") || normalized.includes("cmd.exe") || normalized.includes("windowsterminal")) return "终端";
+  if (normalized.includes("360tray")) return "系统";
   if (normalized.includes("idle") || normalized.includes("system")) return "系统";
   return "其他";
 }
@@ -593,6 +647,54 @@ function metadataResource(label) {
   return { name: value, path: "脱敏工作标识", type: "metadata" };
 }
 
+function applicationResource(applicationName) {
+  return {
+    name: applicationName,
+    path: "前台应用元数据",
+    type: "application",
+  };
+}
+
+function sourceKindLabel(sourceKind) {
+  return {
+    desktop_app: "桌面应用",
+    browser_native: "浏览器原生",
+    browser_extension: "浏览器扩展",
+    system_idle: "系统空闲",
+    system_app: "系统组件",
+  }[sourceKind] || "活动元数据";
+}
+
+function contextResource(label) {
+  const resource = metadataResource(label);
+  return String(label || "").startsWith("来源：")
+    ? { ...resource, path: "脱敏网站来源提示", type: "website" }
+    : resource;
+}
+
+function workThemeTitle(employeeName, { isIdle = false, contextKinds = [], applicationNames = [] } = {}) {
+  if (isIdle) return `${employeeName} · 系统空闲`;
+  const themes = [...new Set(contextKinds.filter(Boolean))];
+  if (themes.length) return `${employeeName} · ${themes.slice(0, 4).join("、")}${themes.length > 4 ? "等" : ""}活动`;
+  const apps = applicationNames.filter(Boolean);
+  if (apps.length > 2) return `${employeeName} · 多应用工作活动`;
+  return `${employeeName} · ${apps.join("、") || "工作"}活动`;
+}
+
+function isMemoryRecordActive(record, nowMs = Date.now()) {
+  const endedAtMs = Date.parse(record.ended_at);
+  return Number.isFinite(endedAtMs) && endedAtMs >= nowMs - AI_ACTIVE_GRACE_SECONDS * 1000;
+}
+
+function isEligibleForAiSummary(record, nowMs = Date.now()) {
+  if (isMemoryRecordActive(record, nowMs)) return false;
+  // Keep Qwen on the fixed ten-minute Leaf cadence. Rollups are derived
+  // views of those Leaves and stay rules-based in the MVP, otherwise one
+  // activity window would fan out into hourly/daily/weekly model calls.
+  return record.record_type === "leaf"
+    && Number(record.duration_seconds || 0) >= AI_SUMMARY_WINDOW_SECONDS;
+}
+
 function historyEventRows(db, deviceId, principal = null, team = null) {
   const conditions = [];
   const params = [];
@@ -603,6 +705,10 @@ function historyEventRows(db, deviceId, principal = null, team = null) {
   const scope = scopePredicate(principal);
   conditions.push(scope.sql);
   params.push(...scope.params);
+  // A sleeping/resumed Windows client can report a malformed future timestamp.
+  // Keep the raw event for diagnostics, but never let it appear in History.
+  conditions.push("julianday(ev.occurred_at) <= julianday(?)");
+  params.push(new Date(Date.now() + 60_000).toISOString());
   if (team && principal?.role !== "employee") {
     conditions.push("e.team = ?");
     params.push(team);
@@ -620,6 +726,10 @@ function historyEventRows(db, deviceId, principal = null, team = null) {
 
 function splitHistoryEventRow(row) {
   const durationSeconds = Math.max(0, Number(row.duration_seconds) || 0);
+  // Older Windows Agent builds could emit a full-day idle checkpoint after
+  // sleep/resume. Reject it before segmentation; otherwise it would become
+  // many apparently valid ten-minute windows and push History into the future.
+  if (row.type === "idle" && durationSeconds >= 86_400) return [];
   if (durationSeconds <= HISTORY_WINDOW_SECONDS) return [row];
   const startMs = Date.parse(row.occurred_at);
   if (!Number.isFinite(startMs)) return [row];
@@ -639,6 +749,52 @@ function splitHistoryEventRow(row) {
     segmentIndex += 1;
   }
   return segments;
+}
+
+function sourceKindPriority(sourceKind) {
+  return {
+    browser_extension: 3,
+    browser_native: 2,
+    desktop_app: 1,
+    system_app: 1,
+    system_idle: 1,
+  }[sourceKind] || 0;
+}
+
+function coalesceOverlappingActivityRows(rows) {
+  const compact = [];
+  for (const row of rows) {
+    const startMs = Date.parse(row.occurred_at);
+    const durationSeconds = Math.max(0, Number(row.duration_seconds) || 0);
+    const endMs = startMs + durationSeconds * 1000;
+    const previous = compact.at(-1);
+    if (!previous || row.type !== previous.type) {
+      compact.push(row);
+      continue;
+    }
+    const previousStartMs = Date.parse(previous.occurred_at);
+    const previousEndMs = previousStartMs + Math.max(0, Number(previous.duration_seconds) || 0) * 1000;
+    const sameActivity = row.app_name === previous.app_name
+      && row.process_name === previous.process_name
+      && (row.web_domain || null) === (previous.web_domain || null)
+      && ((row.context_label || null) === (previous.context_label || null)
+        || Boolean(row.web_domain && previous.web_domain));
+    if (!sameActivity || !Number.isFinite(startMs) || !Number.isFinite(previousStartMs) || startMs >= previousEndMs) {
+      compact.push(row);
+      continue;
+    }
+    const mergedStartMs = Math.min(previousStartMs, startMs);
+    const mergedEndMs = Math.max(previousEndMs, endMs);
+    const preferred = sourceKindPriority(sourceKindForEvent(row)) > sourceKindPriority(sourceKindForEvent(previous))
+      ? row
+      : previous;
+    compact[compact.length - 1] = {
+      ...preferred,
+      occurred_at: new Date(mergedStartMs).toISOString(),
+      duration_seconds: Math.max(0, Math.round((mergedEndMs - mergedStartMs) / 1000)),
+    };
+  }
+  return compact;
 }
 
 function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = null, team = null } = {}) {
@@ -692,38 +848,52 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
     .slice(0, Math.min(Math.max(Number(limit) || 200, 1), 2000))
     .sort((left, right) => left.startMs - right.startMs);
   const records = selectedEpisodes.map((episode) => {
+      const activityRows = coalesceOverlappingActivityRows(episode.rows);
       const start = new Date(episode.startMs).toISOString();
       const end = new Date(episode.endMs).toISOString();
       const durationSeconds = Math.max(0, Math.round((episode.endMs - episode.startMs) / 1000));
-      const rawApplicationNames = [...new Set(episode.rows.map((row) => row.app_name))];
+      const rawApplicationNames = [...new Set(activityRows.map((row) => row.app_name))];
       const applicationNames = [...new Set(rawApplicationNames.map(displayApplicationName))];
       const applications = [...new Set(rawApplicationNames.map(applicationKey))];
-      const contextKinds = [...new Set(episode.rows.map((row) => applicationContext(row.app_name, row.process_name)))];
-      const contextKeys = episode.rows.map((row) => [
+      const contextKinds = [...new Set(activityRows.map((row) => applicationContext(row.app_name, row.process_name)))];
+      const applicationKeys = activityRows.map((row) => [
         row.type,
         row.app_name,
         row.process_name,
-        row.context_label || "",
-        row.web_domain || "",
       ].join("\u001f"));
-      const contextSwitches = contextKeys.slice(1).reduce(
-        (count, key, index) => count + (key === contextKeys[index] ? 0 : 1),
+      const contextSwitches = applicationKeys.slice(1).reduce(
+        (count, key, index) => count + (key === applicationKeys[index] ? 0 : 1),
         0,
       );
-      const contextLabels = [...new Set(episode.rows.map((row) => row.context_label).filter((value) => typeof value === "string" && value.trim()))];
-      const webDomains = [...new Set(episode.rows.map((row) => row.web_domain).filter((value) => typeof value === "string" && value.trim()))];
+      const contextLabels = [...new Set(activityRows.map((row) => row.context_label).filter((value) => typeof value === "string" && value.trim()))];
+      const webDomains = [...new Set(activityRows.map((row) => row.web_domain).filter((value) => typeof value === "string" && value.trim()))];
+      const sourceKinds = [...new Set(activityRows.map((row) => row.source_kind || sourceKindForEvent(row)))];
+      const sourceTypes = [...new Set(sourceKinds.map(sourceKindLabel))];
+      const activitySequence = activityRows.map((row) => ({
+        occurred_at: row.occurred_at,
+        duration_seconds: Math.max(0, Number(row.duration_seconds) || 0),
+        app: row.type === "idle" ? "系统空闲" : displayApplicationName(row.app_name),
+        app_name: row.app_name,
+        context_kind: row.type === "idle" ? "系统" : applicationContext(row.app_name, row.process_name),
+        context_label: row.context_label || null,
+        web_domain: row.web_domain || null,
+        source_kind: row.source_kind || sourceKindForEvent(row),
+      }));
       const sourceLabels = [...contextLabels, ...webDomains];
       const displayApps = episode.isIdle ? ["系统空闲"] : applicationNames;
-      const displayTitle = sourceLabels.length
-        ? `${episode.employeeName} · ${sourceLabels.slice(0, 2).join("、")}${sourceLabels.length > 2 ? " 等" : ""}`
-        : contextKinds.length > 1
-        ? `${episode.employeeName} · ${contextKinds.join("、")}活动`
-        : displayApps.length > 2
-          ? `${episode.employeeName} · ${displayApps.slice(0, 2).join("、")} 等 ${displayApps.length} 个应用`
-          : `${episode.employeeName} · ${displayApps.join("、")}`;
+      const displayTitle = workThemeTitle(episode.employeeName, {
+        isIdle: episode.isIdle,
+        contextKinds,
+        applicationNames: displayApps,
+      });
       const readableDuration = formatDuration(durationSeconds);
-      const timeline = episode.rows.map((row) => ({
+      const sourceDetail = sourceLabels.length
+        ? `关联 ${sourceLabels.join("、")}。`
+        : "未记录具体网站或项目内容。";
+      const timeline = activityRows.map((row) => ({
         occurred_at: row.occurred_at,
+        duration_seconds: Math.max(0, Number(row.duration_seconds) || 0),
+        source_kind: row.source_kind || sourceKindForEvent(row),
         text: row.type === "idle"
           ? "进入系统空闲状态"
           : [
@@ -733,10 +903,11 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
             ].filter(Boolean).join(" · "),
         app: row.type === "idle" ? "other" : applicationKey(row.app_name),
       }));
-      const resources = [
-        ...contextLabels.map(metadataResource),
-        ...webDomains.map((domain) => ({ name: domain, path: "仅域名元数据", type: "metadata" })),
-      ];
+      const resources = [...new Map([
+        ...(episode.isIdle ? [] : applicationNames.map(applicationResource)),
+        ...contextLabels.map(contextResource),
+        ...webDomains.map((domain) => ({ name: domain, path: "仅域名元数据", type: "website" })),
+      ].map((item) => [item.name, item])).values()];
       const citations = [...new Map(episode.rows.map((row) => [row.process_name, {
         label: row.hostname,
         detail: `${episode.employeeName} · ${row.process_name}`,
@@ -754,19 +925,22 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         title: displayTitle,
         description: episode.isIdle
           ? `${episode.employeeName} 的电脑处于系统空闲状态 ${readableDuration}。`
-          : `${episode.employeeName} 在 ${displayApps.join("、")} 中连续活动 ${readableDuration}${sourceLabels.length ? `，关联 ${sourceLabels.join("、")}` : ""}。`,
+          : `${episode.employeeName} 在 ${displayApps.join("、")} 中连续活动 ${readableDuration}，记录 ${episode.rows.length} 个活动片段并发生 ${contextSwitches} 次上下文切换${sourceLabels.length ? `，关联 ${sourceLabels.join("、")}` : ""}。`,
         applications,
         application_names: applicationNames,
         context_kinds: contextKinds,
         context_switches: contextSwitches,
         context_labels: contextLabels,
         web_domains: webDomains,
+        source_kinds: sourceKinds,
+        source_types: sourceTypes,
+        activity_sequence: activitySequence,
         duration_seconds: durationSeconds,
         started_at: start,
         ended_at: end,
         summary: episode.isIdle
           ? "这是一条基于系统空闲状态生成的活动元数据记录。"
-          : `${episode.employeeName} 在 ${contextKinds.join("、")}上下文中连续活动 ${readableDuration}，期间记录到 ${episode.rows.length} 个前台应用片段并发生 ${contextSwitches} 次应用切换，主要涉及 ${displayApps.join("、")}${sourceLabels.length ? `，关联 ${sourceLabels.join("、")}` : ""}。该摘要只基于活动元数据生成。`,
+          : `${episode.employeeName} 在 ${contextKinds.join("、") || "工作"}上下文中连续活动 ${readableDuration}，期间按顺序记录 ${displayApps.join("、")} 等 ${episode.rows.length} 个活动片段，并发生 ${contextSwitches} 次应用切换。来源类型包括 ${sourceTypes.join("、")}；${sourceDetail}该摘要只基于活动元数据生成。`,
         prior_context: "来源于 Windows Agent 的前台应用活动采集；工作标识来自允许的开发工具窗口标题脱敏结果，网站只保留域名。",
         important_context: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论；系统不保存原始窗口标题、完整 URL、页面正文或聊天正文。",
         non_obvious: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论；系统不保存原始窗口标题、完整 URL、页面正文或聊天正文。",
@@ -823,6 +997,130 @@ function historyQueryTokens(question) {
     }
   }
   return [...tokens];
+}
+
+// History Skill retrieval deliberately stays on the redacted metadata plane.
+// These groups provide a small local semantic layer for Chinese questions and
+// common product names, without sending a second AI request for every search
+// or indexing window titles, URLs, file contents, or chat text.
+const HISTORY_SEMANTIC_GROUPS = [
+  {
+    id: "development",
+    label: "开发",
+    terms: ["开发", "代码", "编程", "研发", "工程", "程序", "vscode", "visual studio", "git", "github", "仓库", "项目", "coding", "codex"],
+  },
+  {
+    id: "browser",
+    label: "浏览器",
+    terms: ["浏览器", "网页", "网站", "上网", "chrome", "edge", "firefox", "360 浏览器", "360se", "域名", "browser"],
+  },
+  {
+    id: "communication",
+    label: "沟通",
+    terms: ["沟通", "聊天", "会议", "协作", "微信", "企业微信", "weixin", "wechat", "腾讯会议", "slack", "teams", "飞书", "钉钉", "dingtalk"],
+  },
+  {
+    id: "documents",
+    label: "文档",
+    terms: ["文档", "文件", "资料", "写作", "编辑", "word", "excel", "powerpoint", "wps", "notion", "文件资源管理器", "explorer", "finder"],
+  },
+  {
+    id: "project_management",
+    label: "项目管理",
+    terms: ["项目管理", "任务", "进度", "工单", "jira", "linear", "trello", "asana", "clickup", "monday"],
+  },
+  {
+    id: "ai_workspace",
+    label: "AI 工作台",
+    terms: ["人工智能", "ai", "模型", "大模型", "提示词", "摘要", "qwen", "通义", "豆包", "doubao", "namiai", "codex", "chatgpt"],
+  },
+  {
+    id: "terminal",
+    label: "终端",
+    terms: ["终端", "命令行", "shell", "terminal", "powershell", "cmd"],
+  },
+  {
+    id: "idle",
+    label: "系统空闲",
+    terms: ["空闲", "离开", "不在电脑前", "idle", "休息", "锁屏"],
+  },
+  {
+    id: "system",
+    label: "系统",
+    terms: ["系统", "后台", "服务", "托盘", "安全", "system", "360 安全卫士", "360tray"],
+  },
+];
+
+function normalizedSearchText(value) {
+  return String(value || "").toLowerCase().replace(/[：:，,。！？!?、/\\()[\]{}]/g, " ");
+}
+
+function semanticGroupsForText(value) {
+  const text = normalizedSearchText(value);
+  return new Set(HISTORY_SEMANTIC_GROUPS
+    .filter((group) => group.terms.some((term) => text.includes(String(term).toLowerCase())))
+    .map((group) => group.id));
+}
+
+function historyRecordSemanticText(record) {
+  const sequence = Array.isArray(record?.activity_sequence) ? record.activity_sequence : [];
+  const timeline = Array.isArray(record?.timeline) ? record.timeline : [];
+  const resources = Array.isArray(record?.resources) ? record.resources : [];
+  const citations = Array.isArray(record?.citations) ? record.citations : [];
+  return [
+    record?.title,
+    record?.description,
+    record?.summary,
+    record?.context_kinds,
+    record?.context_labels,
+    record?.web_domains,
+    record?.source_kinds,
+    record?.source_types,
+    record?.application_names,
+    sequence.flatMap((item) => [item?.app, item?.context_kind, item?.context_label, item?.web_domain, item?.source_kind]),
+    timeline.flatMap((item) => [item?.app, item?.text, item?.source_kind]),
+    resources.map((item) => item?.name),
+    citations.map((item) => [item?.label, item?.detail]),
+  ].flat(Infinity).filter(Boolean).join(" ");
+}
+
+function semanticRecordFields(record) {
+  const sequence = Array.isArray(record?.activity_sequence) ? record.activity_sequence : [];
+  const timeline = Array.isArray(record?.timeline) ? record.timeline : [];
+  return [
+    [record?.title, 7],
+    [record?.context_kinds?.join(" "), 7],
+    [record?.context_labels?.join(" "), 6],
+    [record?.web_domains?.join(" "), 6],
+    [record?.application_names?.join(" "), 5],
+    [record?.source_types?.join(" "), 4],
+    [record?.source_kinds?.join(" "), 3],
+    [sequence.map((item) => [item?.app, item?.context_kind, item?.context_label, item?.web_domain].filter(Boolean).join(" ")).join(" "), 4],
+    [timeline.map((item) => item?.text).join(" "), 2],
+  ];
+}
+
+function semanticMatchScore(question, record) {
+  const tokens = historyQueryTokens(question);
+  const queryText = normalizedSearchText(question);
+  const queryGroups = semanticGroupsForText(queryText);
+  const recordText = normalizedSearchText(historyRecordSemanticText(record));
+  const recordGroups = semanticGroupsForText(recordText);
+  const exactScore = tokens.reduce((total, token) => semanticRecordFields(record).reduce((fieldTotal, [value, weight]) => {
+    const normalized = normalizedSearchText(value);
+    if (!normalized.includes(token)) return fieldTotal;
+    const phraseBonus = normalized.includes(queryText) && queryText.length >= 3 ? 2 : 0;
+    return fieldTotal + weight + phraseBonus;
+  }, 0), 0);
+  const semanticScore = [...queryGroups].reduce((total, group) => total + (recordGroups.has(group) ? 12 : 0), 0);
+  const groupCoverage = queryGroups.size && recordGroups.size
+    ? [...queryGroups].filter((group) => recordGroups.has(group)).length / queryGroups.size
+    : 0;
+  return {
+    score: exactScore + semanticScore + Math.round(groupCoverage * 3),
+    queryGroups: [...queryGroups],
+    recordGroups: [...recordGroups],
+  };
 }
 
 function shanghaiDateParts(milliseconds = Date.now()) {
@@ -891,27 +1189,31 @@ function filterHistoryRecordsByTime(records, range) {
   });
 }
 
+export function searchHistoryRecords(question, records = []) {
+  return {
+    mode: "semantic-metadata-v1",
+    query_groups: [...semanticGroupsForText(question)],
+    records: records
+      .map((record, index) => {
+        const match = semanticMatchScore(question, record);
+        const startedAt = Date.parse(record.started_at || "");
+        return {
+          record,
+          score: match.score,
+          startedAt: Number.isFinite(startedAt) ? startedAt : 0,
+          index,
+        };
+      })
+      .sort((left, right) => right.score - left.score || right.startedAt - left.startedAt || left.index - right.index)
+      .map(({ record }) => record),
+  };
+}
+
+// Compatibility name used by the existing server tests and callers. The
+// implementation is now semantic metadata retrieval rather than substring
+// ranking alone.
 export function rankHistoryRecords(question, records = []) {
-  const tokens = historyQueryTokens(question);
-  return records
-    .map((record, index) => {
-      const fields = [
-        [record.title, 6],
-        [record.context_labels?.join(" "), 5],
-        [record.web_domains?.join(" "), 5],
-        [record.application_names?.join(" "), 4],
-        [record.description, 2],
-        [record.summary, 2],
-        [record.prior_context, 1],
-      ];
-      const score = tokens.reduce((total, token) => total + fields.reduce((fieldTotal, [value, weight]) => (
-        String(value || "").toLowerCase().includes(token) ? fieldTotal + weight : fieldTotal
-      ), 0), 0);
-      const startedAt = Date.parse(record.started_at || "");
-      return { record, score, startedAt: Number.isFinite(startedAt) ? startedAt : 0, index };
-    })
-    .sort((left, right) => right.score - left.score || right.startedAt - left.startedAt || left.index - right.index)
-    .map(({ record }) => record);
+  return searchHistoryRecords(question, records).records;
 }
 
 function startOfShanghaiWeekMs(milliseconds) {
@@ -1007,18 +1309,21 @@ function buildRollupRecords(leafRecords, scope = "window") {
     const contextKinds = [...new Set(records.flatMap((record) => record.context_kinds || []))];
     const contextLabels = [...new Set(records.flatMap((record) => record.context_labels || []))];
     const webDomains = [...new Set(records.flatMap((record) => record.web_domains || []))];
+    const sourceKinds = [...new Set(records.flatMap((record) => record.source_kinds || []))];
+    const sourceTypes = [...new Set(sourceKinds.map(sourceKindLabel))];
     const sourceEventIds = [...new Set(records.flatMap((record) => record.source_event_ids || []))];
     const timeline = records.flatMap((record) => record.timeline || []).sort((left, right) => Date.parse(left.occurred_at) - Date.parse(right.occurred_at));
+    const activitySequence = records.flatMap((record) => record.activity_sequence || []).sort((left, right) => Date.parse(left.occurred_at) - Date.parse(right.occurred_at));
     const resources = [...new Map(records.flatMap((record) => record.resources || []).map((item) => [item.name, item])).values()];
     const citations = [...new Map(records.flatMap((record) => record.citations || []).map((item) => [`${item.label}:${item.detail}`, item])).values()];
     const periodStartMs = Math.min(...records.map((record) => Date.parse(record.started_at)));
     const periodEndMs = Math.max(...records.map((record) => Date.parse(record.ended_at)));
     const durationSeconds = records.reduce((sum, record) => sum + Math.max(0, Number(record.duration_seconds) || 0), 0);
-    const contextTitle = contextLabels.length ? contextLabels.slice(0, 2).join("、") : contextKinds.slice(0, 3).join("、") || "连续工作";
     const readableDuration = formatDuration(durationSeconds);
     const scopeLabel = scope === "six_hour" ? "6 小时汇总" : scope === "hourly" ? "小时汇总" : scope === "daily" ? "每日汇总" : scope === "weekly" ? "每周汇总" : scope === "team_weekly" ? "团队周汇总" : "连续工作汇总";
     const isTeamRollup = scope === "team_weekly";
     const subjectName = isTeamRollup ? `${first.employee_team || "未分组"}团队` : first.employee_name;
+    const contextTitle = workThemeTitle(subjectName, { contextKinds, applicationNames }).split(" · ").slice(1).join(" · ") || "连续工作活动";
     return {
       id: `rollup_${scope}_${hash(`${group.team || first.employee_team || group.deviceId}:${group.startMs}`).slice(0, 24)}`,
       user_id: first.user_id,
@@ -1036,6 +1341,9 @@ function buildRollupRecords(leafRecords, scope = "window") {
       context_switches: records.reduce((sum, record) => sum + Number(record.context_switches || 0), 0) + Math.max(0, records.length - 1),
       context_labels: contextLabels,
       web_domains: webDomains,
+      source_kinds: sourceKinds,
+      source_types: sourceTypes,
+      activity_sequence: activitySequence,
       duration_seconds: durationSeconds,
       started_at: new Date(periodStartMs).toISOString(),
       ended_at: new Date(periodEndMs).toISOString(),
@@ -1101,8 +1409,10 @@ async function materializeMemoryRecords(db, baseRecords, ai, { deferModel = fals
       next_attempt_at = excluded.next_attempt_at,
       updated_at = excluded.updated_at
   `);
+  const cancelJob = db.prepare("UPDATE memory_generation_jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE summary_id = ? AND status IN ('queued', 'running', 'retrying')");
+  const updateCancelledSummary = db.prepare("UPDATE memory_summaries SET payload_json = ?, model_name = ?, status = ?, updated_at = ? WHERE id = ?");
   for (const baseRecord of baseRecords) {
-    const sourceHash = hash(JSON.stringify({
+    const legacySourceHash = hash(JSON.stringify({
       source_event_ids: baseRecord.source_event_ids,
       started_at: baseRecord.started_at,
       ended_at: baseRecord.ended_at,
@@ -1112,26 +1422,89 @@ async function materializeMemoryRecords(db, baseRecords, ai, { deferModel = fals
       source_record_ids: baseRecord.source_record_ids,
       prior_context: baseRecord.prior_context,
     }));
+    const sourceHash = hash(JSON.stringify({
+      source_event_ids: baseRecord.source_event_ids,
+      started_at: baseRecord.started_at,
+      ended_at: baseRecord.ended_at,
+      duration_seconds: baseRecord.duration_seconds,
+      context_labels: baseRecord.context_labels,
+      web_domains: baseRecord.web_domains,
+      source_kinds: baseRecord.source_kinds,
+      activity_sequence: baseRecord.activity_sequence,
+      application_names: baseRecord.application_names,
+      resources: baseRecord.resources,
+      source_record_ids: baseRecord.source_record_ids,
+      prior_context: baseRecord.prior_context,
+    }));
     const existing = select.get(baseRecord.id);
-    const job = existing ? selectJob.get(baseRecord.id) : null;
-    const pendingJob = job && ["queued", "running", "retrying"].includes(job.status);
-    const exhaustedJob = job && job.status === "failed" && Number(job.attempts || 0) >= 5;
-    const shouldRegenerateForModel = existing
-      && ai.mode === "model"
-      && !exhaustedJob
-      && (existing.status === "fallback" || existing.model_name !== ai.model)
-      && !pendingJob;
-    if (existing && existing.source_hash === sourceHash && !shouldRegenerateForModel) {
+    let existingPayload = null;
+    if (existing) {
       try {
-        records.push(JSON.parse(existing.payload_json));
-        continue;
+        existingPayload = JSON.parse(existing.payload_json);
       } catch {
         // Rebuild a malformed persisted payload below.
       }
     }
+    const legacyBackfill = Boolean(
+      existing
+      && existingPayload
+      && existing.source_hash === legacySourceHash
+      && (
+        JSON.stringify(existingPayload.application_names || []) !== JSON.stringify(baseRecord.application_names || [])
+        || JSON.stringify(existingPayload.resources || []) !== JSON.stringify(baseRecord.resources || [])
+      )
+    );
+    const job = existing ? selectJob.get(baseRecord.id) : null;
+    const pendingJob = job && ["queued", "running", "retrying"].includes(job.status);
+    const exhaustedJob = job && job.status === "failed" && Number(job.attempts || 0) >= 5;
+    const activeRecord = isMemoryRecordActive(baseRecord);
+    const eligibleForAi = ai.mode === "model" && isEligibleForAiSummary(baseRecord);
+    const waitingForWindow = ai.mode === "model" && activeRecord;
+    if (ai.mode === "model" && !eligibleForAi && pendingJob) {
+      const cancelledStatus = waitingForWindow ? "window_pending" : "fallback";
+      cancelJob.run("cancelled: 仅闭合的十分钟 Leaf 窗口进入 AI 队列", isoNow(), baseRecord.id);
+      if (existingPayload) {
+        const cancelledPayload = {
+          ...existingPayload,
+          summary_status: cancelledStatus,
+          summary_model: "rules-v1",
+          generated_at: existingPayload.generated_at || existing.generated_at || isoNow(),
+        };
+        updateCancelledSummary.run(JSON.stringify(cancelledPayload), "rules-v1", cancelledStatus, isoNow(), baseRecord.id);
+        existingPayload = cancelledPayload;
+      }
+    }
+    const shouldRegenerateForModel = existing
+      && !legacyBackfill
+      && ai.mode === "model"
+      && eligibleForAi
+      && !exhaustedJob
+      && (existing.status === "fallback" || existing.model_name !== ai.model)
+      && !pendingJob;
+    if (existing && existing.source_hash === sourceHash && !shouldRegenerateForModel) {
+      if (existingPayload) {
+        records.push(existingPayload);
+        continue;
+      }
+    }
 
-    const shouldDeferModel = deferModel && ai.mode === "model";
-    const generated = shouldDeferModel
+    const shouldDeferModel = deferModel && eligibleForAi;
+    const generated = legacyBackfill
+      ? {
+          title: existingPayload.title,
+          description: existingPayload.description,
+          summary: existingPayload.summary,
+          prior_context: existingPayload.prior_context,
+          important_context: existingPayload.important_context || existingPayload.non_obvious,
+          non_obvious: existingPayload.non_obvious || existingPayload.important_context,
+          confidence: existingPayload.confidence,
+          generated_at: existingPayload.generated_at || existing.generated_at,
+          status: pendingJob
+            ? (waitingForWindow ? "window_pending" : "fallback")
+            : existing.status || existingPayload.summary_status || "fallback",
+          model_name: pendingJob ? "rules-v1" : existing.model_name || existingPayload.summary_model || "rules-v1",
+        }
+      : shouldDeferModel
       ? {
           title: baseRecord.title,
           description: baseRecord.description,
@@ -1142,6 +1515,19 @@ async function materializeMemoryRecords(db, baseRecords, ai, { deferModel = fals
           confidence: baseRecord.confidence,
           status: "queued",
           model_name: ai.model,
+        }
+      : ai.mode === "model" && !eligibleForAi
+      ? {
+          title: baseRecord.title,
+          description: baseRecord.description,
+          summary: baseRecord.summary,
+          prior_context: baseRecord.prior_context,
+          important_context: baseRecord.important_context || baseRecord.non_obvious,
+          non_obvious: baseRecord.non_obvious || baseRecord.important_context,
+          confidence: baseRecord.confidence,
+          status: waitingForWindow ? "window_pending" : "fallback",
+          model_name: "rules-v1",
+          generated_at: existing?.generated_at || isoNow(),
         }
       : await ai.summarizeMemory(aiInputForRecord(baseRecord));
     const record = {
@@ -1155,7 +1541,8 @@ async function materializeMemoryRecords(db, baseRecords, ai, { deferModel = fals
       confidence: generated.confidence ?? baseRecord.confidence,
       summary_status: generated.status || "fallback",
       summary_model: generated.model_name || ai.model,
-      generated_at: generated.status === "generated" ? isoNow() : existing?.generated_at || isoNow(),
+      prompt_version: ai.promptVersion || "memory-v1",
+      generated_at: generated.generated_at || (generated.status === "generated" ? isoNow() : existing?.generated_at || isoNow()),
     };
     const now = isoNow();
     insert.run(
@@ -1186,7 +1573,7 @@ async function materializeMemoryRecords(db, baseRecords, ai, { deferModel = fals
       now,
       record.rollup_scope || "leaf",
     );
-    if (ai.mode === "model" && (shouldDeferModel || generated.retryable) && (!exhaustedJob || existing?.model_name !== ai.model)) {
+    if (ai.mode === "model" && eligibleForAi && (shouldDeferModel || generated.retryable) && (!exhaustedJob || existing?.model_name !== ai.model)) {
       enqueueJob.run(newId("memory_job"), record.id, isoNow(), now, now);
     }
     records.push(record);
@@ -1195,7 +1582,7 @@ async function materializeMemoryRecords(db, baseRecords, ai, { deferModel = fals
 }
 
 export async function processMemoryGenerationJobs(db, ai, logger = console, { limit = 5 } = {}) {
-  if (ai.mode !== "model") return { processed: 0, succeeded: 0, retried: 0, failed: 0 };
+  if (ai.mode !== "model") return { processed: 0, succeeded: 0, retried: 0, failed: 0, cancelled: 0 };
   const now = isoNow();
   const jobs = db.prepare(`
     SELECT id, summary_id, attempts
@@ -1220,9 +1607,11 @@ export async function processMemoryGenerationJobs(db, ai, logger = console, { li
   `);
   const markSucceeded = db.prepare("UPDATE memory_generation_jobs SET status = 'succeeded', last_error = NULL, updated_at = ? WHERE id = ?");
   const markRetry = db.prepare("UPDATE memory_generation_jobs SET attempts = ?, next_attempt_at = ?, status = ?, last_error = ?, updated_at = ? WHERE id = ?");
+  const markCancelled = db.prepare("UPDATE memory_generation_jobs SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?");
   let succeeded = 0;
   let retried = 0;
   let failed = 0;
+  let cancelled = 0;
 
   for (const job of jobs) {
     markRunning.run(now, job.id);
@@ -1232,6 +1621,11 @@ export async function processMemoryGenerationJobs(db, ai, logger = console, { li
       if (!stored) throw new Error("summary not found");
       const baseRecord = JSON.parse(stored.payload_json);
       storedPayload = baseRecord;
+      if (!isEligibleForAiSummary(baseRecord)) {
+        markCancelled.run("cancelled: 活动窗口尚未闭合或未达到十分钟", isoNow(), job.id);
+        cancelled += 1;
+        continue;
+      }
       const generated = await ai.summarizeMemory(aiInputForRecord(baseRecord));
       if (generated.status !== "generated") throw new Error("model generation returned fallback");
       const record = {
@@ -1245,6 +1639,7 @@ export async function processMemoryGenerationJobs(db, ai, logger = console, { li
         confidence: generated.confidence ?? baseRecord.confidence,
         summary_status: "generated",
         summary_model: generated.model_name || ai.model,
+        prompt_version: ai.promptVersion || "memory-v1",
         generated_at: isoNow(),
       };
       updateSummary.run(
@@ -1287,7 +1682,7 @@ export async function processMemoryGenerationJobs(db, ai, logger = console, { li
       logger.warn?.(`Memory Summary generation ${exhausted ? "failed" : "will retry"}: ${safeMessage}`);
     }
   }
-  return { processed: jobs.length, succeeded, retried, failed };
+  return { processed: jobs.length, succeeded, retried, failed, cancelled };
 }
 
 async function getMemoryRecords(db, { deviceId = null, limit = 200, ai, principal = null, team = null, deferModel = false }) {
@@ -1333,6 +1728,11 @@ function readPersistedMemoryRecords(db, { deviceId = null, principal = null, tea
   const scope = scopePredicate(principal, { deviceAlias: "d", employeeAlias: "e" });
   const conditions = [scope.sql];
   const params = [...scope.params];
+  // Do not surface summaries whose period starts materially in the future.
+  // This protects the timeline from legacy summaries created by invalid
+  // full-day idle checkpoints without rewriting the stored audit data.
+  conditions.push("julianday(ms.started_at) <= julianday(?)");
+  params.push(new Date(Date.now() + 60_000).toISOString());
   if (deviceId) {
     conditions.push("ms.device_id = ?");
     params.push(deviceId);
@@ -1545,6 +1945,8 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const scope = scopePredicate(principal);
         const conditions = [scope.sql];
         const params = [...scope.params];
+        conditions.push("julianday(ev.occurred_at) <= julianday(?)");
+        params.push(new Date(Date.now() + 60_000).toISOString());
         if (deviceId) { conditions.push("ev.device_id = ?"); params.push(deviceId); }
         const query = `SELECT ev.*, d.employee_id, e.name AS employee_name, d.hostname
           FROM events ev JOIN devices d ON d.id = ev.device_id JOIN employees e ON e.id = d.employee_id
@@ -1629,7 +2031,8 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const records = await getMemoryRecords(db, { deviceId, limit, ai, principal, team: effectiveTeam, deferModel: true });
         const queryTimeRange = historyQueryTimeRange(body.question.trim());
         const timeScopedRecords = filterHistoryRecordsByTime(records, queryTimeRange);
-        const rankedRecords = rankHistoryRecords(body.question.trim(), timeScopedRecords);
+        const retrieval = searchHistoryRecords(body.question.trim(), timeScopedRecords);
+        const rankedRecords = retrieval.records;
         const answer = await ai.answerHistory({ question: body.question.trim(), records: rankedRecords, timeRange: queryTimeRange });
         const evidenceIds = Array.isArray(answer.evidence_ids) ? answer.evidence_ids : [];
         const evidence = evidenceIds.map((id) => rankedRecords.find((record) => record.id === id)).filter(Boolean);
@@ -1663,6 +2066,12 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           caveats: [answer.caveat || "答案只基于活动元数据和 Memory Summary。"],
           uncertainty: answer.uncertainty || "应用活动只能说明上下文变化，不能单独证明工作效率或绩效。",
           model: answer.model_name || ai.model,
+          retrieval: {
+            mode: retrieval.mode,
+            candidate_count: timeScopedRecords.length,
+            selected_count: selectedEvidence.length,
+            query_groups: retrieval.query_groups,
+          },
           generated_at: isoNow(),
         });
       }
@@ -1692,7 +2101,9 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
         const scope = scopePredicate(principal);
         const jobs = db.prepare(`
-          SELECT j.id, j.summary_id, j.attempts, j.next_attempt_at, j.status, j.last_error,
+          SELECT j.id, j.summary_id, j.attempts, j.next_attempt_at,
+            CASE WHEN j.status = 'failed' AND j.last_error LIKE 'cancelled:%' THEN 'cancelled' ELSE j.status END AS status,
+            j.last_error,
             j.created_at, j.updated_at, ms.model_name, ms.record_type, ms.rollup_scope,
             e.name AS employee_name, e.team AS employee_team
           FROM memory_generation_jobs j
@@ -1702,7 +2113,16 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           WHERE ${scope.sql}
           ORDER BY j.updated_at DESC LIMIT 500
         `).all(...scope.params);
-        return sendJson(response, 200, { jobs, model: ai.model });
+        return sendJson(response, 200, {
+          jobs,
+          model: ai.model,
+          cadence: {
+            summary_window_seconds: AI_SUMMARY_WINDOW_SECONDS,
+            active_grace_seconds: AI_ACTIVE_GRACE_SECONDS,
+            generation_interval_seconds: AI_GENERATION_INTERVAL_SECONDS,
+            generation_batch_size: configuredAiGenerationBatchSize(),
+          },
+        });
       }
 
       if (method === "POST" && url.pathname === "/api/admin/retention") {
@@ -1845,16 +2265,17 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const acceptedEvents = body.events.filter((event) => !eventExcludedByPolicy(event, policy));
         const insert = db.prepare(`
           INSERT INTO events
-            (event_id, device_id, occurred_at, type, app_name, process_name, context_label, web_domain, duration_seconds, received_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (event_id, device_id, occurred_at, type, app_name, process_name, source_kind, context_label, web_domain, duration_seconds, received_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(event_id) DO UPDATE SET
+            source_kind = excluded.source_kind,
             context_label = COALESCE(excluded.context_label, events.context_label),
             web_domain = COALESCE(excluded.web_domain, events.web_domain),
             duration_seconds = MAX(events.duration_seconds, excluded.duration_seconds),
             received_at = excluded.received_at
         `);
         for (const event of acceptedEvents) {
-          insert.run(event.event_id, device.id, event.occurred_at, event.type, event.app_name, event.process_name, event.context_label || event.title_hint || null, event.web_domain ? event.web_domain.trim().toLowerCase() : null, event.duration_seconds, isoNow());
+          insert.run(event.event_id, device.id, event.occurred_at, event.type, event.app_name, event.process_name, sourceKindForEvent(event), event.context_label || event.title_hint || null, event.web_domain ? event.web_domain.trim().toLowerCase() : null, event.duration_seconds, isoNow());
         }
         if (device.auth_kind === "device") {
           db.prepare("UPDATE devices SET status = 'online', last_heartbeat_at = ?, updated_at = ? WHERE id = ?").run(isoNow(), isoNow(), device.id);
@@ -1899,9 +2320,11 @@ export function createAgentServer({ dbPath = process.env.AGENT_DB_PATH || defaul
   mkdirSync(dirname(resolve(dbPath)), { recursive: true });
   const db = new DatabaseSync(resolve(dbPath));
   createSchema(db);
+  recoverRunningMemoryJobs(db);
   const server = createHttpServer(createRequestHandler({ db, adminToken, sessionSecret, ai, logger }));
   let memoryWarmupRunning = false;
   const memoryMaterializationIntervalMs = Math.max(15_000, Number(process.env.MEMORY_MATERIALIZATION_INTERVAL_MS) || 60_000);
+  const memoryGenerationBatchSize = configuredAiGenerationBatchSize();
   const warmRecentMemorySummaries = async () => {
     if (memoryWarmupRunning || ai.mode !== "model") return;
     memoryWarmupRunning = true;
@@ -1918,8 +2341,8 @@ export function createAgentServer({ dbPath = process.env.AGENT_DB_PATH || defaul
   }, memoryMaterializationIntervalMs);
   memoryMaterializationTimer.unref?.();
   const generationTimer = setInterval(() => {
-    processMemoryGenerationJobs(db, ai, logger).catch((error) => logger.warn?.(`Memory Summary worker error: ${error.message}`));
-  }, 15_000);
+    processMemoryGenerationJobs(db, ai, logger, { limit: memoryGenerationBatchSize }).catch((error) => logger.warn?.(`Memory Summary worker error: ${error.message}`));
+  }, AI_GENERATION_INTERVAL_SECONDS * 1000);
   generationTimer.unref?.();
   return {
     db,

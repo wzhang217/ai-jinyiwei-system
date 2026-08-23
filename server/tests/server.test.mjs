@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createAgentServer, processMemoryGenerationJobs, rankHistoryRecords } from "../src/index.mjs";
+import { createAgentServer, processMemoryGenerationJobs, rankHistoryRecords, searchHistoryRecords } from "../src/index.mjs";
 import { createAiService } from "../src/ai.mjs";
 
 async function withServer(callback, options = {}) {
@@ -47,6 +47,62 @@ test("ranks relevant Memory Summary records before History Skill context", () =>
   assert.equal(ranked[0].id, "github-record");
 });
 
+test("retrieves by semantic metadata facets and not only exact wording", () => {
+  const records = [
+    {
+      id: "document-record",
+      title: "Wei · 文档活动",
+      application_names: ["WPS Office"],
+      context_kinds: ["文档"],
+      context_labels: [],
+      web_domains: [],
+      source_types: ["桌面应用"],
+      started_at: "2026-08-23T10:00:00.000Z",
+    },
+    {
+      id: "communication-record",
+      title: "Wei · 沟通活动",
+      application_names: ["微信/企业微信"],
+      context_kinds: ["沟通"],
+      context_labels: [],
+      web_domains: [],
+      source_types: ["桌面应用"],
+      started_at: "2026-08-23T09:30:00.000Z",
+    },
+    {
+      id: "development-browser-record",
+      title: "Wei · 开发、浏览器活动",
+      application_names: ["Visual Studio Code", "Google Chrome"],
+      context_kinds: ["开发", "浏览器"],
+      context_labels: ["来源：GitHub"],
+      web_domains: ["github.com"],
+      source_types: ["浏览器原生", "桌面应用"],
+      started_at: "2026-08-23T09:00:00.000Z",
+    },
+    {
+      id: "raw-content-only-record",
+      title: "Wei · 其他活动",
+      application_names: ["Unknown App"],
+      context_kinds: ["其他"],
+      context_labels: [],
+      web_domains: [],
+      source_types: ["桌面应用"],
+      window_title: "研发代码仓库和网页正文不应被检索",
+      raw_content: "研发代码仓库和网页正文不应被检索",
+      started_at: "2026-08-23T11:00:00.000Z",
+    },
+  ];
+
+  const developmentSearch = searchHistoryRecords("研发团队在网页和代码仓库上连续工作", records);
+  assert.equal(developmentSearch.mode, "semantic-metadata-v1");
+  assert.deepEqual(developmentSearch.query_groups.sort(), ["browser", "development"]);
+  assert.equal(developmentSearch.records[0].id, "development-browser-record");
+
+  const communicationSearch = rankHistoryRecords("开会和聊天", records);
+  assert.equal(communicationSearch[0].id, "communication-record");
+  assert.notEqual(developmentSearch.records[0].id, "raw-content-only-record");
+});
+
 test("enrolls a device and accepts idempotent events and heartbeats", async () => {
   await withServer(async ({ base, app }) => {
     const preflight = await fetch(`${base}/api/admin/devices`, { method: "OPTIONS" });
@@ -72,8 +128,7 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.equal(enrolled.response.status, 201);
     assert.equal(enrolled.body.employee.id, "employee-chen");
 
-    const testNow = new Date();
-    testNow.setUTCHours(12, 0, 0, 0);
+    const testNow = new Date(Date.now() - 30 * 60_000);
     const event = {
       event_id: "event-1",
       occurred_at: testNow.toISOString(),
@@ -161,6 +216,9 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.deepEqual(leaf.context_labels.sort(), ["来源：GitHub", "项目：AI锦衣卫系统"]);
     assert.deepEqual(leaf.web_domains, ["github.com"]);
     assert.ok(leaf.timeline.some((item) => item.text.includes("域名：github.com")));
+    assert.ok(leaf.resources.some((resource) => resource.name === "Google Chrome" && resource.type === "application"));
+    assert.ok(leaf.resources.some((resource) => resource.name === "Visual Studio Code" && resource.type === "application"));
+    assert.ok(rollup.resources.some((resource) => resource.name === "Google Chrome" && resource.type === "application"));
     assert.match(leaf.title, /Chen/);
     assert.deepEqual(leaf.source_event_ids.sort(), ["event-1", "event-2"]);
     assert.equal(rollup.record_type, "rollup");
@@ -204,6 +262,8 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.equal(answer.body.evidence.length, 3);
     assert.ok(answer.body.evidence.some((record) => record.id === leaf.id));
     assert.equal(answer.body.model, "rules-v1");
+    assert.equal(answer.body.retrieval.mode, "semantic-metadata-v1");
+    assert.equal(answer.body.retrieval.candidate_count >= answer.body.retrieval.selected_count, true);
     assert.ok(Array.isArray(answer.body.applications));
     assert.ok(Array.isArray(answer.body.context_labels));
     assert.ok(Array.isArray(answer.body.web_domains));
@@ -274,6 +334,11 @@ test("pairs a browser with a short-lived scoped credential", async () => {
       }] }),
     });
     assert.equal(event.response.status, 202);
+    const browserHistory = await jsonFetch(`${base}/api/admin/history`, { headers: { "x-admin-token": "test-admin" } });
+    const browserRecord = browserHistory.body.records.find((record) => record.source_event_ids?.includes("browser-source-event"));
+    assert.ok(browserRecord);
+    assert.ok(browserRecord.context_labels.includes("来源：GitHub"));
+    assert.deepEqual(browserRecord.web_domains, ["github.com"]);
     const heartbeat = await jsonFetch(`${base}/api/agent/heartbeat`, { method: "POST", headers: browserHeaders, body: JSON.stringify({ queued_events: 0 }) });
     assert.equal(heartbeat.response.status, 401);
     const reused = await jsonFetch(`${base}/api/agent/browser-pair`, { method: "POST", body: JSON.stringify({ pairing_code: pairing.body.code, browser_name: "Microsoft Edge" }) });
@@ -479,7 +544,7 @@ test("recalls persisted Memory Summary records beyond the recent activity window
     // Materialize and persist the old Memory Summary first.
     const oldHistory = await jsonFetch(`${base}/api/admin/history?limit=200`, { headers: adminHeaders });
     assert.equal(oldHistory.response.status, 200);
-    assert.ok(oldHistory.body.records.some((record) => record.title.includes("WPS")));
+    assert.ok(oldHistory.body.records.some((record) => record.application_names.includes("WPS Office") && record.title.includes("文档")));
 
     const currentEvent = await jsonFetch(`${base}/api/agent/events`, {
       method: "POST",
@@ -501,8 +566,51 @@ test("recalls persisted Memory Summary records beyond the recent activity window
       body: JSON.stringify({ question: "WPS 之前做了什么？" }),
     });
     assert.equal(answer.response.status, 200);
-    assert.ok(answer.body.evidence.some((record) => record.title.includes("WPS")));
+    assert.ok(answer.body.evidence.some((record) => record.application_names.includes("WPS Office") && record.title.includes("文档")));
     assert.ok(answer.body.evidence.some((record) => record.started_at < new Date(Date.now() - 24 * 3600_000).toISOString()));
+  });
+});
+
+test("hides materially future event timestamps from History and diagnostics", async () => {
+  await withServer(async ({ base, app }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-FUTURE-CLOCK", os_version: "Windows 11", agent_version: "0.1.5" }),
+    });
+    const futureEvent = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${enrolled.body.device_token}` },
+      body: JSON.stringify({ events: [{
+        event_id: "future-clock-event",
+        occurred_at: new Date(Date.now() + 2 * 3600_000).toISOString(),
+        type: "app_session",
+        app_name: "WPS",
+        process_name: "wps.exe",
+        duration_seconds: 60,
+      }] }),
+    });
+    assert.equal(futureEvent.response.status, 202);
+    app.db.prepare("INSERT INTO events (event_id, device_id, occurred_at, type, app_name, process_name, duration_seconds, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").run(
+      "legacy-full-day-idle",
+      enrolled.body.device_id,
+      new Date(Date.now() - 2 * 24 * 3600_000).toISOString(),
+      "idle",
+      "Idle",
+      "system",
+      86_400,
+      new Date().toISOString(),
+    );
+    const events = await jsonFetch(`${base}/api/admin/events`, { headers: adminHeaders });
+    assert.ok(!events.body.events.some((event) => event.event_id === "future-clock-event"));
+    const history = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    assert.ok(!history.body.records.some((record) => record.source_event_ids?.includes("future-clock-event")));
+    assert.ok(!history.body.records.some((record) => record.source_event_ids?.includes("legacy-full-day-idle")));
   });
 });
 
@@ -586,8 +694,87 @@ test("classifies project-management and collaboration sources without raw page c
     const leaf = history.body.records.find((record) => record.record_type === "leaf");
     assert.deepEqual(leaf.context_kinds, ["项目管理"]);
     assert.deepEqual(leaf.web_domains, ["jira.example.com"]);
+    assert.deepEqual(leaf.source_kinds, ["browser_extension"]);
+    assert.deepEqual(leaf.source_types, ["浏览器扩展"]);
+    assert.equal(leaf.activity_sequence.length, 1);
+    assert.equal(leaf.activity_sequence[0].source_kind, "browser_extension");
+    assert.equal(leaf.timeline[0].duration_seconds, 60);
+    assert.equal(leaf.timeline[0].source_kind, "browser_extension");
+    assert.ok(!leaf.title.includes("jira.example.com"));
     assert.ok(leaf.resources.some((resource) => resource.name === "来源：Jira"));
     assert.ok(!JSON.stringify(leaf).includes("jira.example.com/path"));
+  });
+});
+
+test("coalesces overlapping native and extension browser observations", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-DUPLICATE-SOURCE", os_version: "Windows 11", agent_version: "0.1.7" }),
+    });
+    const occurredAt = new Date(Date.now() - 2 * 60_000);
+    const headers = { authorization: `Bearer ${enrolled.body.device_token}` };
+    const uploaded = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ events: [
+        {
+          event_id: "native-browser-event",
+          occurred_at: occurredAt.toISOString(),
+          type: "app_session",
+          app_name: "Google Chrome",
+          process_name: "chrome.exe",
+          source_kind: "browser_native",
+          web_domain: "github.com",
+          duration_seconds: 120,
+        },
+        {
+          event_id: "extension-browser-event",
+          occurred_at: new Date(occurredAt.getTime() + 30_000).toISOString(),
+          type: "app_session",
+          app_name: "Google Chrome",
+          process_name: "chrome.exe",
+          source_kind: "browser_extension",
+          title_hint: "来源：GitHub",
+          web_domain: "github.com",
+          duration_seconds: 120,
+        },
+        {
+          event_id: "second-browser-domain-event",
+          occurred_at: new Date(occurredAt.getTime() + 60_000).toISOString(),
+          type: "app_session",
+          app_name: "Google Chrome",
+          process_name: "chrome.exe",
+          source_kind: "browser_native",
+          web_domain: "example.com",
+          duration_seconds: 30,
+        },
+        {
+          event_id: "code-after-browser-event",
+          occurred_at: new Date(occurredAt.getTime() + 120_000).toISOString(),
+          type: "app_session",
+          app_name: "Visual Studio Code",
+          process_name: "Code.exe",
+          source_kind: "desktop_app",
+          duration_seconds: 30,
+        },
+      ] }),
+    });
+    assert.equal(uploaded.response.status, 202);
+    const history = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    const leaf = history.body.records.find((record) => record.record_type === "leaf");
+    assert.ok(leaf);
+    assert.deepEqual(leaf.source_kinds, ["browser_extension"]);
+    assert.equal(leaf.activity_sequence.length, 3);
+    assert.deepEqual(leaf.source_event_ids.sort(), ["code-after-browser-event", "extension-browser-event", "native-browser-event", "second-browser-domain-event"]);
+    assert.equal(leaf.activity_sequence[0].duration_seconds, 150);
+    assert.equal(leaf.context_switches, 1);
   });
 });
 
@@ -699,6 +886,82 @@ test("configures the Qwen 3.7 Plus adapter without sending a real request", asyn
   assert.equal(summary.confidence, 0.9);
 });
 
+test("routes History Skill questions through Qwen with redacted evidence", async () => {
+  let answerCalls = 0;
+  const ai = createAiService({
+    apiKey: "test-key",
+    model: "qwen3.7-plus",
+    fetchImpl: async (_url, options) => {
+      const request = JSON.parse(options.body);
+      const userMessage = JSON.parse(request.messages.at(-1).content);
+      assert.equal(userMessage.task, "answer_history_question");
+      const record = userMessage.records[0];
+      assert.ok(record);
+      assert.equal(record.window_title, undefined);
+      assert.equal(record.full_url, undefined);
+      assert.equal(record.raw_content, undefined);
+      assert.match(record.started_at_shanghai, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+      answerCalls += 1;
+      return {
+        ok: true,
+        async json() {
+          return {
+            choices: [{
+              message: {
+                content: JSON.stringify({
+                  answer: "模型根据脱敏活动证据生成的回答。",
+                  evidence_ids: [record.id],
+                  caveat: "仅基于活动元数据。",
+                  uncertainty: "不能据此判断绩效。",
+                }),
+              },
+            }],
+          };
+        },
+      };
+    },
+    logger: { warn() {} },
+  });
+
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-HISTORY-SKILL", os_version: "Windows 11", agent_version: "0.1.5" }),
+    });
+    await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${enrolled.body.device_token}` },
+      body: JSON.stringify({ events: [{
+        event_id: "history-skill-qwen-event",
+        occurred_at: new Date(Date.now() - 20 * 60_000).toISOString(),
+        type: "app_session",
+        app_name: "Visual Studio Code",
+        process_name: "Code.exe",
+        context_label: "项目：AI锦衣卫系统",
+        duration_seconds: 60,
+      }] }),
+    });
+    const answer = await jsonFetch(`${base}/api/admin/history/ask`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ question: "最近主要做了什么？" }),
+    });
+    assert.equal(answer.response.status, 200);
+    assert.equal(answer.body.model, "qwen3.7-plus");
+    assert.equal(answer.body.answer, "模型根据脱敏活动证据生成的回答。");
+    assert.equal(answer.body.evidence.length, 1);
+    assert.equal(answer.body.evidence[0].context_labels[0], "项目：AI锦衣卫系统");
+    assert.equal(answer.body.uncertainty, "不能据此判断绩效。");
+    assert.equal(answerCalls, 1);
+  }, { ai });
+});
+
 test("times out a stuck model request and keeps the safe fallback path", async () => {
   const ai = createAiService({
     apiKey: "test-key",
@@ -796,7 +1059,7 @@ test("queues failed Qwen summaries and retries them", async () => {
   await withServer(async ({ base, app }) => {
     const code = await jsonFetch(`${base}/api/admin/registration-codes`, { method: "POST", headers: { "x-admin-token": "test-admin" }, body: JSON.stringify({ employee_id: "employee-wei" }) });
     const enrolled = await jsonFetch(`${base}/api/agent/enroll`, { method: "POST", body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-AI", os_version: "Windows 11", agent_version: "0.1.1" }) });
-    const events = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers: { authorization: `Bearer ${enrolled.body.device_token}` }, body: JSON.stringify({ events: [{ event_id: "retry-event", occurred_at: new Date().toISOString(), type: "app_session", app_name: "WPS", process_name: "wps.exe", duration_seconds: 45 }] }) });
+    const events = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers: { authorization: `Bearer ${enrolled.body.device_token}` }, body: JSON.stringify({ events: [{ event_id: "retry-event", occurred_at: new Date(Date.now() - 20 * 60_000).toISOString(), type: "app_session", app_name: "WPS", process_name: "wps.exe", duration_seconds: 600 }] }) });
     assert.equal(events.response.status, 202);
     const first = await jsonFetch(`${base}/api/admin/history`, { headers: { "x-admin-token": "test-admin" } });
     assert.equal(first.response.status, 200);
@@ -872,11 +1135,11 @@ test("stops requeueing a summary after five failed attempts", async () => {
       body: JSON.stringify({
         events: [{
           event_id: "permanent-failure-event",
-          occurred_at: new Date().toISOString(),
+          occurred_at: new Date(Date.now() - 20 * 60_000).toISOString(),
           type: "app_session",
           app_name: "WPS",
           process_name: "wps.exe",
-          duration_seconds: 45,
+          duration_seconds: 600,
         }],
       }),
     });
@@ -893,6 +1156,126 @@ test("stops requeueing a summary after five failed attempts", async () => {
     const second = await jsonFetch(base + "/api/admin/history", { headers: { "x-admin-token": "test-admin" } });
     assert.equal(second.body.records[0].summary_status, "fallback");
     assert.equal(calls, beforeFinalRead);
+  }, { ai });
+});
+
+test("only calls AI once for a closed ten-minute window", async () => {
+  const ai = {
+    mode: "model",
+    model: "qwen3.7-plus",
+    promptVersion: "memory-v1",
+    calls: 0,
+    async summarizeMemory(input) {
+      this.calls += 1;
+      return {
+        status: "generated",
+        model_name: this.model,
+        title: `${input.employee_name} · AI 摘要`,
+        description: "测试摘要",
+        summary: "已对闭合的十分钟工作窗口生成一次摘要。",
+        prior_context: input.prior_context,
+        important_context: input.non_obvious,
+        confidence: 0.9,
+      };
+    },
+  };
+  await withServer(async ({ base, app }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, { method: "POST", headers: adminHeaders, body: JSON.stringify({ employee_id: "employee-wei" }) });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, { method: "POST", body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-AI-CADENCE", os_version: "Windows 11", agent_version: "0.1.5" }) });
+    const deviceHeaders = { authorization: `Bearer ${enrolled.body.device_token}` };
+
+    await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: deviceHeaders,
+      body: JSON.stringify({ events: [{ event_id: "active-short-window", occurred_at: new Date().toISOString(), type: "app_session", app_name: "WPS", process_name: "wps.exe", duration_seconds: 45 }] }),
+    });
+    const activeHistory = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    const activeRecord = activeHistory.body.records.find((record) => record.record_type === "leaf" && record.source_event_ids?.includes("active-short-window"));
+    assert.equal(activeRecord.summary_status, "window_pending");
+    assert.equal(ai.calls, 0);
+    const activeJobs = await jsonFetch(`${base}/api/admin/memory/jobs`, { headers: adminHeaders });
+    assert.equal(activeJobs.body.cadence.summary_window_seconds, 600);
+    assert.equal(activeJobs.body.cadence.active_grace_seconds, 45);
+    assert.equal(activeJobs.body.cadence.generation_interval_seconds, 15);
+    assert.equal(activeJobs.body.cadence.generation_batch_size, 1);
+    assert.equal(activeJobs.body.jobs.filter((job) => ["queued", "running", "retrying"].includes(job.status)).length, 0);
+    await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    assert.equal(ai.calls, 0);
+
+    await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: deviceHeaders,
+      body: JSON.stringify({ events: [{ event_id: "closed-ten-minute-window", occurred_at: new Date(Date.now() - 40 * 60_000).toISOString(), type: "app_session", app_name: "Visual Studio Code", process_name: "Code.exe", duration_seconds: 600 }] }),
+    });
+    const queuedHistory = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    const queuedRecord = queuedHistory.body.records.find((record) => record.record_type === "leaf" && record.source_event_ids?.includes("closed-ten-minute-window"));
+    assert.equal(queuedRecord.summary_status, "queued");
+    assert.equal(ai.calls, 0);
+    const queuedJobs = await jsonFetch(`${base}/api/admin/memory/jobs`, { headers: adminHeaders });
+    assert.ok(queuedJobs.body.jobs.filter((job) => job.status === "queued").length >= 1);
+
+    const processed = await processMemoryGenerationJobs(app.db, ai, { warn() {} }, { limit: 1 });
+    assert.equal(processed.succeeded, 1);
+    assert.equal(ai.calls, 1);
+    const generatedHistory = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    const generatedRecord = generatedHistory.body.records.find((record) => record.record_type === "leaf" && record.source_event_ids?.includes("closed-ten-minute-window"));
+    assert.equal(generatedRecord.summary_status, "generated");
+    assert.equal(generatedRecord.summary_model, "qwen3.7-plus");
+    assert.equal(generatedRecord.prompt_version, "memory-v1");
+    await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    assert.equal(ai.calls, 1);
+  }, { ai });
+});
+
+test("does not fan one ten-minute cadence into extra rollup AI calls", async () => {
+  const ai = {
+    mode: "model",
+    model: "qwen3.7-plus",
+    promptVersion: "memory-v1",
+    calls: 0,
+    async summarizeMemory(input) {
+      this.calls += 1;
+      return {
+        status: "generated",
+        model_name: this.model,
+        title: `${input.employee_name} · 十分钟摘要`,
+        description: "闭合窗口摘要",
+        summary: "只为闭合的十分钟 Leaf 窗口调用一次模型。",
+        prior_context: input.prior_context,
+        important_context: input.non_obvious,
+        confidence: 0.9,
+      };
+    },
+  };
+  await withServer(async ({ base, app }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, { method: "POST", headers: adminHeaders, body: JSON.stringify({ employee_id: "employee-wei" }) });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, { method: "POST", body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-AI-ROLLUP-CADENCE", os_version: "Windows 11", agent_version: "0.1.5" }) });
+    const deviceHeaders = { authorization: `Bearer ${enrolled.body.device_token}` };
+    await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: deviceHeaders,
+      body: JSON.stringify({ events: [
+        { event_id: "cadence-leaf-one", occurred_at: new Date(Date.now() - 50 * 60_000).toISOString(), type: "app_session", app_name: "WPS", process_name: "wps.exe", duration_seconds: 600 },
+        { event_id: "cadence-leaf-two", occurred_at: new Date(Date.now() - 39 * 60_000).toISOString(), type: "app_session", app_name: "Visual Studio Code", process_name: "Code.exe", duration_seconds: 600 },
+      ] }),
+    });
+
+    const history = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    const jobs = await jsonFetch(`${base}/api/admin/memory/jobs`, { headers: adminHeaders });
+    const queued = jobs.body.jobs.filter((job) => ["queued", "running", "retrying"].includes(job.status));
+    assert.equal(history.response.status, 200);
+    assert.equal(ai.calls, 0);
+    assert.equal(queued.length, 2);
+    assert.ok(queued.every((job) => job.record_type === "leaf"));
+    assert.ok(!queued.some((job) => job.record_type === "rollup"));
+
+    const processed = await processMemoryGenerationJobs(app.db, ai, { warn() {} }, { limit: 20 });
+    assert.equal(processed.succeeded, 2);
+    assert.equal(ai.calls, 2);
+    await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    assert.equal(ai.calls, 2);
   }, { ai });
 });
 

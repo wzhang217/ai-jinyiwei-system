@@ -1,8 +1,17 @@
-import { SHANGHAI_TIME_ZONE, formatShanghaiTime, shanghaiDayKey } from "../time.js";
+import { formatShanghaiDate, formatShanghaiTime, shanghaiDayKey } from "../time.js";
 
 const configuredBaseUrl = (import.meta.env.VITE_AGENT_API_BASE_URL || "").trim().replace(/\/$/, "");
 const adminToken = (import.meta.env.VITE_AGENT_ADMIN_TOKEN || "").trim();
-export const demoMode = import.meta.env.VITE_DEMO_MODE === "true";
+const sourceKindLabels = {
+  desktop_app: "桌面应用",
+  browser_native: "浏览器原生",
+  browser_extension: "浏览器扩展",
+  system_idle: "系统空闲",
+  system_app: "系统组件",
+};
+// Demo data is a local development preview only. A production build must
+// never silently fall back to fabricated history when the API is unavailable.
+export const demoMode = import.meta.env.DEV && import.meta.env.VITE_DEMO_MODE === "true";
 let adminSessionToken = typeof window !== "undefined" ? window.sessionStorage.getItem("jinyiwei_admin_session") || "" : "";
 
 export const agentApiEnabled = Boolean(configuredBaseUrl && adminToken);
@@ -141,16 +150,30 @@ export async function getLiveEvents(limit = 200) {
     description: event.type === "idle"
       ? `${event.employee_name} 的 Agent 记录到一段空闲状态。`
       : `${event.employee_name} 在 ${event.app_name} 中连续活动 ${formatDuration(event.duration_seconds)}。`,
-    applications: [],
-    resources: [],
+    applications: event.type === "idle" ? [] : [applicationKey(event.app_name)],
+    resources: event.type === "idle" ? [] : [
+      { name: event.app_name, path: "前台应用元数据", type: "application" },
+      ...(event.context_label ? [{ name: event.context_label, path: "脱敏工作标识", type: "metadata" }] : []),
+      ...(event.web_domain ? [{ name: event.web_domain, path: "仅域名元数据", type: "website" }] : []),
+    ],
     summary: event.type === "idle"
       ? "这是一条基于系统空闲状态生成的活动元数据记录。"
       : `这是一条基于前台应用 ${event.app_name} 和活动时长生成的活动元数据记录。`,
     priorContext: "来源于 Windows Agent 的前台应用活动采集。",
     nonObvious: "该记录不包含窗口正文、键盘、剪贴板、屏幕或文件内容。",
-    timeline: [{ time: formatTime(event.occurred_at), text: event.type === "idle" ? "进入空闲状态" : `前台应用：${event.app_name}`, app: event.type === "idle" ? "other" : applicationKey(event.app_name) }],
+    timeline: [{ time: formatTime(event.occurred_at), duration_seconds: event.duration_seconds, source_kind: event.source_kind, text: event.type === "idle" ? "进入空闲状态" : `前台应用：${event.app_name}`, app: event.type === "idle" ? "other" : applicationKey(event.app_name) }],
     citations: [{ label: event.hostname, detail: `${event.employee_name} · ${event.process_name}`, type: "app" }],
     confidence: 1,
+    sourceKinds: event.source_kind ? [event.source_kind] : [],
+    sourceTypes: event.source_kind ? [sourceKindLabels[event.source_kind] || "活动元数据"] : [],
+    activitySequence: [{
+      occurred_at: event.occurred_at,
+      time: formatTime(event.occurred_at),
+      duration_seconds: event.duration_seconds,
+      app: event.type === "idle" ? "系统空闲" : event.app_name,
+      app_name: event.app_name,
+      source_kind: event.source_kind,
+    }],
   }));
 }
 
@@ -174,7 +197,7 @@ export async function getLiveHistorySources(recordId) {
 
 export async function getMemoryJobs() {
   const body = await request("/api/admin/memory/jobs");
-  return { jobs: body.jobs || [], model: body.model || "rules-v1" };
+  return { jobs: body.jobs || [], model: body.model || "rules-v1", cadence: body.cadence || null };
 }
 
 export async function getLiveAudit() {
@@ -232,6 +255,7 @@ export async function askLiveHistory(question, options = {}) {
     webDomains: body.web_domains || [],
     citations: body.citations || [],
     resources: body.resources || [],
+    retrieval: body.retrieval || null,
     timeRange,
     team: body.query_team || options.team || null,
     caveats: [`${rangeText} · ${contextText} · ${domainText}。不确定性：${uncertainty}`, ...(body.caveats || [])],
@@ -253,6 +277,7 @@ function normalizeLiveRecord(record) {
     rollupScope: record.rollup_scope || (record.record_type === "rollup" ? "window" : "leaf"),
     summaryStatus: record.summary_status || record.status || "generated",
     summaryModel: record.summary_model || record.model_name || "rules-v1",
+    promptVersion: record.prompt_version || record.promptVersion || "",
     userId: record.user_id,
     applications: record.applications || [],
     resources: record.resources || [],
@@ -270,6 +295,12 @@ function normalizeLiveRecord(record) {
     contextSwitches: record.context_switches || 0,
     contextLabels: record.context_labels || [],
     webDomains: record.web_domains || [],
+    sourceKinds: record.source_kinds || [],
+    sourceTypes: record.source_types || [],
+    activitySequence: (record.activity_sequence || []).map((item) => ({
+      ...item,
+      time: formatTime(item.occurred_at || item.time),
+    })),
   };
 }
 
@@ -290,6 +321,10 @@ function applicationKey(appName) {
   if (normalized.includes("powerpnt") || normalized.includes("powerpoint")) return "powerpoint";
   if (normalized.includes("notion")) return "notion";
   if (normalized.includes("figma")) return "figma";
+  if (normalized.includes("360zip") || normalized.includes("360 压缩")) return "archive360";
+  if (normalized.includes("doubao") || normalized.includes("豆包")) return "doubao";
+  if (normalized.includes("namiai")) return "namiai";
+  if (normalized.includes("360tray") || normalized.includes("360 安全")) return "security360";
   if (normalized.includes("explorer")) return "explorer";
   if (normalized.includes("terminal") || normalized.includes("powershell") || normalized.includes("cmd.exe")) return "terminal";
   return "other";
@@ -301,8 +336,7 @@ function formatDuration(seconds) {
 }
 
 function formatTime(value) {
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleTimeString("zh-CN", { timeZone: SHANGHAI_TIME_ZONE, hour: "2-digit", minute: "2-digit" });
+  return formatShanghaiTime(value, { hour: "2-digit", minute: "2-digit" });
 }
 
 function formatDay(value) {
@@ -313,7 +347,7 @@ function formatDay(value) {
   const day = shanghaiDayKey(date);
   if (day === today) return "今天";
   if (day === yesterday) return "昨天";
-  return date.toLocaleDateString("zh-CN", { timeZone: SHANGHAI_TIME_ZONE, month: "numeric", day: "numeric", weekday: "short" });
+  return formatShanghaiDate(date, { month: "numeric", day: "numeric", weekday: "short" });
 }
 
 function formatRelativeTime(value) {

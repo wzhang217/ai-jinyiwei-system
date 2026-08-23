@@ -6,6 +6,7 @@ export const applications = {
   vscode: { name: "VS Code", kind: "开发工具", color: "#007acc" },
   finder: { name: "Finder", kind: "文件资源", color: "#4c9aff" },
   explorer: { name: "Windows 文件资源管理器", kind: "文件资源", color: "#3b82d0" },
+  archive360: { name: "360 压缩", kind: "文件资源", color: "#2f80ed" },
   terminal: { name: "Windows 终端", kind: "终端", color: "#424242" },
   wechat: { name: "企业微信", kind: "沟通", color: "#20c36b" },
   slack: { name: "Slack", kind: "沟通", color: "#611f69" },
@@ -18,6 +19,9 @@ export const applications = {
   powerpoint: { name: "Microsoft PowerPoint", kind: "文档", color: "#d24726" },
   notion: { name: "Notion", kind: "文档", color: "#161616" },
   figma: { name: "Figma", kind: "设计", color: "#f24e1e" },
+  doubao: { name: "豆包", kind: "AI 工作台", color: "#2c9cf2" },
+  namiai: { name: "Namiai", kind: "AI 工作台", color: "#7a68ee" },
+  security360: { name: "360 安全卫士", kind: "系统", color: "#35a67a" },
   other: { name: "其他应用", kind: "未分类", color: "#7c8077" },
 };
 

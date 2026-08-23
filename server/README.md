@@ -31,6 +31,9 @@ AI_MAX_REQUESTS_PER_MINUTE=30
 AI_MAX_INPUT_RECORDS=200
 AI_REQUEST_TIMEOUT_MS=20000
 AI_ENABLE_THINKING=false
+AI_SUMMARY_WINDOW_SECONDS=600
+AI_ACTIVE_GRACE_SECONDS=45
+AI_GENERATION_BATCH_SIZE=1
 AGENT_ADMIN_TOKEN=dev-admin-token
 ```
 
@@ -40,6 +43,10 @@ AGENT_ADMIN_TOKEN=dev-admin-token
 
 `GET /api/admin/history` 会将 Leaf/Rollup Summary 持久化到 `memory_summaries` 表；`POST /api/admin/history/ask` 默认会在留存窗口内召回已持久化的 Memory Summary，再结合最近活动覆盖更新的记录进行排序和问答，不只搜索最近一页活动。模型输入只包含应用、时长、切换、脱敏标识和网站域名等活动元数据。
 
+History Skill 的召回使用 `semantic-metadata-v1`：先按时间和权限过滤，再用工作语义分组（开发、浏览器、沟通、文档、项目管理、AI 工作台等）结合应用、域名、来源类型、工作标识和活动顺序进行排序，最后把排序后的脱敏证据交给 Qwen 生成回答。这个检索层不读取原始窗口标题、完整 URL、文件正文或聊天正文，也不会为每条活动额外调用模型。
+
+服务端和数据库以带 `Z` 的 UTC ISO 时间保存和传输事件，前端、Agent 界面、浏览器配对提示和日期边界统一按 `Asia/Shanghai`（UTC+8）展示和计算，避免跨设备时区不同造成日期错位。
+
 采集策略中的 `activity_checkpoint_seconds` 控制同一活动区间的实时更新间隔，默认 15 秒，可在管理后台设置为 15、30 或 60 秒；`heartbeat_interval_seconds` 仍独立控制设备心跳，默认 60 秒。修改策略后，已注册 Agent 会在下一次心跳拉取新策略。
 
 管理后台的团队和员工目录通过 `GET /api/admin/teams`、`GET /api/admin/employees` 读取服务端组织数据，并沿用管理员、管理者和员工的服务端权限范围；前端不再把演示目录作为真实数据源。
@@ -47,6 +54,8 @@ AGENT_ADMIN_TOKEN=dev-admin-token
 管理后台的“立即刷新”会重新读取 `GET /api/admin/history`，历史记录页的导出会调用 `POST /api/admin/history/export`，服务端返回当前权限范围内的记录并写入 `history_exported` 审计日志。设备列表读取真实心跳；超过策略心跳间隔的设备会被标记为离线，并写入 `agent_offline`，恢复心跳后写入 `agent_online`。
 
 历史记录同时提供 Leaf、连续窗口、小时、每日、个人每周和团队周 Rollup Summary。模型暂时不可用时会先返回规则兜底摘要，并写入 `memory_generation_jobs`，后台会按退避策略重试，最多 5 次。`AI_MAX_REQUESTS_PER_MINUTE` 控制单个服务进程的模型调用预算，超过后暂时使用规则摘要并进入重试队列。模型请求默认 20 秒超时，并默认关闭 qwen3.7-plus 的思考模式以适配短摘要和实时问答；超时同样会进入规则兜底和重试流程。需要保留思考过程时可设置 `AI_ENABLE_THINKING=true`，但应同步提高 `AI_REQUEST_TIMEOUT_MS`。
+
+AI 摘要和活动采集采用不同频率：Agent 仍按采集策略实时上报活动区间，但服务端只对已经闭合且达到 `AI_SUMMARY_WINDOW_SECONDS`（默认 10 分钟）的 Leaf 窗口生成一次 AI 摘要；当前仍在增长的窗口显示规则摘要并标记为 `window_pending`，不会因为每次 15 秒活动更新、心跳或前端刷新而重新调用模型。小时、每日、每周等 Rollup 由已生成的 Leaf 和规则聚合得到，不额外触发模型调用，避免一次活动同时派生多次 AI 请求；失败的 Leaf 任务仍按原有退避策略重试。`AI_ACTIVE_GRACE_SECONDS`（默认 45 秒）用于判断最近活动是否仍在增长。后台默认每 15 秒最多处理 1 个生成任务，`AI_GENERATION_BATCH_SIZE` 可按服务端额度调整，避免历史补偿队列瞬间打满模型请求。
 
 管理员可以先预览再执行数据留存删除，删除活动事件、Leaf/Rollup Summary，并写入审计日志：
 

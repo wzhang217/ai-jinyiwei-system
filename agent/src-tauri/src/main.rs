@@ -14,7 +14,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
-const AGENT_VERSION: &str = "0.1.6";
+const AGENT_VERSION: &str = "0.1.7";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const MAX_PENDING_EVENTS: i64 = 10_000;
 // A resumed/sleeping Windows session must not create a full-day idle span
@@ -95,6 +95,7 @@ struct AgentEvent {
     event_type: String,
     app_name: String,
     process_name: String,
+    source_kind: String,
     context_label: Option<String>,
     web_domain: Option<String>,
     duration_seconds: i64,
@@ -105,6 +106,7 @@ struct ActiveSession {
     event_id: String,
     app_name: String,
     process_name: String,
+    source_kind: String,
     context_label: Option<String>,
     web_domain: Option<String>,
     started_at: Instant,
@@ -124,6 +126,7 @@ struct IdleSession {
 struct ForegroundActivity {
     app_name: String,
     process_name: String,
+    source_kind: String,
     context_label: Option<String>,
     web_domain: Option<String>,
 }
@@ -188,6 +191,8 @@ struct AgentEventPayload {
     app_name: String,
     process_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    source_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     context_label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     web_domain: Option<String>,
@@ -226,6 +231,7 @@ impl Core {
                event_type TEXT NOT NULL,
                app_name TEXT NOT NULL,
                process_name TEXT NOT NULL,
+               source_kind TEXT NOT NULL DEFAULT 'desktop_app',
                context_label TEXT,
                web_domain TEXT,
                duration_seconds INTEGER NOT NULL,
@@ -305,8 +311,8 @@ impl Core {
 
     fn queue_event(&mut self, event: AgentEvent) -> Result<(), String> {
         self.db.execute(
-            "INSERT INTO events (event_id, occurred_at, event_type, app_name, process_name, context_label, web_domain, duration_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) ON CONFLICT(event_id) DO UPDATE SET context_label = excluded.context_label, web_domain = excluded.web_domain, duration_seconds = MAX(events.duration_seconds, excluded.duration_seconds)",
-            params![event.event_id, event.occurred_at, event.event_type, event.app_name, event.process_name, event.context_label, event.web_domain, event.duration_seconds],
+            "INSERT INTO events (event_id, occurred_at, event_type, app_name, process_name, source_kind, context_label, web_domain, duration_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(event_id) DO UPDATE SET source_kind = excluded.source_kind, context_label = excluded.context_label, web_domain = excluded.web_domain, duration_seconds = MAX(events.duration_seconds, excluded.duration_seconds)",
+            params![event.event_id, event.occurred_at, event.event_type, event.app_name, event.process_name, event.source_kind, event.context_label, event.web_domain, event.duration_seconds],
         ).map_err(|error| error.to_string())?;
         let removed = self.db.execute(
             "DELETE FROM events WHERE uploaded = 0 AND event_id IN (SELECT event_id FROM events WHERE uploaded = 0 ORDER BY occurred_at ASC LIMIT -1 OFFSET ?1)",
@@ -320,7 +326,7 @@ impl Core {
     }
 
     fn pending_events(&self, limit: usize) -> Result<Vec<AgentEventPayload>, String> {
-        let mut statement = self.db.prepare("SELECT event_id, occurred_at, event_type, app_name, process_name, context_label, web_domain, duration_seconds FROM events WHERE uploaded = 0 ORDER BY occurred_at ASC LIMIT ?1").map_err(|error| error.to_string())?;
+        let mut statement = self.db.prepare("SELECT event_id, occurred_at, event_type, app_name, process_name, source_kind, context_label, web_domain, duration_seconds FROM events WHERE uploaded = 0 ORDER BY occurred_at ASC LIMIT ?1").map_err(|error| error.to_string())?;
         let rows = statement
             .query_map(params![limit as i64], |row| {
                 Ok(AgentEventPayload {
@@ -329,9 +335,10 @@ impl Core {
                     event_type: row.get(2)?,
                     app_name: row.get(3)?,
                     process_name: row.get(4)?,
-                    context_label: row.get(5)?,
-                    web_domain: row.get(6)?,
-                    duration_seconds: row.get::<_, i64>(7)?.clamp(0, MAX_EVENT_DURATION_SECONDS),
+                    source_kind: row.get(5)?,
+                    context_label: row.get(6)?,
+                    web_domain: row.get(7)?,
+                    duration_seconds: row.get::<_, i64>(8)?.clamp(0, MAX_EVENT_DURATION_SECONDS),
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -454,6 +461,7 @@ impl Core {
             event_type: "app_session".into(),
             app_name: session.app_name,
             process_name: session.process_name,
+            source_kind: session.source_kind,
             context_label: session.context_label,
             web_domain: session.web_domain,
             duration_seconds: duration,
@@ -474,6 +482,7 @@ impl Core {
             event_type: "idle".into(),
             app_name: "Idle".into(),
             process_name: "system".into(),
+            source_kind: "system_idle".into(),
             context_label: None,
             web_domain: None,
             duration_seconds: duration,
@@ -507,6 +516,7 @@ impl Core {
             event_type: "idle".into(),
             app_name: "Idle".into(),
             process_name: "system".into(),
+            source_kind: "system_idle".into(),
             context_label: None,
             web_domain: None,
             duration_seconds: duration,
@@ -522,6 +532,7 @@ impl Core {
             event_id,
             app_name,
             process_name,
+            source_kind,
             context_label,
             web_domain,
             occurred_at,
@@ -532,6 +543,7 @@ impl Core {
                 session.event_id.clone(),
                 session.app_name.clone(),
                 session.process_name.clone(),
+                session.source_kind.clone(),
                 session.context_label.clone(),
                 session.web_domain.clone(),
                 session.occurred_at.clone(),
@@ -553,6 +565,7 @@ impl Core {
             event_type: "app_session".into(),
             app_name,
             process_name,
+            source_kind,
             context_label,
             web_domain,
             duration_seconds: duration,
@@ -665,6 +678,7 @@ impl Core {
                         event_type: "idle".into(),
                         app_name: "Idle".into(),
                         process_name: "system".into(),
+                        source_kind: "system_idle".into(),
                         context_label: None,
                         web_domain: None,
                         duration_seconds: bounded_idle_seconds as i64,
@@ -689,6 +703,7 @@ impl Core {
                             session.process_name != activity.process_name
                                 || session.context_label != activity.context_label
                                 || session.web_domain != activity.web_domain
+                                || session.source_kind != activity.source_kind
                         })
                         .unwrap_or(true);
                     if changed {
@@ -697,6 +712,7 @@ impl Core {
                             event_id: Uuid::new_v4().to_string(),
                             app_name: activity.app_name,
                             process_name: activity.process_name,
+                            source_kind: activity.source_kind,
                             context_label: activity.context_label,
                             web_domain: activity.web_domain,
                             started_at: now,
@@ -751,7 +767,11 @@ fn ensure_event_metadata_columns(db: &Connection) -> Result<(), String> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
 
-    for (name, definition) in [("context_label", "TEXT"), ("web_domain", "TEXT")] {
+    for (name, definition) in [
+        ("source_kind", "TEXT NOT NULL DEFAULT 'desktop_app'"),
+        ("context_label", "TEXT"),
+        ("web_domain", "TEXT"),
+    ] {
         if !columns.iter().any(|column| column == name) {
             db.execute(
                 &format!("ALTER TABLE events ADD COLUMN {name} {definition}"),
@@ -910,18 +930,104 @@ fn foreground_application() -> Option<ForegroundActivity> {
         let context_label = title
             .as_deref()
             .and_then(|value| sanitize_context_label(&app_name, &process_name, value));
-        let web_domain = title
+        let title_domain = title
             .as_deref()
             .filter(|_| is_browser_process(&app_name, &process_name))
             .and_then(extract_explicit_web_domain);
+        let web_domain = if is_browser_process(&app_name, &process_name) {
+            native_browser_domain(window).or(title_domain)
+        } else {
+            None
+        };
+        let source_kind = if web_domain.is_some() {
+            "browser_native".to_string()
+        } else {
+            "desktop_app".to_string()
+        };
 
         Some(ForegroundActivity {
             app_name,
             process_name,
+            source_kind,
             context_label,
             web_domain,
         })
     }
+}
+
+#[cfg(windows)]
+fn native_browser_domain(window: windows_sys::Win32::Foundation::HWND) -> Option<String> {
+    use windows::core::BSTR;
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::System::Variant::{VARIANT, VT_BSTR};
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, TreeScope_Descendants, UIA_ValueValuePropertyId,
+    };
+
+    fn variant_text(value: VARIANT) -> Option<String> {
+        let variant_type = unsafe { value.Anonymous.Anonymous.vt };
+        if variant_type != VT_BSTR {
+            return None;
+        }
+        let bstr: BSTR = unsafe { (&*value.Anonymous.Anonymous.Anonymous.bstrVal).clone() };
+        String::try_from(bstr)
+            .ok()
+            .filter(|text| !text.trim().is_empty())
+    }
+
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    if initialized.0 < 0 {
+        return None;
+    }
+
+    let result = (|| unsafe {
+        let automation: IUIAutomation =
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
+        let root = automation.ElementFromHandle(HWND(window)).ok()?;
+        let condition = automation.CreateTrueCondition().ok()?;
+        let elements = root.FindAll(TreeScope_Descendants, condition).ok()?;
+        let length = elements.Length().ok()?.clamp(0, 300);
+        for index in 0..length {
+            let element = elements.GetElement(index).ok()?;
+            let control_type = element.CurrentControlType().ok()?;
+            let name = String::try_from(element.CurrentName().ok()?).unwrap_or_default();
+            let automation_id =
+                String::try_from(element.CurrentAutomationId().ok()?).unwrap_or_default();
+            let value = element
+                .GetCurrentPropertyValue(UIA_ValueValuePropertyId)
+                .ok()
+                .and_then(variant_text);
+            let descriptor = format!("{} {}", name, automation_id).to_lowercase();
+            let looks_like_address_bar = descriptor.contains("address")
+                || descriptor.contains("omnibox")
+                || descriptor.contains("地址")
+                || descriptor.contains("搜索栏")
+                || value
+                    .as_deref()
+                    .map(|text| text.contains("http://") || text.contains("https://"))
+                    .unwrap_or(false);
+            if !looks_like_address_bar {
+                continue;
+            }
+            if let Some(domain) = value
+                .as_deref()
+                .and_then(extract_explicit_web_domain)
+                .or_else(|| extract_explicit_web_domain(&name))
+            {
+                // The raw address bar value is used only in memory to derive a
+                // normalized host. It is never stored or sent to the server.
+                return Some(domain);
+            }
+            let _ = control_type;
+        }
+        None
+    })();
+    unsafe { CoUninitialize() };
+    result
 }
 
 #[cfg(not(windows))]

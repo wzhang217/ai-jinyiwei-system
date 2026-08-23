@@ -102,6 +102,7 @@ async function postEvent(session, durationSeconds, config) {
         type: "app_session",
         app_name: config.browserName,
         process_name: config.browserName.toLowerCase().includes("edge") ? "msedge.exe" : "chrome.exe",
+        source_kind: "browser_extension",
         title_hint: session.titleHint,
         web_domain: session.domain,
         duration_seconds: Math.max(0, Math.min(86400, Math.round(durationSeconds))),

@@ -43,6 +43,21 @@ function modelTextOrFallback(value, field, fallback) {
   return validatedModelText(normalized, field);
 }
 
+function shanghaiDateTime(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return null;
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(date).replace(/\//g, "-");
+}
+
 function publicRecord(record) {
   return {
     id: record.id,
@@ -56,18 +71,35 @@ function publicRecord(record) {
     context_kinds: record.context_kinds || [],
     context_labels: record.context_labels || [],
     web_domains: record.web_domains || [],
+    source_kinds: record.source_kinds || [],
+    source_types: record.source_types || [],
     context_switches: record.context_switches || 0,
     duration_seconds: record.duration_seconds || 0,
     started_at: record.started_at,
     ended_at: record.ended_at,
+    started_at_shanghai: shanghaiDateTime(record.started_at),
+    ended_at_shanghai: shanghaiDateTime(record.ended_at),
     source_record_count: Array.isArray(record.source_record_ids) ? record.source_record_ids.length : 0,
     source_event_count: Array.isArray(record.source_event_ids) ? record.source_event_ids.length : 0,
+    activity_sequence: (record.activity_sequence || []).slice(0, 100).map((item) => ({
+      occurred_at: item?.occurred_at,
+      occurred_at_shanghai: shanghaiDateTime(item?.occurred_at),
+      duration_seconds: item?.duration_seconds,
+      app: item?.app,
+      context_kind: item?.context_kind,
+      context_label: item?.context_label,
+      web_domain: item?.web_domain,
+      source_kind: item?.source_kind,
+    })),
     resource_names: (record.resources || []).map((item) => item?.name).filter(Boolean).slice(0, 100),
     citation_labels: (record.citations || []).map((item) => item?.label).filter(Boolean).slice(0, 100),
     timeline: (record.timeline || []).slice(0, 100).map((item) => ({
       occurred_at: item?.occurred_at,
+      occurred_at_shanghai: shanghaiDateTime(item?.occurred_at),
       text: item?.text,
       app: item?.app,
+      duration_seconds: item?.duration_seconds,
+      source_kind: item?.source_kind,
     })),
   };
 }
@@ -206,7 +238,7 @@ export function createAiService({
       if (!canCallModel) return { ...fallback, status: "fallback", model_name: "rules-v1" };
       try {
         const result = await complete(createPrompt({
-          system: "你是企业 Computer History 的 Memory Summary 生成器。只根据输入的活动元数据生成 JSON。禁止猜测文件内容、聊天正文、网页正文、键盘输入、截图内容或绩效结论。只返回 title、description、summary、prior_context、important_context、confidence 字段。不要输出 URL、文件路径或原始窗口标题。",
+          system: "你是企业 Computer History 的 Memory Summary 生成器。只根据输入的活动元数据生成 JSON。时间优先使用 *_shanghai 字段，统一按东八区表达。禁止猜测文件内容、聊天正文、网页正文、键盘输入、截图内容或绩效结论。只返回 title、description、summary、prior_context、important_context、confidence 字段。不要输出 URL、文件路径、原始窗口标题或敏感正文。标题必须是可读的工作主题，例如‘文件、文档、其他、沟通活动’或‘开发、浏览器、沟通活动’，不能只使用某个网站域名、单个应用名或员工姓名。描述和 summary 必须尽量包含东八区时间范围、涉及应用、按时间顺序的活动片段、应用切换次数、来源类型和可见的网站/项目标识；没有证据的内容明确说未记录。",
           input: { task: "summarize_memory", record: publicRecord(input) },
         }));
         if (!result || typeof result !== "object") throw new Error("AI summary was not valid JSON");
@@ -237,7 +269,7 @@ export function createAiService({
       if (!canCallModel || !records.length) return { ...fallback, status: "fallback", model_name: "rules-v1" };
       try {
         const result = await complete(createPrompt({
-          system: "你是企业 Computer History 的 History Skill。只根据提供的 Memory Summary 元数据回答问题。禁止编造文件、网页、聊天、键盘或绩效信息。只返回 JSON：answer 字符串、evidence_ids 数组、caveat 字符串、uncertainty 字符串。evidence_ids 只能使用输入记录的 id。答案应尽量明确时间范围、涉及应用、项目/工作标识和网站域名；缺少证据时要在 uncertainty 中说明。",
+          system: "你是企业 Computer History 的 History Skill。只根据提供的 Memory Summary 元数据回答问题。时间优先使用 *_shanghai 字段，统一按东八区表达。禁止编造文件、网页、聊天、键盘或绩效信息。只返回 JSON：answer 字符串、evidence_ids 数组、caveat 字符串、uncertainty 字符串。evidence_ids 只能使用输入记录的 id。答案应尽量明确时间范围、涉及应用、项目/工作标识和网站域名；缺少证据时要在 uncertainty 中说明。",
           input: {
             task: "answer_history_question",
             question: text(question),

@@ -1,6 +1,6 @@
 # AI锦衣卫 Chrome / Edge Browser Source MVP
 
-这个目录提供一个 Chrome 和 Edge 都能加载的 Manifest V3 扩展。它与 Windows Agent 使用同一套 `POST /api/agent/events` 事件接口：
+这个目录提供一个可选的 Chrome 和 Edge Manifest V3 扩展。Windows Agent 已经会优先尝试使用 Windows UI Automation 读取浏览器地址栏；本扩展用于原生回退失败、企业浏览器策略限制或需要更稳定来源提示的场景。它与 Windows Agent 使用同一套 `POST /api/agent/events` 事件接口：
 
 - 采集当前标签页的域名；
 - GitHub、GitLab、Notion、Figma、ChatGPT、Codex、Jira、Linear、Trello、Asana、ClickUp、飞书、钉钉、Slack、Teams 只生成有限的来源/项目提示；

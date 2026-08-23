@@ -1,3 +1,5 @@
+import { formatShanghaiFileStamp } from "../time.js";
+
 const formatDuration = (seconds) => {
   const minutes = Math.max(1, Math.round(seconds / 60));
   return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
@@ -7,14 +9,69 @@ export function recordToMarkdown(record) {
   const applications = (record.applicationNames || record.application_names || record.applications || []).map((key) => key).join(", ");
   const contextLabels = (record.contextLabels || record.context_labels || []).join(", ");
   const webDomains = (record.webDomains || record.web_domains || []).join(", ");
+  const sourceKinds = (record.sourceKinds || record.source_kinds || []).join(", ");
+  const sourceTypes = (record.sourceTypes || record.source_types || []).join(", ");
   const citations = (record.citations || []).map((item) => `- ${item.label} — ${item.detail}`).join("\n");
   const timeline = (record.timeline || []).map((item) => `- ${item.time} · ${item.text}`).join("\n");
   const resources = (record.resources || []).map((item) => `- ${item.name} — ${item.path}`).join("\n");
+  const sequence = (record.activitySequence || record.activity_sequence || []).map((item) => {
+    const minutes = Math.max(1, Math.round(Number(item.duration_seconds || 0) / 60));
+    return `- ${item.time || item.occurred_at || ""} · ${item.app || item.app_name || "未知应用"} · ${minutes} 分钟 · ${item.source_kind || "活动元数据"}`;
+  }).join("\n");
 
   const userId = record.userId || record.user_id || "employee_001";
   const periodStart = record.startedAt || record.started_at || "";
   const periodEnd = record.endedAt || record.ended_at || "";
-  return `---\ntitle: ${record.title}\ndescription: ${record.description}\napplications: [${applications}]\ncontext_labels: [${contextLabels}]\nweb_domains: [${webDomains}]\nduration: ${record.duration}\nrecord_type: ${record.recordType}\nrollup_scope: ${record.rollupScope || ""}\nsummary_status: ${record.summaryStatus || "generated"}\nsummary_model: ${record.summaryModel || "rules-v1"}\nuser_id: ${userId}\nperiod_start: ${periodStart}\nperiod_end: ${periodEnd}\ngenerated_at: ${record.generated_at || record.generatedAt || ""}\nsource_event_ids: [${(record.source_event_ids || record.sourceEventIds || []).join(", ")}]\nsource_record_ids: [${(record.source_record_ids || record.sourceRecordIds || []).join(", ")}]\n---\n\n## Memory summary\n\n${record.summary}\n\n## Relevant prior context\n\n${record.priorContext}\n\n## Important non-obvious context\n\n${record.importantContext || record.nonObvious}\n\n## Recording summary\n\n${timeline}\n\n## Resources\n\n${resources}\n\n## Citations\n\n${citations}\n`;
+  return `---
+title: ${record.title}
+description: ${record.description}
+applications: [${applications}]
+context_labels: [${contextLabels}]
+web_domains: [${webDomains}]
+source_kinds: [${sourceKinds}]
+source_types: [${sourceTypes}]
+duration: ${record.duration}
+record_type: ${record.recordType}
+rollup_scope: ${record.rollupScope || ""}
+summary_status: ${record.summaryStatus || "generated"}
+summary_model: ${record.summaryModel || "rules-v1"}
+prompt_version: ${record.promptVersion || record.prompt_version || ""}
+user_id: ${userId}
+period_start: ${periodStart}
+period_end: ${periodEnd}
+generated_at: ${record.generated_at || record.generatedAt || ""}
+source_event_ids: [${(record.source_event_ids || record.sourceEventIds || []).join(", ")}]
+source_record_ids: [${(record.source_record_ids || record.sourceRecordIds || []).join(", ")}]
+---
+
+## Memory summary
+
+${record.summary}
+
+## Relevant prior context
+
+${record.priorContext}
+
+## Important non-obvious context
+
+${record.importantContext || record.nonObvious}
+
+## Recording summary
+
+${timeline}
+
+## Activity sequence
+
+${sequence}
+
+## Resources
+
+${resources}
+
+## Citations
+
+${citations}
+`;
 }
 
 export function downloadRecordMarkdown(record) {
@@ -23,7 +80,7 @@ export function downloadRecordMarkdown(record) {
 
 export function downloadRecordsMarkdown(records) {
   const markdown = records.map(recordToMarkdown).join("\n\n");
-  const datePrefix = new Date().toISOString().slice(0, 19).replaceAll(":", "-");
+  const datePrefix = formatShanghaiFileStamp();
   downloadMarkdown(markdown, `${datePrefix}-memory-summaries.md`);
 }
 
