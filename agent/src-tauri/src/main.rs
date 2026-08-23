@@ -997,7 +997,7 @@ fn native_browser_domain(window: windows_sys::Win32::Foundation::HWND) -> Option
             CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER).ok()?;
         let root = automation.ElementFromHandle(HWND(window)).ok()?;
         let condition = automation.CreateTrueCondition().ok()?;
-        let elements = root.FindAll(TreeScope_Descendants, condition).ok()?;
+        let elements = root.FindAll(TreeScope_Descendants, &condition).ok()?;
         let length = elements.Length().ok()?.clamp(0, 300);
         for index in 0..length {
             let element = elements.GetElement(index).ok()?;
