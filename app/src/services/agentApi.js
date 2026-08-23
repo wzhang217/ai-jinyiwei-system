@@ -166,7 +166,8 @@ export async function getLiveHistorySources(recordId) {
     sourceRecords: (body.source_records || []).map(normalizeLiveRecord),
     sourceEvents: (body.source_events || []).map((event) => ({
       ...event,
-      occurred_at_display: formatShanghaiTime(event.occurred_at, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+      occurred_at_utc: event.occurred_at,
+      occurred_at: formatShanghaiTime(event.occurred_at, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }),
     })),
   };
 }
