@@ -53,7 +53,7 @@ History Skill 的召回使用 `semantic-metadata-v1`：先按时间和权限过�
 
 管理后台的“立即刷新”会重新读取 `GET /api/admin/history`，历史记录页的导出会调用 `POST /api/admin/history/export`，服务端返回当前权限范围内的记录并写入 `history_exported` 审计日志。设备列表读取真实心跳；超过策略心跳间隔的设备会被标记为离线，并写入 `agent_offline`，恢复心跳后写入 `agent_online`。
 
-历史记录同时提供 Leaf、连续窗口、小时、每日、个人每周和团队周 Rollup Summary。模型暂时不可用时会先返回规则兜底摘要，并写入 `memory_generation_jobs`，后台会按退避策略重试，最多 5 次。`AI_MAX_REQUESTS_PER_MINUTE` 控制单个服务进程的模型调用预算，超过后暂时使用规则摘要并进入重试队列。模型请求默认 20 秒超时，并默认关闭 qwen3.7-plus 的思考模式以适配短摘要和实时问答；超时同样会进入规则兜底和重试流程。需要保留思考过程时可设置 `AI_ENABLE_THINKING=true`，但应同步提高 `AI_REQUEST_TIMEOUT_MS`。
+历史记录同时提供 Leaf、连续窗口、小时、每日、个人每周和团队周 Rollup Summary。模型暂时不可用时会先返回规则兜底摘要，并写入 `memory_generation_jobs`，后台会按退避策略重试，最多 5 次。`AI_MAX_REQUESTS_PER_MINUTE` 控制单个服务进程的模型调用预算，超过后暂时使用规则摘要并进入重试队列。模型请求默认 60 秒超时，并默认关闭 qwen3.7-plus 的思考模式以适配短摘要和实时问答；超时同样会进入规则兜底和重试流程。需要保留思考过程时可设置 `AI_ENABLE_THINKING=true`，但应同步提高 `AI_REQUEST_TIMEOUT_MS`。
 
 AI 摘要和活动采集采用不同频率：Agent 仍按采集策略实时上报活动区间，但服务端只对已经闭合且达到 `AI_SUMMARY_WINDOW_SECONDS`（默认 10 分钟）的 Leaf 窗口生成一次 AI 摘要；当前仍在增长的窗口显示规则摘要并标记为 `window_pending`，不会因为每次 15 秒活动更新、心跳或前端刷新而重新调用模型。小时、每日、每周等 Rollup 由已生成的 Leaf 和规则聚合得到，不额外触发模型调用，避免一次活动同时派生多次 AI 请求；失败的 Leaf 任务仍按原有退避策略重试。`AI_ACTIVE_GRACE_SECONDS`（默认 45 秒）用于判断最近活动是否仍在增长。后台默认每 15 秒最多处理 1 个生成任务，`AI_GENERATION_BATCH_SIZE` 可按服务端额度调整，避免历史补偿队列瞬间打满模型请求。
 

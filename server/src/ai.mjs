@@ -185,7 +185,7 @@ export function createAiService({
   promptVersion = DEFAULT_PROMPT_VERSION,
   maxRequestsPerMinute = Number(process.env.AI_MAX_REQUESTS_PER_MINUTE) || 30,
   maxInputRecords = Number(process.env.AI_MAX_INPUT_RECORDS) || 200,
-  requestTimeoutMs = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 20_000,
+  requestTimeoutMs = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 60_000,
   enableThinking = process.env.AI_ENABLE_THINKING === "true",
 } = {}) {
   const canCallModel = Boolean(enabled && apiKey && typeof fetchImpl === "function");

@@ -157,9 +157,9 @@ export function App() {
             {status.last_error && <div className="error-box">{status.last_error}</div>}
           </section>
           <section className="card browser-pairing-card">
-            <div className="section-heading"><div><div className="card-kicker">浏览器来源</div><h2>连接 Chrome / Edge</h2></div><span className="policy-version">短期配对</span></div>
-            <p className="pairing-help">在浏览器扩展设置中输入此配对码。扩展只会获得独立的短期凭据，不会读取或保存 Agent 设备 Token。</p>
-            <button className="primary-button" onClick={createBrowserPairingCode} disabled={busy}>{busy ? "生成中…" : "生成浏览器配对码"}</button>
+            <div className="section-heading"><div><div className="card-kicker">浏览器来源</div><h2>Windows 原生读取</h2></div><span className="policy-version">默认启用</span></div>
+            <p className="pairing-help">Agent 默认通过 Windows 原生辅助功能读取 Chrome / Edge 当前地址栏的域名，不需要安装浏览器扩展。若浏览器策略、远程桌面或权限导致原生读取不到，可选用扩展作为兼容兜底。</p>
+            <button className="secondary-button" onClick={createBrowserPairingCode} disabled={busy}>{busy ? "生成中…" : "生成可选扩展配对码"}</button>
             {browserPairing && <div className="pairing-code-box"><code>{browserPairing.code}</code><button className="secondary-button" onClick={copyBrowserPairingCode}>复制</button><small>有效至 {formatTime(browserPairing.expires_at)}</small></div>}
           </section>
           <section className="card">
