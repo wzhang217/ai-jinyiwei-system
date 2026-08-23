@@ -10,7 +10,7 @@ const fallbackStatus = {
   last_sync_at: null,
   queued_events: 0,
   last_error: null,
-  agent_version: "0.1.4",
+  agent_version: "0.1.5",
   policy: {
     idle_threshold_seconds: 300,
     activity_checkpoint_seconds: 15,
