@@ -158,7 +158,7 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
       type: "app_session",
       app_name: "Google Chrome",
       process_name: "chrome.exe",
-      title_hint: "来源：GitHub",
+      title_hint: "来源：GitHub · 项目：owner-repo",
       web_domain: "github.com",
       duration_seconds: 60,
     };
@@ -213,11 +213,14 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.deepEqual(leaf.applications.sort(), ["chrome", "vscode"]);
     assert.deepEqual(leaf.context_kinds.sort(), ["开发", "浏览器"]);
     assert.equal(leaf.context_switches, 1);
-    assert.deepEqual(leaf.context_labels.sort(), ["来源：GitHub", "项目：AI锦衣卫系统"]);
+    assert.deepEqual(leaf.context_labels.sort(), ["来源：GitHub", "项目：AI锦衣卫系统", "项目：owner-repo"]);
     assert.deepEqual(leaf.web_domains, ["github.com"]);
     assert.ok(leaf.timeline.some((item) => item.text.includes("域名：github.com")));
     assert.ok(leaf.resources.some((resource) => resource.name === "Google Chrome" && resource.type === "application"));
     assert.ok(leaf.resources.some((resource) => resource.name === "Visual Studio Code" && resource.type === "application"));
+    assert.ok(leaf.resources.some((resource) => resource.name === "来源：GitHub" && resource.source_type === "网站"));
+    assert.ok(leaf.resources.some((resource) => resource.name === "项目：owner-repo" && resource.source_type === "代码仓库"));
+    assert.ok(leaf.activity_sequence.some((item) => item.context_labels?.includes("项目：owner-repo")));
     assert.ok(rollup.resources.some((resource) => resource.name === "Google Chrome" && resource.type === "application"));
     assert.match(leaf.title, /Chen/);
     assert.deepEqual(leaf.source_event_ids.sort(), ["event-1", "event-2"]);
@@ -1273,12 +1276,12 @@ test("fills missing time and activity sequence facts into a generated summary", 
     resource_types: ["网站"],
     web_domains: ["github.com"],
     activity_sequence: [
-      { occurred_at: "2026-08-23T01:00:00.000Z", app: "Visual Studio Code", duration_seconds: 300 },
+      { occurred_at: "2026-08-23T01:00:00.000Z", app: "Visual Studio Code", context_labels: ["项目：ai-jinyiwei-system"], duration_seconds: 300 },
       { occurred_at: "2026-08-23T01:05:00.000Z", app: "Google Chrome", web_domain: "github.com", duration_seconds: 300 },
     ],
   });
   assert.match(summary.description, /活动证据：东八区/);
-  assert.match(summary.description, /Visual Studio Code → Google Chrome · github.com/);
+  assert.match(summary.description, /Visual Studio Code · 项目：ai-jinyiwei-system → Google Chrome · github.com/);
   assert.match(summary.summary, /应用切换 1 次/);
 });
 

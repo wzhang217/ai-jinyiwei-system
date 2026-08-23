@@ -174,6 +174,9 @@ export async function getLiveEvents(limit = 200) {
       app: event.type === "idle" ? "系统空闲" : event.app_name,
       app_name: event.app_name,
       source_kind: event.source_kind,
+      context_label: event.context_label || null,
+      context_labels: event.context_label ? event.context_label.split(/\s*[·|｜;；]\s*/).filter(Boolean) : [],
+      web_domain: event.web_domain || null,
     }],
   }));
 }

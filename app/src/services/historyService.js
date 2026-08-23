@@ -17,7 +17,11 @@ export function recordToMarkdown(record) {
   const resources = (record.resources || []).map((item) => `- ${item.name} — ${item.path}`).join("\n");
   const sequence = (record.activitySequence || record.activity_sequence || []).map((item) => {
     const minutes = Math.max(1, Math.round(Number(item.duration_seconds || 0) / 60));
-    return `- ${item.time || item.occurred_at || ""} · ${item.app || item.app_name || "未知应用"} · ${minutes} 分钟 · ${item.source_kind || "活动元数据"}`;
+    const labels = Array.isArray(item.context_labels)
+      ? item.context_labels
+      : item.context_label ? [item.context_label] : [];
+    const identity = [item.app || item.app_name || "未知应用", item.web_domain, ...labels].filter(Boolean).join(" · ");
+    return `- ${item.time || item.occurred_at || ""} · ${identity} · ${minutes} 分钟 · ${item.source_kind || "活动元数据"}`;
   }).join("\n");
 
   const userId = record.userId || record.user_id || "employee_001";

@@ -685,6 +685,18 @@ function metadataResource(label) {
   return { name: value, path: "脱敏工作标识", type: "metadata", source_type: "项目" };
 }
 
+// Browser sources may send a compact, redacted hint such as
+// "来源：GitHub · 项目：owner-repo". Keep the event schema backward
+// compatible (it still stores one context_label), but expose each protected
+// facet separately to History, Resources, and the AI prompt.
+function splitContextLabels(value) {
+  if (typeof value !== "string" || !value.trim()) return [];
+  return [...new Set(value
+    .split(/\s*[·|｜;；]\s*/)
+    .map((item) => item.trim())
+    .filter((item) => item && isSafeContextLabel(item)))].slice(0, 8);
+}
+
 function applicationResource(applicationName) {
   const context = applicationContext(applicationName, "");
   const sourceType = context === "沟通"
@@ -915,20 +927,24 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         (count, key, index) => count + (key === applicationKeys[index] ? 0 : 1),
         0,
       );
-      const contextLabels = [...new Set(activityRows.map((row) => row.context_label).filter((value) => typeof value === "string" && value.trim()))];
+      const contextLabels = [...new Set(activityRows.flatMap((row) => splitContextLabels(row.context_label)))];
       const webDomains = [...new Set(activityRows.map((row) => row.web_domain).filter((value) => typeof value === "string" && value.trim()))];
       const sourceKinds = [...new Set(activityRows.map((row) => row.source_kind || sourceKindForEvent(row)))];
       const sourceTypes = [...new Set(sourceKinds.map(sourceKindLabel))];
-      const activitySequence = activityRows.map((row) => ({
+      const activitySequence = activityRows.map((row) => {
+        const rowContextLabels = splitContextLabels(row.context_label);
+        return ({
         occurred_at: row.occurred_at,
         duration_seconds: Math.max(0, Number(row.duration_seconds) || 0),
         app: row.type === "idle" ? "系统空闲" : displayApplicationName(row.app_name),
         app_name: row.app_name,
         context_kind: row.type === "idle" ? "系统" : applicationContext(row.app_name, row.process_name),
-        context_label: row.context_label || null,
+        context_label: rowContextLabels.join(" · ") || null,
+        context_labels: rowContextLabels,
         web_domain: row.web_domain || null,
         source_kind: row.source_kind || sourceKindForEvent(row),
-      }));
+        });
+      });
       const activityCount = activitySequence.length;
       const sourceLabels = [...contextLabels, ...webDomains];
       const displayApps = episode.isIdle ? ["系统空闲"] : applicationNames;
@@ -1132,7 +1148,14 @@ function historyRecordSemanticText(record) {
     record?.source_types,
     record?.resource_types,
     record?.application_names,
-    sequence.flatMap((item) => [item?.app, item?.context_kind, item?.context_label, item?.web_domain, item?.source_kind]),
+    sequence.flatMap((item) => [
+      item?.app,
+      item?.context_kind,
+      item?.context_label,
+      item?.context_labels,
+      item?.web_domain,
+      item?.source_kind,
+    ]),
     timeline.flatMap((item) => [item?.app, item?.text, item?.source_kind]),
     resources.map((item) => item?.name),
     citations.map((item) => [item?.label, item?.detail]),
@@ -1151,7 +1174,13 @@ function semanticRecordFields(record) {
     [record?.source_types?.join(" "), 4],
     [record?.resource_types?.join(" "), 5],
     [record?.source_kinds?.join(" "), 3],
-    [sequence.map((item) => [item?.app, item?.context_kind, item?.context_label, item?.web_domain].filter(Boolean).join(" ")).join(" "), 4],
+    [sequence.map((item) => [
+      item?.app,
+      item?.context_kind,
+      item?.context_label,
+      item?.context_labels,
+      item?.web_domain,
+    ].flat(Infinity).filter(Boolean).join(" ")).join(" "), 4],
     [timeline.map((item) => item?.text).join(" "), 2],
   ];
 }

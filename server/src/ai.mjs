@@ -103,6 +103,9 @@ function publicRecord(record) {
       app: item?.app,
       context_kind: item?.context_kind,
       context_label: item?.context_label,
+      context_labels: Array.isArray(item?.context_labels)
+        ? item.context_labels
+        : item?.context_label ? [item.context_label] : [],
       web_domain: item?.web_domain,
       source_kind: item?.source_kind,
     })),
@@ -130,7 +133,11 @@ function metadataEvidenceSentence(input) {
     facts.push(`东八区 ${record.started_at_shanghai} 至 ${record.ended_at_shanghai}`);
   }
   const sequence = (record.activity_sequence || [])
-    .map((item) => [item?.app, item?.web_domain, item?.context_label].filter(Boolean).join(" · "))
+    .map((item) => [
+      item?.app,
+      item?.web_domain,
+      ...(Array.isArray(item?.context_labels) ? item.context_labels : item?.context_label ? [item.context_label] : []),
+    ].filter(Boolean).join(" · "))
     .filter(Boolean);
   if (sequence.length) facts.push(`应用顺序：${sequence.join(" → ")}`);
   if (Object.prototype.hasOwnProperty.call(input || {}, "context_switches")) {
