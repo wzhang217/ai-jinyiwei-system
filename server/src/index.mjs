@@ -879,6 +879,7 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         web_domain: row.web_domain || null,
         source_kind: row.source_kind || sourceKindForEvent(row),
       }));
+      const activityCount = activitySequence.length;
       const sourceLabels = [...contextLabels, ...webDomains];
       const displayApps = episode.isIdle ? ["系统空闲"] : applicationNames;
       const displayTitle = workThemeTitle(episode.employeeName, {
@@ -925,7 +926,7 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         title: displayTitle,
         description: episode.isIdle
           ? `${episode.employeeName} 的电脑处于系统空闲状态 ${readableDuration}。`
-          : `${episode.employeeName} 在 ${displayApps.join("、")} 中连续活动 ${readableDuration}，记录 ${episode.rows.length} 个活动片段并发生 ${contextSwitches} 次上下文切换${sourceLabels.length ? `，关联 ${sourceLabels.join("、")}` : ""}。`,
+          : `${episode.employeeName} 在 ${displayApps.join("、")} 中连续活动 ${readableDuration}，记录 ${activityCount} 个去重活动片段并发生 ${contextSwitches} 次上下文切换${sourceLabels.length ? `，关联 ${sourceLabels.join("、")}` : ""}。`,
         applications,
         application_names: applicationNames,
         context_kinds: contextKinds,
@@ -940,7 +941,7 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         ended_at: end,
         summary: episode.isIdle
           ? "这是一条基于系统空闲状态生成的活动元数据记录。"
-          : `${episode.employeeName} 在 ${contextKinds.join("、") || "工作"}上下文中连续活动 ${readableDuration}，期间按顺序记录 ${displayApps.join("、")} 等 ${episode.rows.length} 个活动片段，并发生 ${contextSwitches} 次应用切换。来源类型包括 ${sourceTypes.join("、")}；${sourceDetail}该摘要只基于活动元数据生成。`,
+          : `${episode.employeeName} 在 ${contextKinds.join("、") || "工作"}上下文中连续活动 ${readableDuration}，期间按顺序记录 ${displayApps.join("、")} 等 ${activityCount} 个去重活动片段，并发生 ${contextSwitches} 次应用切换。来源类型包括 ${sourceTypes.join("、")}；${sourceDetail}该摘要只基于活动元数据生成。`,
         prior_context: "来源于 Windows Agent 的前台应用活动采集；工作标识来自允许的开发工具窗口标题脱敏结果，网站只保留域名。",
         important_context: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论；系统不保存原始窗口标题、完整 URL、页面正文或聊天正文。",
         non_obvious: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论；系统不保存原始窗口标题、完整 URL、页面正文或聊天正文。",

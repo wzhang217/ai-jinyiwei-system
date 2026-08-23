@@ -775,6 +775,7 @@ test("coalesces overlapping native and extension browser observations", async ()
     assert.deepEqual(leaf.source_event_ids.sort(), ["code-after-browser-event", "extension-browser-event", "native-browser-event", "second-browser-domain-event"]);
     assert.equal(leaf.activity_sequence[0].duration_seconds, 150);
     assert.equal(leaf.context_switches, 1);
+    assert.match(leaf.description, /记录 3 个去重活动片段/);
   });
 });
 
