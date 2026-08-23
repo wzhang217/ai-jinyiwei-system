@@ -977,11 +977,32 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         ...webDomains.map((domain) => ({ name: domain, path: "仅域名元数据", type: "website", source_type: "网站" })),
       ].map((item) => [item.name, item])).values()];
       const resourceTypes = [...new Set(resources.map((resource) => resource.source_type).filter(Boolean))];
-      const citations = [...new Map(episode.rows.map((row) => [row.process_name, {
-        label: row.hostname,
-        detail: `${episode.employeeName} · ${row.process_name}`,
-        type: "app",
-      }])).values()];
+      const citations = [...new Map([
+        ...episode.rows.map((row) => [
+          `app:${row.process_name}`,
+          {
+            label: row.hostname,
+            detail: `${episode.employeeName} · ${row.process_name}`,
+            type: "app",
+          },
+        ]),
+        ...contextLabels.map((label) => [
+          `context:${label}`,
+          {
+            label,
+            detail: "脱敏工作标识；未保存原始窗口标题",
+            type: "metadata",
+          },
+        ]),
+        ...webDomains.map((domain) => [
+          `domain:${domain}`,
+          {
+            label: domain,
+            detail: "仅保留网站域名；未保存完整 URL 或页面内容",
+            type: "website",
+          },
+        ]),
+      ]).values()];
 
       return {
         id: `history_${episode.deviceId}_${episode.startMs}`,

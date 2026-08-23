@@ -221,6 +221,8 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     assert.ok(leaf.resources.some((resource) => resource.name === "来源：GitHub" && resource.source_type === "网站"));
     assert.ok(leaf.resources.some((resource) => resource.name === "项目：owner-repo" && resource.source_type === "代码仓库"));
     assert.ok(leaf.activity_sequence.some((item) => item.context_labels?.includes("项目：owner-repo")));
+    assert.ok(leaf.citations.some((citation) => citation.label === "项目：owner-repo" && citation.type === "metadata"));
+    assert.ok(leaf.citations.some((citation) => citation.label === "github.com" && citation.type === "website"));
     assert.ok(rollup.resources.some((resource) => resource.name === "Google Chrome" && resource.type === "application"));
     assert.match(leaf.title, /Chen/);
     assert.deepEqual(leaf.source_event_ids.sort(), ["event-1", "event-2"]);
