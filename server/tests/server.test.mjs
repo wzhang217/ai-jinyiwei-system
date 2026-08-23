@@ -512,6 +512,96 @@ test("normalizes legacy browser events in the live diagnostics response", async 
   });
 });
 
+test("repairs legacy summary metadata without another model call", async () => {
+  const ai = {
+    mode: "model",
+    model: "qwen3.7-plus",
+    promptVersion: "memory-v1",
+    calls: 0,
+    async summarizeMemory() {
+      this.calls += 1;
+      throw new Error("metadata repair must not call the model");
+    },
+  };
+
+  await withServer(async ({ base, app }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({
+        registration_code: code.body.code,
+        hostname: "WIN-METADATA-REPAIR",
+        os_version: "Windows 11",
+        agent_version: "0.1.8",
+      }),
+    });
+    const deviceHeaders = { authorization: `Bearer ${enrolled.body.device_token}` };
+    const now = Date.now();
+    const uploaded = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers: deviceHeaders,
+      body: JSON.stringify({ events: [
+        {
+          event_id: "repair-browser-event",
+          occurred_at: new Date(now - 3 * 60_000).toISOString(),
+          type: "app_session",
+          app_name: "Microsoft Edge",
+          process_name: "msedge.exe",
+          web_domain: "jd.com",
+          duration_seconds: 60,
+        },
+        {
+          event_id: "repair-weixin-event",
+          occurred_at: new Date(now - 2 * 60_000).toISOString(),
+          type: "app_session",
+          app_name: "微信/企业微信",
+          process_name: "Weixin.exe",
+          duration_seconds: 60,
+        },
+      ] }),
+    });
+    assert.equal(uploaded.response.status, 202);
+
+    const first = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    const leaf = first.body.records.find((record) => record.record_type === "leaf" && record.source_event_ids?.includes("repair-browser-event"));
+    assert.ok(leaf);
+    assert.ok(leaf.activity_sequence.length >= 2);
+
+    const stored = app.db.prepare("SELECT payload_json FROM memory_summaries WHERE id = ?").get(leaf.id);
+    const legacyPayload = JSON.parse(stored.payload_json);
+    delete legacyPayload.activity_sequence;
+    delete legacyPayload.source_kinds;
+    delete legacyPayload.source_types;
+    delete legacyPayload.resource_types;
+    legacyPayload.title = "Wei · jd.com";
+    legacyPayload.description = "旧版描述";
+    legacyPayload.summary = "旧版摘要";
+    legacyPayload.resources = (legacyPayload.resources || []).map(({ name, path, type }) => ({ name, path, type }));
+    app.db.prepare("UPDATE memory_summaries SET title = ?, summary = ?, payload_json = ? WHERE id = ?").run(
+      legacyPayload.title,
+      legacyPayload.summary,
+      JSON.stringify(legacyPayload),
+      leaf.id,
+    );
+
+    const repairedHistory = await jsonFetch(`${base}/api/admin/history`, { headers: adminHeaders });
+    const repaired = repairedHistory.body.records.find((record) => record.id === leaf.id);
+    assert.ok(repaired);
+    assert.notEqual(repaired.title, "Wei · jd.com");
+    assert.ok(repaired.activity_sequence.length >= 2);
+    assert.match(repaired.summary, /东八区/);
+    assert.ok(repaired.source_types.length >= 2);
+    assert.ok(repaired.resource_types.length >= 1);
+    assert.ok(repaired.resources.every((resource) => resource.source_type));
+    assert.equal(ai.calls, 0);
+  }, { ai });
+});
+
 test("filters History Skill evidence by the requested time range", async () => {
   await withServer(async ({ base }) => {
     const adminHeaders = { "x-admin-token": "test-admin" };

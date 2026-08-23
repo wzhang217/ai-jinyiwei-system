@@ -555,6 +555,38 @@ function formatDuration(seconds) {
   return minutes >= 60 ? `${Math.floor(minutes / 60)}h ${minutes % 60}m` : `${minutes}m`;
 }
 
+function formatShanghaiDateTime(value) {
+  const date = new Date(value || "");
+  if (Number.isNaN(date.getTime())) return "未知时间";
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).format(date).replace(/\//g, "-");
+}
+
+function isBareDomainHistoryTitle(value, employeeName = "") {
+  const title = String(value || "").trim();
+  const prefix = employeeName ? `${employeeName} ·` : "";
+  const candidate = prefix && title.startsWith(prefix)
+    ? title.slice(prefix.length).trim()
+    : title;
+  return isSafeWebDomain(candidate);
+}
+
+function summaryNeedsMetadataEvidence(value, record) {
+  const text = String(value || "");
+  if (!text.trim()) return true;
+  if (record.started_at && !text.includes("东八区")) return true;
+  if ((record.activity_sequence || []).length > 1 && !text.includes("切换") && !text.includes("应用顺序") && !text.includes("→")) return true;
+  return false;
+}
+
 function evidenceTimeRange(records) {
   const starts = records.map((record) => Date.parse(record.started_at)).filter(Number.isFinite);
   const ends = records.map((record) => Date.parse(record.ended_at)).filter(Number.isFinite);
@@ -820,8 +852,10 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
     current = null;
   };
 
-  for (const sourceRow of historyEventRows(db, deviceId, principal, team)) {
-    for (const row of splitHistoryEventRow(sourceRow)) {
+  const historyRows = historyEventRows(db, deviceId, principal, team)
+    .flatMap((sourceRow) => splitHistoryEventRow(sourceRow))
+    .sort((left, right) => Date.parse(left.occurred_at) - Date.parse(right.occurred_at));
+  for (const row of historyRows) {
     const startMs = Date.parse(row.occurred_at);
     if (Number.isNaN(startMs)) continue;
     const rawDurationSeconds = Math.max(0, Number(row.duration_seconds) || 0);
@@ -853,7 +887,6 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
       current.endMs = Math.max(current.endMs, endMs);
       current.rows.push(row);
     }
-  }
   }
   flush();
 
@@ -902,6 +935,7 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         applicationNames: displayApps,
       });
       const readableDuration = formatDuration(durationSeconds);
+      const timeRange = `东八区 ${formatShanghaiDateTime(start)} 至 ${formatShanghaiDateTime(end)}`;
       const sourceDetail = sourceLabels.length
         ? `关联 ${sourceLabels.join("、")}。`
         : "未记录具体网站或项目内容。";
@@ -940,8 +974,8 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         record_type: "leaf",
         title: displayTitle,
         description: episode.isIdle
-          ? `${episode.employeeName} 的电脑处于系统空闲状态 ${readableDuration}。`
-          : `${episode.employeeName} 在 ${displayApps.join("、")} 中连续活动 ${readableDuration}，记录 ${activityCount} 个去重活动片段并发生 ${contextSwitches} 次上下文切换${sourceLabels.length ? `，关联 ${sourceLabels.join("、")}` : ""}。`,
+          ? `${episode.employeeName} 的电脑处于系统空闲状态 ${readableDuration}（${timeRange}）。`
+          : `${episode.employeeName} 在 ${displayApps.join("、")} 中连续活动 ${readableDuration}（${timeRange}），记录 ${activityCount} 个去重活动片段并发生 ${contextSwitches} 次上下文切换${sourceLabels.length ? `，关联 ${sourceLabels.join("、")}` : ""}。`,
         applications,
         application_names: applicationNames,
         context_kinds: contextKinds,
@@ -955,8 +989,8 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         started_at: start,
         ended_at: end,
         summary: episode.isIdle
-          ? "这是一条基于系统空闲状态生成的活动元数据记录。"
-          : `${episode.employeeName} 在 ${contextKinds.join("、") || "工作"}上下文中连续活动 ${readableDuration}，期间按顺序记录 ${displayApps.join("、")} 等 ${activityCount} 个去重活动片段，并发生 ${contextSwitches} 次应用切换。来源类型包括 ${sourceTypes.join("、")}；${sourceDetail}该摘要只基于活动元数据生成。`,
+          ? `这是一条基于系统空闲状态生成的活动元数据记录，时间范围为${timeRange}。`
+          : `${episode.employeeName} 在 ${contextKinds.join("、") || "工作"}上下文中连续活动 ${readableDuration}（${timeRange}），期间按顺序记录 ${displayApps.join("、")} 等 ${activityCount} 个去重活动片段，并发生 ${contextSwitches} 次应用切换。来源类型包括 ${sourceTypes.join("、")}；${sourceDetail}该摘要只基于活动元数据生成。`,
         prior_context: "来源于 Windows Agent 的前台应用活动采集；工作标识来自允许的开发工具窗口标题脱敏结果，网站只保留域名。",
         important_context: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论；系统不保存原始窗口标题、完整 URL、页面正文或聊天正文。",
         non_obvious: "应用切换只代表活动上下文变化，不直接代表工作效率或绩效结论；系统不保存原始窗口标题、完整 URL、页面正文或聊天正文。",
@@ -1466,13 +1500,23 @@ async function materializeMemoryRecords(db, baseRecords, ai, { deferModel = fals
         // Rebuild a malformed persisted payload below.
       }
     }
-    const legacyBackfill = Boolean(
+    const metadataBackfill = Boolean(
       existing
       && existingPayload
-      && existing.source_hash === legacySourceHash
       && (
-        JSON.stringify(existingPayload.application_names || []) !== JSON.stringify(baseRecord.application_names || [])
-        || JSON.stringify(existingPayload.resources || []) !== JSON.stringify(baseRecord.resources || [])
+        // Older payloads were written before sequence/source/resource
+        // metadata became part of the public Memory Summary contract. Repair
+        // those payloads even when their legacy hash happens to match.
+        (existing.source_hash === legacySourceHash && (
+          JSON.stringify(existingPayload.application_names || []) !== JSON.stringify(baseRecord.application_names || [])
+          || JSON.stringify(existingPayload.resources || []) !== JSON.stringify(baseRecord.resources || [])
+        ))
+        || !Array.isArray(existingPayload.activity_sequence)
+        || !Array.isArray(existingPayload.source_kinds)
+        || !Array.isArray(existingPayload.source_types)
+        || !Array.isArray(existingPayload.resource_types)
+        || (existingPayload.resources || []).some((resource) => resource && !resource.source_type)
+        || isBareDomainHistoryTitle(existingPayload.title, baseRecord.employee_name)
       )
     );
     const job = existing ? selectJob.get(baseRecord.id) : null;
@@ -1496,13 +1540,13 @@ async function materializeMemoryRecords(db, baseRecords, ai, { deferModel = fals
       }
     }
     const shouldRegenerateForModel = existing
-      && !legacyBackfill
+      && !metadataBackfill
       && ai.mode === "model"
       && eligibleForAi
       && !exhaustedJob
       && (existing.status === "fallback" || existing.model_name !== ai.model)
       && !pendingJob;
-    if (existing && existing.source_hash === sourceHash && !shouldRegenerateForModel) {
+    if (existing && existing.source_hash === sourceHash && !metadataBackfill && !shouldRegenerateForModel) {
       if (existingPayload) {
         records.push(existingPayload);
         continue;
@@ -1510,11 +1554,17 @@ async function materializeMemoryRecords(db, baseRecords, ai, { deferModel = fals
     }
 
     const shouldDeferModel = deferModel && eligibleForAi;
-    const generated = legacyBackfill
+    const generated = metadataBackfill
       ? {
-          title: existingPayload.title,
-          description: existingPayload.description,
-          summary: existingPayload.summary,
+          title: isBareDomainHistoryTitle(existingPayload.title, baseRecord.employee_name)
+            ? baseRecord.title
+            : existingPayload.title,
+          description: summaryNeedsMetadataEvidence(existingPayload.description, baseRecord)
+            ? baseRecord.description
+            : existingPayload.description,
+          summary: summaryNeedsMetadataEvidence(existingPayload.summary, baseRecord)
+            ? baseRecord.summary
+            : existingPayload.summary,
           prior_context: existingPayload.prior_context,
           important_context: existingPayload.important_context || existingPayload.non_obvious,
           non_obvious: existingPayload.non_obvious || existingPayload.important_context,
@@ -1724,10 +1774,19 @@ async function getMemoryRecords(db, { deviceId = null, limit = 200, ai, principa
     team,
     limit: requestedLimit,
   });
+  const freshLeafIds = new Set(leafRecords.map((record) => record.id));
+  const freshSourceEventIds = new Set(leafRecords.flatMap((record) => record.source_event_ids || []));
+  const compatiblePersistedRecords = persistedRecords.filter((record) => {
+    if (record.record_type !== "leaf" || freshLeafIds.has(record.id)) return true;
+    // A change in event segmentation can leave an older persisted Leaf Summary
+    // whose source events are now represented by a fresh record. Do not show
+    // both versions in History; the freshly materialized record is canonical.
+    return !(record.source_event_ids || []).some((eventId) => freshSourceEventIds.has(eventId));
+  });
   // The freshly materialized records win over the stored payload so an
   // active session's growing duration and current AI status are visible
   // immediately, while older summaries remain searchable across history.
-  const merged = new Map(persistedRecords.map((record) => [record.id, record]));
+  const merged = new Map(compatiblePersistedRecords.map((record) => [record.id, record]));
   for (const record of [...leafRecords, ...rollupRecords]) merged.set(record.id, record);
 
   return [...merged.values()]
