@@ -833,6 +833,7 @@ test("classifies project-management and collaboration sources without raw page c
     assert.equal(leaf.activity_sequence[0].source_kind, "browser_extension");
     assert.equal(leaf.timeline[0].duration_seconds, 60);
     assert.equal(leaf.timeline[0].source_kind, "browser_extension");
+    assert.match(leaf.title, /项目管理、浏览器活动/);
     assert.ok(!leaf.title.includes("jira.example.com"));
     assert.ok(leaf.resources.some((resource) => resource.name === "来源：Jira"));
     assert.ok(!JSON.stringify(leaf).includes("jira.example.com/path"));

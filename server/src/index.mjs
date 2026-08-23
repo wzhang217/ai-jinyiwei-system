@@ -731,9 +731,33 @@ function contextResource(label) {
     : resource;
 }
 
-function workThemeTitle(employeeName, { isIdle = false, contextKinds = [], applicationNames = [] } = {}) {
+function workThemeTitle(employeeName, {
+  isIdle = false,
+  contextKinds = [],
+  applicationNames = [],
+  contextLabels = [],
+  resourceTypes = [],
+} = {}) {
   if (isIdle) return `${employeeName} · 系统空闲`;
+
+  // App classification is the primary signal. Redacted project/document/site
+  // facets add the missing work context without ever using raw titles, URLs,
+  // or page contents in a user-facing title.
   const themes = [...new Set(contextKinds.filter(Boolean))];
+  const labels = contextLabels.filter((label) => typeof label === "string");
+  const types = new Set(resourceTypes.filter(Boolean));
+  const hasLabel = (prefix) => labels.some((label) => label.startsWith(prefix));
+  const appendTheme = (theme) => {
+    if (!themes.includes(theme)) themes.push(theme);
+  };
+
+  if (hasLabel("项目：") || types.has("代码仓库")) appendTheme("开发");
+  if (hasLabel("文档：") || hasLabel("文件：") || hasLabel("文件夹：") || types.has("文档")) appendTheme("文档");
+  if (hasLabel("来源：") || types.has("网站")) appendTheme("浏览器");
+  if (types.has("沟通工具")) appendTheme("沟通");
+  if (themes.length > 1 && themes.includes("其他")) {
+    themes.splice(themes.indexOf("其他"), 1);
+  }
   if (themes.length) return `${employeeName} · ${themes.slice(0, 4).join("、")}${themes.length > 4 ? "等" : ""}活动`;
   const apps = applicationNames.filter(Boolean);
   if (apps.length > 2) return `${employeeName} · 多应用工作活动`;
@@ -948,10 +972,18 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
       const activityCount = activitySequence.length;
       const sourceLabels = [...contextLabels, ...webDomains];
       const displayApps = episode.isIdle ? ["系统空闲"] : applicationNames;
+      const resources = [...new Map([
+        ...(episode.isIdle ? [] : applicationNames.map(applicationResource)),
+        ...contextLabels.map(contextResource),
+        ...webDomains.map((domain) => ({ name: domain, path: "仅域名元数据", type: "website", source_type: "网站" })),
+      ].map((item) => [item.name, item])).values()];
+      const resourceTypes = [...new Set(resources.map((resource) => resource.source_type).filter(Boolean))];
       const displayTitle = workThemeTitle(episode.employeeName, {
         isIdle: episode.isIdle,
         contextKinds,
         applicationNames: displayApps,
+        contextLabels,
+        resourceTypes,
       });
       const readableDuration = formatDuration(durationSeconds);
       const timeRange = `东八区 ${formatShanghaiDateTime(start)} 至 ${formatShanghaiDateTime(end)}`;
@@ -971,12 +1003,6 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
             ].filter(Boolean).join(" · "),
         app: row.type === "idle" ? "other" : applicationKey(row.app_name),
       }));
-      const resources = [...new Map([
-        ...(episode.isIdle ? [] : applicationNames.map(applicationResource)),
-        ...contextLabels.map(contextResource),
-        ...webDomains.map((domain) => ({ name: domain, path: "仅域名元数据", type: "website", source_type: "网站" })),
-      ].map((item) => [item.name, item])).values()];
-      const resourceTypes = [...new Set(resources.map((resource) => resource.source_type).filter(Boolean))];
       const citations = [...new Map([
         ...episode.rows.map((row) => [
           `app:${row.process_name}`,
@@ -1430,7 +1456,12 @@ function buildRollupRecords(leafRecords, scope = "window") {
     const scopeLabel = scope === "six_hour" ? "6 小时汇总" : scope === "hourly" ? "小时汇总" : scope === "daily" ? "每日汇总" : scope === "weekly" ? "每周汇总" : scope === "team_weekly" ? "团队周汇总" : "连续工作汇总";
     const isTeamRollup = scope === "team_weekly";
     const subjectName = isTeamRollup ? `${first.employee_team || "未分组"}团队` : first.employee_name;
-    const contextTitle = workThemeTitle(subjectName, { contextKinds, applicationNames }).split(" · ").slice(1).join(" · ") || "连续工作活动";
+    const contextTitle = workThemeTitle(subjectName, {
+      contextKinds,
+      applicationNames,
+      contextLabels,
+      resourceTypes,
+    }).split(" · ").slice(1).join(" · ") || "连续工作活动";
     return {
       id: `rollup_${scope}_${hash(`${group.team || first.employee_team || group.deviceId}:${group.startMs}`).slice(0, 24)}`,
       user_id: first.user_id,
