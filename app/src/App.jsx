@@ -47,7 +47,7 @@ import {
 } from "@phosphor-icons/react";
 import { applications, defaultQuestions, historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, auditLiveExport, changeCurrentAccountPassword, clearAdminSession, demoMode, getAdminMe, getLiveHistory, getLiveHistorySources, getLiveOrganization, getStoredAdminPrincipal, loginAdmin, logoutAdmin } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, auditLiveExport, changeCurrentAccountPassword, clearAdminSession, demoMode, getAdminMe, getLiveHistory, getLiveHistorySources, getLiveOrganization, getStoredAdminPrincipal, loginAdmin, logoutAdmin, registerAccount } from "./services/agentApi.js";
 import { AdminPage, roleLabel } from "./AdminPages.jsx";
 import { formatShanghaiTime } from "./time.js";
 
@@ -135,18 +135,31 @@ function AuthLoadingView() {
   return <div className="auth-screen"><div className="auth-card"><div className="organization-mark"><Buildings size={23} weight="fill" /></div><h1>正在验证登录状态</h1><p>正在连接 AI 锦衣卫服务端…</p></div></div>;
 }
 
-function LoginView({ error, onLogin }) {
+function LoginView({ error, onLogin, onRegister }) {
+  const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [displayName, setDisplayName] = useState("");
+  const [requestedRole, setRequestedRole] = useState("employee");
+  const [team, setTeam] = useState("");
   const [loading, setLoading] = useState(false);
   const [formError, setFormError] = useState("");
+  const [notice, setNotice] = useState("");
 
   const submit = async (event) => {
     event.preventDefault();
     setFormError("");
+    setNotice("");
     setLoading(true);
     try {
-      await onLogin(username, password);
+      if (mode === "register") {
+        const result = await onRegister({ username, password, display_name: displayName, role: requestedRole, team: requestedRole === "manager" ? team : undefined });
+        setMode("login");
+        setPassword("");
+        setNotice(result.message || "注册申请已提交，审批通过后才能登录");
+      } else {
+        await onLogin(username, password);
+      }
     } catch (loginError) {
       setFormError(loginError.message);
     } finally {
@@ -157,12 +170,18 @@ function LoginView({ error, onLogin }) {
   return <div className="auth-screen"><form className="auth-card auth-form" onSubmit={submit}>
     <div className="organization-mark"><Buildings size={23} weight="fill" /></div>
     <div className="auth-eyebrow">AI JINYIWEI · COMPUTER HISTORY</div>
-    <h1>登录管理后台</h1>
-    <p>请使用企业账号登录，系统将按账号角色展示数据范围。</p>
+    <h1>{mode === "register" ? "申请企业账号" : "登录管理后台"}</h1>
+    <p>{mode === "register" ? "高管和员工可以自行提交申请，老板审批通过后才能登录。" : "请使用企业账号登录，系统将按账号角色展示数据范围。"}</p>
     <label>用户名<input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required /></label>
-    <label>密码<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
+    {mode === "register" && <label>显示名称<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} required /></label>}
+    {mode === "register" && <label>申请角色<select value={requestedRole} onChange={(event) => setRequestedRole(event.target.value)}><option value="employee">员工</option><option value="manager">高管</option></select></label>}
+    {mode === "register" && requestedRole === "manager" && <label>管理团队<input value={team} onChange={(event) => setTeam(event.target.value)} placeholder="例如：研发与产品中心" required /></label>}
+    <label>密码{mode === "register" && <small>至少12位</small>}<input type="password" autoComplete={mode === "register" ? "new-password" : "current-password"} minLength={mode === "register" ? 12 : undefined} value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
+    {mode === "register" && <div className="policy-hint">员工账号审批时由老板绑定到员工目录；系统不提供审计员角色。</div>}
     {(formError || error) && <div className="error-box">{formError || error}</div>}
-    <button className="primary-button auth-submit" type="submit" disabled={loading}>{loading ? "登录中…" : "登录"}</button>
+    {notice && <div className="success-box">{notice}</div>}
+    <button className="primary-button auth-submit" type="submit" disabled={loading}>{loading ? (mode === "register" ? "提交中…" : "登录中…") : mode === "register" ? "提交注册申请" : "登录"}</button>
+    <button type="button" className="text-button auth-switch" disabled={loading} onClick={() => { setMode((current) => current === "login" ? "register" : "login"); setFormError(""); setNotice(""); }}>{mode === "register" ? "已有账号，返回登录" : "没有账号？申请注册"}</button>
   </form></div>;
 }
 
@@ -320,6 +339,14 @@ function App() {
     try {
       const result = await loginAdmin(username, password);
       setPrincipal(result.principal);
+    } catch (error) {
+      setAuthError(error.message);
+      throw error;
+    }
+  }} onRegister={async (account) => {
+    setAuthError("");
+    try {
+      return await registerAccount(account);
     } catch (error) {
       setAuthError(error.message);
       throw error;

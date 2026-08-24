@@ -172,6 +172,24 @@ struct ForegroundActivity {
     web_domain: Option<String>,
 }
 
+fn apply_collection_policy_to_activity(activity: &mut ForegroundActivity, policy: &Policy) {
+    if !policy.collect_web_domains {
+        activity.web_domain = None;
+        if activity.source_kind == "browser_native" || activity.source_kind == "browser_extension" {
+            activity.source_kind = "desktop_app".into();
+        }
+    }
+    if !policy.collect_file_metadata {
+        activity.context_label = activity.context_label.take().and_then(|value| {
+            let labels = value
+                .split(" · ")
+                .filter(|label| !label.starts_with("文档：") && !label.starts_with("资源："))
+                .collect::<Vec<_>>();
+            (!labels.is_empty()).then(|| labels.join(" · "))
+        });
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct BootstrapConfig {
     server_url: Option<String>,
@@ -987,14 +1005,7 @@ impl Core {
                 let _ = self.finish_idle_session(now);
                 if self.status.policy.collect_app_activity {
                     if let Some(mut activity) = foreground_application() {
-                        if !self.status.policy.collect_web_domains {
-                            activity.web_domain = None;
-                            if activity.source_kind == "browser_native"
-                                || activity.source_kind == "browser_extension"
-                            {
-                                activity.source_kind = "desktop_app".into();
-                            }
-                        }
+                        apply_collection_policy_to_activity(&mut activity, &self.status.policy);
                         if activity.web_domain.is_some() {
                             self.status.last_browser_capture_at = Some(Utc::now().to_rfc3339());
                             self.status.last_browser_capture_source =

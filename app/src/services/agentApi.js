@@ -93,6 +93,13 @@ export async function loginAdmin(username, password) {
   return body;
 }
 
+export async function registerAccount(account) {
+  return request("/api/auth/register", {
+    method: "POST",
+    body: JSON.stringify(account),
+  }, { publicEndpoint: true });
+}
+
 export async function getAdminMe() {
   const body = await request("/api/auth/me");
   setAdminPrincipal(body.principal);
@@ -289,12 +296,32 @@ export async function createAdminAccount(account) {
     method: "POST",
     body: JSON.stringify(account),
   });
-  return body.account;
+  const created = body.account || {};
+  return {
+    ...created,
+    id: created.id || created.account_id,
+    display_name: created.display_name || created.actor || created.username || "未命名账号",
+    disabled_at: created.disabled_at || null,
+  };
 }
 
 export async function setAdminAccountStatus(accountId, enabled) {
   const action = enabled ? "enable" : "disable";
   return request(`/api/admin/accounts/${encodeURIComponent(accountId)}/${action}`, { method: "POST" });
+}
+
+export async function approveAdminAccount(accountId, details = {}) {
+  return request(`/api/admin/accounts/${encodeURIComponent(accountId)}/approve`, {
+    method: "POST",
+    body: JSON.stringify(details),
+  });
+}
+
+export async function rejectAdminAccount(accountId, reason = "管理员未通过该注册申请") {
+  return request(`/api/admin/accounts/${encodeURIComponent(accountId)}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
 }
 
 export async function resetAdminAccountPassword(accountId, password) {

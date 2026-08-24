@@ -39,7 +39,7 @@ import {
 } from "@phosphor-icons/react";
 import { historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, downloadRecordsMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, deleteLivePrivacySubject, exportLiveAudit, exportLivePrivacySubject, getAdminAccounts, getLiveAdminSettings, getLiveAiUsage, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, resetAdminAccountPassword, runRetention, setAdminAccountStatus, setLiveDeviceStatus, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateLiveRolePolicies, updateNotificationSettings, updateOrganizationSettings, verifyLiveAuditIntegrity } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, approveAdminAccount, createRegistrationCode, demoMode, deleteLivePrivacySubject, exportLiveAudit, exportLivePrivacySubject, getAdminAccounts, getLiveAdminSettings, getLiveAiUsage, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, rejectAdminAccount, resetAdminAccountPassword, runRetention, setAdminAccountStatus, setLiveDeviceStatus, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateLiveRolePolicies, updateNotificationSettings, updateOrganizationSettings, verifyLiveAuditIntegrity } from "./services/agentApi.js";
 import { auditData, deviceData, employeeData, permissionRoles, settingsData, teamData } from "./adminData.js";
 import { SHANGHAI_TIME_ZONE, formatShanghaiTime, shanghaiDateAtStart, shanghaiDateInput, shanghaiDayKey, shanghaiWeekKey } from "./time.js";
 
@@ -828,9 +828,8 @@ function RolePolicyEditor({ roles, canEdit, onChanged, onToast }) {
 function AccountManagement({ onToast }) {
   const [accounts, setAccounts] = useState([]);
   const [employees, setEmployees] = useState([]);
-  const [draft, setDraft] = useState({ username: "", password: "", display_name: "", role: "employee", employee_id: "", team: "" });
+  const [approvalEmployees, setApprovalEmployees] = useState({});
   const [loading, setLoading] = useState(agentApiEnabled);
-  const [saving, setSaving] = useState(false);
   const [passwordReset, setPasswordReset] = useState(null);
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [error, setError] = useState("");
@@ -841,25 +840,36 @@ function AccountManagement({ onToast }) {
     Promise.all([getAdminAccounts(), getLiveEmployees()]).then(([nextAccounts, nextEmployees]) => {
       setAccounts(nextAccounts);
       setEmployees(nextEmployees);
-      setDraft((current) => ({ ...current, employee_id: current.employee_id || nextEmployees[0]?.id || "", team: current.team || nextEmployees[0]?.team || "" }));
+      setApprovalEmployees(Object.fromEntries(nextAccounts.filter((account) => account.approval_status === "pending" && account.role === "employee").map((account) => [account.id, account.employee_id || nextEmployees[0]?.id || ""])));
     }).catch((requestError) => setError(requestError.message)).finally(() => setLoading(false));
   };
 
   useEffect(() => { refresh(); }, []);
 
-  const save = async (event) => {
-    event.preventDefault();
-    setSaving(true);
+  const approve = async (account) => {
     setError("");
     try {
-      const account = await createAdminAccount({ ...draft, employee_id: draft.role === "employee" ? draft.employee_id : undefined, team: draft.role === "manager" ? draft.team : undefined });
-      setAccounts((current) => [...current, account]);
-      setDraft({ username: "", password: "", display_name: "", role: "employee", employee_id: employees[0]?.id || "", team: employees[0]?.team || "" });
-      onToast("账号已创建");
+      const employeeId = approvalEmployees[account.id] || "";
+      if (account.role === "employee" && !employeeId) {
+        setError("审批员工账号前请选择要绑定的员工");
+        return;
+      }
+      await approveAdminAccount(account.id, account.role === "employee" ? { employee_id: employeeId } : {});
+      setAccounts((current) => current.map((item) => item.id === account.id ? { ...item, approval_status: "approved", employee_id: employeeId || item.employee_id, team: employeeId ? employees.find((employee) => employee.id === employeeId)?.team || item.team : item.team } : item));
+      onToast(`${account.display_name} 已审批通过`);
     } catch (requestError) {
       setError(requestError.message);
-    } finally {
-      setSaving(false);
+    }
+  };
+
+  const reject = async (account) => {
+    setError("");
+    try {
+      await rejectAdminAccount(account.id);
+      setAccounts((current) => current.map((item) => item.id === account.id ? { ...item, approval_status: "rejected", rejection_reason: "管理员未通过该注册申请" } : item));
+      onToast(`${account.display_name} 已拒绝`);
+    } catch (requestError) {
+      setError(requestError.message);
     }
   };
 
@@ -892,9 +902,12 @@ function AccountManagement({ onToast }) {
     }
   };
 
-  return <SectionCard title="后台账号" description="账号登录决定真实数据范围；停用账号会立即撤销其后台会话" action={<span className="scope-pill">{accounts.length} 个账号</span>}>
-    <div className="account-admin-list">{loading ? <span className="empty-inline">正在读取账号…</span> : accounts.map((account) => <div className="account-admin-row" key={account.id}><span className="person-avatar">{account.display_name.slice(0, 1)}</span><span><strong>{account.display_name}</strong><small>{account.username} · {roleLabel[account.role]}{account.team ? ` · ${account.team}` : ""}</small></span>{passwordReset?.id === account.id ? <div className="account-password-reset"><input type="password" minLength="12" placeholder="新密码至少12位" value={passwordReset.password} onChange={(event) => setPasswordReset((current) => ({ ...current, password: event.target.value }))} autoFocus /><button className="primary-button" disabled={passwordSaving} onClick={() => void resetPassword(account)}>{passwordSaving ? "保存中…" : "保存"}</button><button className="outline-button" disabled={passwordSaving} onClick={() => setPasswordReset(null)}>取消</button></div> : <><StatusPill status={account.disabled_at ? "offline" : "online"} /><button className="outline-button" onClick={() => void toggle(account)}>{account.disabled_at ? "启用" : "停用"}</button><button className="outline-button" onClick={() => { setError(""); setPasswordReset({ id: account.id, password: "" }); }}>重置密码</button></>}</div>)}</div>
-    <form className="account-create-form" onSubmit={save}><strong>创建账号</strong><div className="settings-grid"><label className="setting-field"><span>用户名</span><input required value={draft.username} onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))} /></label><label className="setting-field"><span>显示名称</span><input required value={draft.display_name} onChange={(event) => setDraft((current) => ({ ...current, display_name: event.target.value }))} /></label><label className="setting-field"><span>初始密码（至少12位）</span><input required type="password" minLength="12" value={draft.password} onChange={(event) => setDraft((current) => ({ ...current, password: event.target.value }))} /></label><label className="setting-field"><span>角色</span><select value={draft.role} onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value }))}><option value="admin">老板</option><option value="manager">高管</option><option value="employee">员工</option></select></label>{draft.role === "employee" && <label className="setting-field"><span>绑定员工</span><select required value={draft.employee_id} onChange={(event) => setDraft((current) => ({ ...current, employee_id: event.target.value }))}>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name} · {employee.team}</option>)}</select></label>}{draft.role === "manager" && <label className="setting-field"><span>管理团队</span><input required value={draft.team} onChange={(event) => setDraft((current) => ({ ...current, team: event.target.value }))} /></label>}</div>{error && <div className="error-box">账号操作失败：{error}</div>}<button className="primary-button" disabled={saving}>{saving ? "创建中…" : "创建账号"}</button></form>
+  const pendingAccounts = accounts.filter((account) => account.approval_status === "pending");
+  return <SectionCard title="后台账号" description="高管和员工自行注册，老板在这里审批；仅保留老板、高管、员工三种角色" action={<span className="scope-pill">{accounts.length} 个账号</span>}>
+    {pendingAccounts.length > 0 && <div className="account-approval-box"><strong>待审批注册申请（{pendingAccounts.length}）</strong>{pendingAccounts.map((account) => <div className="account-approval-row" key={account.id}><span><b>{account.display_name}</b><small>{account.username} · {roleLabel[account.role]}{account.team ? ` · ${account.team}` : ""}</small></span>{account.role === "employee" && <select value={approvalEmployees[account.id] || ""} onChange={(event) => setApprovalEmployees((current) => ({ ...current, [account.id]: event.target.value }))}><option value="">选择绑定员工</option>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name} · {employee.team}</option>)}</select>}<button className="primary-button" onClick={() => void approve(account)}>通过</button><button className="outline-button" onClick={() => void reject(account)}>拒绝</button></div>)}</div>}
+    <div className="account-admin-list">{loading ? <span className="empty-inline">正在读取账号…</span> : accounts.map((account) => <div className="account-admin-row" key={account.id}><span className="person-avatar">{(account.display_name || account.username || "账").slice(0, 1)}</span><span><strong>{account.display_name || account.username}</strong><small>{account.username} · {roleLabel[account.role]}{account.team ? ` · ${account.team}` : ""}{account.approval_status === "pending" ? " · 待审批" : account.approval_status === "rejected" ? " · 已拒绝" : ""}</small></span>{account.approval_status === "pending" ? <StatusPill status="offline" /> : passwordReset?.id === account.id ? <div className="account-password-reset"><input type="password" minLength="12" placeholder="新密码至少12位" value={passwordReset.password} onChange={(event) => setPasswordReset((current) => ({ ...current, password: event.target.value }))} autoFocus /><button className="primary-button" disabled={passwordSaving} onClick={() => void resetPassword(account)}>{passwordSaving ? "保存中…" : "保存"}</button><button className="outline-button" disabled={passwordSaving} onClick={() => setPasswordReset(null)}>取消</button></div> : <><StatusPill status={account.disabled_at ? "offline" : "online"} /><button className="outline-button" onClick={() => void toggle(account)}>{account.disabled_at ? "启用" : "停用"}</button><button className="outline-button" onClick={() => { setError(""); setPasswordReset({ id: account.id, password: "" }); }}>重置密码</button></>}</div>)}</div>
+    <small className="policy-hint">首个老板账号由 server/.env 中的 ADMIN_USERNAME / ADMIN_PASSWORD 初始化；注册申请不会开放老板角色，避免任何人自行注册管理员。</small>
+    {error && <div className="error-box">账号操作失败：{error}</div>}
   </SectionCard>;
 }
 function OrgTree({ principal, onToast }) {

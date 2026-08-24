@@ -567,6 +567,73 @@ test("enforces application and website exclusion policy for uploaded events", as
   });
 });
 
+test("applies collection switches to incoming app, idle, web, and file metadata", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const updated = await jsonFetch(`${base}/api/admin/policy`, {
+      method: "PUT",
+      headers: adminHeaders,
+      body: JSON.stringify({ work_hours_start: "00:00", work_hours_end: "24:00", collect_app_activity: true, collect_idle_status: true, collect_web_domains: false, collect_file_metadata: false }),
+    });
+    assert.equal(updated.response.status, 200);
+
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-POLICY", os_version: "Windows 11", agent_version: "0.1.14" }),
+    });
+    const headers = { authorization: `Bearer ${enrolled.body.device_token}` };
+    const uploaded = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ events: [
+        { event_id: "policy-browser", occurred_at: new Date().toISOString(), type: "app_session", app_name: "Chrome", process_name: "chrome.exe", source_kind: "browser_native", web_domain: "example.com", context_label: "文档：脱敏文件.pdf · 资源：文档", duration_seconds: 30 },
+        { event_id: "policy-idle", occurred_at: new Date().toISOString(), type: "idle", app_name: "Idle", process_name: "system", source_kind: "system_idle", duration_seconds: 30 },
+      ] }),
+    });
+    assert.equal(uploaded.response.status, 202);
+    assert.equal(uploaded.body.accepted, 2);
+
+    const events = await jsonFetch(`${base}/api/admin/events`, { headers: adminHeaders });
+    const browser = events.body.events.find((event) => event.event_id === "policy-browser");
+    assert.equal(browser.web_domain, null);
+    assert.equal(browser.source_kind, "desktop_app");
+    assert.equal(browser.context_label, null);
+
+    const appDisabled = await jsonFetch(`${base}/api/admin/policy`, {
+      method: "PUT",
+      headers: adminHeaders,
+      body: JSON.stringify({ work_hours_start: "00:00", work_hours_end: "24:00", collect_app_activity: false }),
+    });
+    assert.equal(appDisabled.response.status, 200);
+    const filteredApp = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ events: [{ event_id: "policy-app-off", occurred_at: new Date().toISOString(), type: "app_session", app_name: "VS Code", process_name: "Code.exe", duration_seconds: 30 }] }),
+    });
+    assert.equal(filteredApp.body.accepted, 0);
+    assert.equal(filteredApp.body.filtered, 1);
+
+    const idleDisabled = await jsonFetch(`${base}/api/admin/policy`, {
+      method: "PUT",
+      headers: adminHeaders,
+      body: JSON.stringify({ work_hours_start: "00:00", work_hours_end: "24:00", collect_idle_status: false }),
+    });
+    assert.equal(idleDisabled.response.status, 200);
+    const filteredIdle = await jsonFetch(`${base}/api/agent/events`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ events: [{ event_id: "policy-idle-off", occurred_at: new Date().toISOString(), type: "idle", app_name: "Idle", process_name: "system", duration_seconds: 30 }] }),
+    });
+    assert.equal(filteredIdle.body.accepted, 0);
+    assert.equal(filteredIdle.body.filtered, 1);
+  });
+});
+
 test("normalizes legacy browser events in the live diagnostics response", async () => {
   await withServer(async ({ base, app }) => {
     const adminHeaders = { "x-admin-token": "test-admin" };
@@ -1226,6 +1293,9 @@ test("supports JWT account login, account controls, and bearer authorization", a
     });
     assert.equal(created.response.status, 201);
     assert.equal(created.body.account.username, "owner-test");
+    assert.equal(created.body.account.id, created.body.account.account_id);
+    assert.equal(created.body.account.display_name, "测试老板");
+    assert.equal(created.body.account.disabled_at, null);
     assert.equal(created.body.account.password_hash, undefined);
 
     const wrongPassword = await jsonFetch(`${base}/api/auth/login`, {
@@ -1254,6 +1324,44 @@ test("supports JWT account login, account controls, and bearer authorization", a
     assert.equal(logout.response.status, 200);
     const stillValidUntilExpiry = await jsonFetch(`${base}/api/auth/me`, { headers: sessionHeaders });
     assert.equal(stillValidUntilExpiry.response.status, 200);
+  });
+});
+
+test("supports self-registration with owner approval and employee binding", async () => {
+  await withServer(async ({ base }) => {
+    const registration = await jsonFetch(`${base}/api/auth/register`, {
+      method: "POST",
+      body: JSON.stringify({ username: "pending-employee", password: "a-secure-test-password", display_name: "待审批员工", role: "employee" }),
+    });
+    assert.equal(registration.response.status, 202);
+    assert.equal(registration.body.account.approval_status, "pending");
+
+    const pendingLogin = await jsonFetch(`${base}/api/auth/login`, {
+      method: "POST",
+      body: JSON.stringify({ username: "pending-employee", password: "a-secure-test-password" }),
+    });
+    assert.equal(pendingLogin.response.status, 403);
+    assert.equal(pendingLogin.body.error.code, "account_pending_approval");
+
+    const accounts = await jsonFetch(`${base}/api/admin/accounts`, { headers: { "x-admin-token": "test-admin" } });
+    const pending = accounts.body.accounts.find((account) => account.username === "pending-employee");
+    assert.equal(pending.approval_status, "pending");
+    const approved = await jsonFetch(`${base}/api/admin/accounts/${pending.id}/approve`, {
+      method: "POST",
+      headers: { "x-admin-token": "test-admin" },
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    assert.equal(approved.response.status, 200);
+    assert.equal(approved.body.approval_status, "approved");
+    assert.equal(approved.body.employee_id, "employee-wei");
+
+    const login = await jsonFetch(`${base}/api/auth/login`, {
+      method: "POST",
+      body: JSON.stringify({ username: "pending-employee", password: "a-secure-test-password" }),
+    });
+    assert.equal(login.response.status, 200);
+    assert.equal(login.body.principal.role, "employee");
+    assert.equal(login.body.principal.employee_id, "employee-wei");
   });
 });
 

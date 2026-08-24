@@ -8,7 +8,7 @@ import { createAiService } from "./ai.mjs";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const defaultDbPath = resolve(moduleDir, "../data/agent.sqlite");
-export const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 9;
 const DEFAULT_ORGANIZATION_ID = /^[a-z0-9][a-z0-9_-]{2,63}$/.test(String(process.env.DEFAULT_ORGANIZATION_ID || "org_default"))
   ? String(process.env.DEFAULT_ORGANIZATION_ID || "org_default")
   : "org_default";
@@ -286,6 +286,22 @@ function accountPrincipal(account) {
     team: account.team || null,
     organization_id: account.organization_id || DEFAULT_ORGANIZATION_ID,
     mfa_enabled: Boolean(account.mfa_enabled),
+  };
+}
+
+function publicRegistrationAccount(account) {
+  return {
+    id: account.id,
+    account_id: account.id,
+    username: account.username,
+    display_name: account.display_name,
+    actor: account.display_name,
+    role: account.role,
+    employee_id: account.employee_id || null,
+    team: account.team || null,
+    organization_id: account.organization_id || DEFAULT_ORGANIZATION_ID,
+    approval_status: account.approval_status || "pending",
+    created_at: account.created_at,
   };
 }
 
@@ -630,6 +646,11 @@ function createSchema(db) {
   ensureColumn(db, "user_accounts", "mfa_enabled", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "user_accounts", "mfa_secret_enc", "TEXT");
   ensureColumn(db, "user_accounts", "mfa_recovery_codes_json", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "user_accounts", "approval_status", "TEXT NOT NULL DEFAULT 'approved'");
+  ensureColumn(db, "user_accounts", "approved_at", "TEXT");
+  ensureColumn(db, "user_accounts", "approved_by", "TEXT");
+  ensureColumn(db, "user_accounts", "rejected_at", "TEXT");
+  ensureColumn(db, "user_accounts", "rejection_reason", "TEXT");
   ensureColumn(db, "audit_logs", "previous_hash", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "audit_logs", "entry_hash", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "memory_summaries", "rollup_scope", "TEXT NOT NULL DEFAULT 'window'");
@@ -762,6 +783,14 @@ export function applySchemaMigrations(db, organizationDefault, now = isoNow()) {
   }
   if (!applied.has(8)) {
     insert.run(8, "jwt-password-invalidation", hash("schema:jwt-password-invalidation:v8"), now);
+  }
+  if (!applied.has(9)) {
+    ensureColumn(db, "user_accounts", "approval_status", "TEXT NOT NULL DEFAULT 'approved'");
+    ensureColumn(db, "user_accounts", "approved_at", "TEXT");
+    ensureColumn(db, "user_accounts", "approved_by", "TEXT");
+    ensureColumn(db, "user_accounts", "rejected_at", "TEXT");
+    ensureColumn(db, "user_accounts", "rejection_reason", "TEXT");
+    insert.run(9, "account-registration-approval", hash("schema:account-registration-approval:v9"), now);
   }
 }
 
@@ -1346,9 +1375,9 @@ function jwtPrincipal(db, payload) {
   const accountId = payload?.account_id || payload?.sub;
   if (!accountId) return null;
   const account = db.prepare(`
-    SELECT id, username, display_name, role, employee_id, team, organization_id, mfa_enabled, password_changed_at
+    SELECT id, username, display_name, role, employee_id, team, organization_id, mfa_enabled, password_changed_at, approval_status
     FROM user_accounts
-    WHERE id = ? AND disabled_at IS NULL
+    WHERE id = ? AND disabled_at IS NULL AND approval_status = 'approved'
   `).get(accountId);
   if (!account || (payload.organization_id && payload.organization_id !== account.organization_id)) return null;
   if ((account.password_changed_at || null) !== (payload.password_changed_at || null)) return null;
@@ -1705,13 +1734,19 @@ function eventExcludedByPolicy(event, policy) {
 }
 
 function eventPayloadByPolicy(event, policy) {
-  if (policy.collect_web_domains !== false) return event;
-  const sourceKind = sourceKindForEvent(event);
-  return {
-    ...event,
-    source_kind: sourceKind === "browser_native" || sourceKind === "browser_extension" ? "desktop_app" : sourceKind,
-    web_domain: null,
-  };
+  const payload = { ...event };
+  if (policy.collect_web_domains === false) {
+    const sourceKind = sourceKindForEvent(event);
+    payload.source_kind = sourceKind === "browser_native" || sourceKind === "browser_extension" ? "desktop_app" : sourceKind;
+    payload.web_domain = null;
+  }
+  if (policy.collect_file_metadata === false && typeof payload.context_label === "string") {
+    const labels = payload.context_label
+      .split(" · ")
+      .filter((label) => !label.startsWith("文档：") && !label.startsWith("资源："));
+    payload.context_label = labels.length ? labels.join(" · ") : null;
+  }
+  return payload;
 }
 
 function isSafeWebDomain(value) {
@@ -3262,7 +3297,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const password = typeof body.password === "string" ? body.password : "";
         const account = db.prepare(`
           SELECT id, username, display_name, role, employee_id, team, organization_id, password_hash,
-            mfa_enabled, password_changed_at
+            mfa_enabled, password_changed_at, approval_status, rejection_reason
           FROM user_accounts
           WHERE username = ? AND disabled_at IS NULL
         `).get(username);
@@ -3270,11 +3305,58 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           if (account) recordAudit(db, "login_failed", "system", account.id, "password authentication failed");
           return sendError(response, 401, "用户名或密码错误", "invalid_credentials");
         }
+        if (account.approval_status === "pending") {
+          recordAudit(db, "login_blocked_pending_approval", account.display_name, account.id, "account registration is awaiting approval", account.organization_id);
+          return sendError(response, 403, "账号申请已提交，等待老板审批后才能登录", "account_pending_approval");
+        }
+        if (account.approval_status === "rejected") {
+          recordAudit(db, "login_blocked_rejected_account", account.display_name, account.id, account.rejection_reason || "account registration was rejected", account.organization_id);
+          return sendError(response, 403, account.rejection_reason ? `账号申请未通过：${account.rejection_reason}` : "账号申请未通过，请联系管理员", "account_rejected");
+        }
         const now = isoNow();
         db.prepare("UPDATE user_accounts SET last_login_at = ?, updated_at = ? WHERE id = ?").run(now, now, account.id);
         const session = createJwtSession(account, sessionSecret);
         recordAudit(db, "login_succeeded", account.display_name, account.id, "password login; jwt issued");
         return sendJson(response, 200, session);
+      }
+
+      if (method === "POST" && url.pathname === "/api/auth/register") {
+        const body = await readJson(request);
+        const username = normalizeUsername(body.username);
+        const password = typeof body.password === "string" ? body.password : "";
+        const displayName = typeof body.display_name === "string" ? body.display_name.trim().slice(0, 120) : "";
+        const role = ["manager", "employee"].includes(body.role) ? body.role : null;
+        const team = typeof body.team === "string" ? body.team.trim().slice(0, 120) : "";
+        if (!/^[a-z0-9][a-z0-9._-]{2,63}$/.test(username)) return sendError(response, 400, "用户名需为3-64位小写字母、数字、点、下划线或短横线", "invalid_username");
+        if (password.length < 12 || password.length > 200) return sendError(response, 400, "密码至少需要12位", "invalid_password");
+        if (!displayName) return sendError(response, 400, "显示名称不能为空", "invalid_display_name");
+        if (!role) return sendError(response, 400, "只能申请高管或员工角色", "invalid_role");
+        if (role === "manager" && !team) return sendError(response, 400, "高管申请需要填写管理团队", "invalid_team");
+        if (db.prepare("SELECT id FROM user_accounts WHERE username = ?").get(username)) return sendError(response, 409, "用户名已存在", "username_exists");
+
+        const now = isoNow();
+        const account = {
+          id: newId("account"),
+          username,
+          display_name: displayName,
+          role,
+          employee_id: null,
+          team: team || null,
+          organization_id: DEFAULT_ORGANIZATION_ID,
+          password_hash: hashPassword(password),
+          created_at: now,
+          approval_status: "pending",
+        };
+        db.prepare(`
+          INSERT INTO user_accounts
+            (id, username, display_name, role, employee_id, team, organization_id, password_hash, created_at, updated_at, password_changed_at, approval_status)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(account.id, account.username, account.display_name, account.role, account.employee_id, account.team, account.organization_id, account.password_hash, now, now, now, account.approval_status);
+        recordAudit(db, "account_registration_requested", account.display_name, account.id, `username=${username}; role=${role}`, account.organization_id);
+        return sendJson(response, 202, {
+          account: publicRegistrationAccount(account),
+          message: "注册申请已提交，审批通过后才能登录",
+        });
       }
 
       if (method === "GET" && url.pathname === "/api/auth/me") {
@@ -3402,7 +3484,8 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const principal = requireAdmin(request);
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin account permission required", "forbidden");
         const accounts = db.prepare(`
-          SELECT id, username, display_name, role, employee_id, team, organization_id, created_at, updated_at, last_login_at, disabled_at
+          SELECT id, username, display_name, role, employee_id, team, organization_id, created_at, updated_at, last_login_at, disabled_at,
+            approval_status, approved_at, approved_by, rejected_at, rejection_reason
           FROM user_accounts
           WHERE organization_id = ?
           ORDER BY created_at ASC
@@ -3449,14 +3532,89 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           created_at: now,
           updated_at: now,
           password_changed_at: now,
+          approval_status: "approved",
+          approved_at: now,
+          approved_by: principal.account_id || principal.actor || "admin",
         };
         db.prepare(`
           INSERT INTO user_accounts
-            (id, username, display_name, role, employee_id, team, organization_id, password_hash, created_at, updated_at, password_changed_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(account.id, account.username, account.display_name, account.role, account.employee_id, account.team, account.organization_id, account.password_hash, account.created_at, account.updated_at, account.password_changed_at);
+            (id, username, display_name, role, employee_id, team, organization_id, password_hash, created_at, updated_at, password_changed_at, approval_status, approved_at, approved_by)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(account.id, account.username, account.display_name, account.role, account.employee_id, account.team, account.organization_id, account.password_hash, account.created_at, account.updated_at, account.password_changed_at, account.approval_status, account.approved_at, account.approved_by);
         recordAudit(db, "account_created", principal.actor || "admin", account.id, `username=${username}; role=${role}`, account.organization_id);
-        return sendJson(response, 201, { account: accountPrincipal(account) });
+        return sendJson(response, 201, {
+          account: {
+            id: account.id,
+            account_id: account.id,
+            username: account.username,
+            display_name: account.display_name,
+            actor: account.display_name,
+            role: account.role,
+            employee_id: account.employee_id,
+            team: account.team,
+            organization_id: account.organization_id,
+            created_at: account.created_at,
+            updated_at: account.updated_at,
+            last_login_at: null,
+            disabled_at: null,
+            approval_status: account.approval_status,
+            approved_at: account.approved_at,
+            approved_by: account.approved_by,
+            rejected_at: null,
+            rejection_reason: null,
+          },
+        });
+      }
+
+      const accountApproval = url.pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/(approve|reject)$/);
+      if (accountApproval && method === "POST") {
+        const principal = requireAdmin(request);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "只有老板可以审批账号", "forbidden");
+        const accountId = decodeURIComponent(accountApproval[1]);
+        const action = accountApproval[2];
+        const account = db.prepare(`
+          SELECT id, username, display_name, role, employee_id, team, organization_id, approval_status
+          FROM user_accounts
+          WHERE id = ? AND organization_id = ?
+        `).get(accountId, principal.organization_id || DEFAULT_ORGANIZATION_ID);
+        if (!account) return sendError(response, 404, "账号不存在", "account_not_found");
+        if (account.approval_status !== "pending") return sendError(response, 409, "只有待审批账号可以处理", "account_not_pending");
+
+        const body = await readJson(request);
+        const now = isoNow();
+        if (action === "approve") {
+          let employeeId = account.employee_id || null;
+          let team = account.team || null;
+          if (account.role === "employee") {
+            const requestedEmployeeId = typeof body.employee_id === "string" ? body.employee_id.trim() : "";
+            const employee = db.prepare("SELECT id, team FROM employees WHERE id = ? AND organization_id = ?")
+              .get(requestedEmployeeId || employeeId, principal.organization_id || DEFAULT_ORGANIZATION_ID);
+            if (!employee) return sendError(response, 400, "审批员工账号时必须绑定有效员工", "employee_binding_required");
+            employeeId = employee.id;
+            team = employee.team;
+          } else if (!team) {
+            team = typeof body.team === "string" ? body.team.trim().slice(0, 120) : "";
+            if (!team) return sendError(response, 400, "审批高管账号时必须填写管理团队", "invalid_team");
+          }
+          db.prepare(`
+            UPDATE user_accounts
+            SET employee_id = ?, team = ?, approval_status = 'approved', approved_at = ?, approved_by = ?,
+              rejected_at = NULL, rejection_reason = NULL, updated_at = ?
+            WHERE id = ?
+          `).run(employeeId, team, now, principal.account_id || principal.actor || "admin", now, account.id);
+          recordAudit(db, "account_registration_approved", principal.actor || "admin", account.id, `username=${account.username}; role=${account.role}`, account.organization_id);
+          return sendJson(response, 200, { ok: true, approval_status: "approved", employee_id: employeeId, team });
+        }
+
+        const reason = typeof body.reason === "string" ? body.reason.trim().slice(0, 240) : "管理员未通过该注册申请";
+        db.prepare(`
+          UPDATE user_accounts
+          SET approval_status = 'rejected', rejected_at = ?, rejection_reason = ?, approved_at = NULL, approved_by = NULL, updated_at = ?
+          WHERE id = ?
+        `).run(now, reason, now, account.id);
+        db.prepare("UPDATE admin_sessions SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL").run(now, account.id);
+        recordAudit(db, "account_registration_rejected", principal.actor || "admin", account.id, `username=${account.username}; reason=${reason}`, account.organization_id);
+        return sendJson(response, 200, { ok: true, approval_status: "rejected", rejection_reason: reason });
       }
 
       const accountAction = url.pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/(disable|enable|password)$/);
