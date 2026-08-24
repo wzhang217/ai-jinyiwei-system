@@ -251,6 +251,8 @@ curl -X POST http://localhost:8787/api/admin/sessions \
 
 前端默认连接真实服务端。只有在 `app/.env` 明确设置 `VITE_DEMO_MODE=true` 时才启用演示数据；真实环境只配置 `VITE_AGENT_API_BASE_URL`，用户在登录页输入企业账号密码。
 
+客户交付模板位于 `docs/commercial/CUSTOMER_HANDOFF_TEMPLATE.md`、`LICENSE_BILLING_CONTRACT_TEMPLATE.md` 和 `SLA_SUPPORT_TEMPLATE.md`；交付方应为每个组织单独填写并通过安全渠道交接。
+
 ## 生成注册码
 
 ```bash

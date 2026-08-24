@@ -20,6 +20,7 @@ sudo bash deploy/install-systemd.sh
 - `AGENT_CORS_ORIGIN`：管理后台的 HTTPS 来源；
 - `AGENT_DB_PATH`、`AGENT_BACKUP_DIR`：绝对路径；
 - `HEALTH_ALERT_WEBHOOK_URL`：可选，健康检查失败通知地址。
+- `AI_ALERT_WEBHOOK_URL`：可选，AI 模型失败、额度阻断和额度预警通知地址；请求体只含状态、模型、操作、费用和额度统计，不含 Prompt 或活动内容。
 
 安装器会创建受限的 `jinyiwei` 系统用户，复制 `src/`、`scripts/` 和 Node 依赖，安装服务与定时器，并启用开机自启动。它不会覆盖已经存在的环境文件和数据库。
 
@@ -34,6 +35,8 @@ sudo -u jinyiwei bash -lc 'cd /opt/ai-jinyiwei/server && npm run diagnostics'
 ```
 
 健康检查失败会触发 `ai-jinyiwei-agent-health-alert.service`。没有配置 webhook 时，故障仍会写入 journald；配置 webhook 后会按 `HEALTH_ALERT_COOLDOWN_SECONDS` 抑制重复通知。
+
+AI 用量告警由服务进程按组织和告警类型抑制重复通知，额度比例由 `AI_BUDGET_ALERT_RATIO` 和 `AI_REQUEST_ALERT_RATIO` 控制。正式交付前应使用企业告警系统的 HTTPS 地址，并在测试环境验证失败、阻断和恢复三种状态。
 
 ## HTTPS 反向代理
 

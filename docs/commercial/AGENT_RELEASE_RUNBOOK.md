@@ -57,6 +57,19 @@ Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @('/i', .\ai-jinyiwei-
 
 回滚后确认注册状态、队列和心跳。若新版本改变了本地数据库结构，必须使用该版本明确支持的迁移路径；不要手工复制或删除 SQLite 文件。
 
+### 可执行升级脚本
+
+管理员可以在 PowerShell 中使用仓库内的 `agent/scripts/Upgrade-Agent.ps1`。脚本要求 MSI 具有有效 Authenticode 签名；指定 manifest 中的 SHA-256 可在安装前阻止文件被替换：
+
+```powershell
+.\Upgrade-Agent.ps1 `
+  -MsiPath .\ai-jinyiwei-agent_0.1.15_x64_en-US.msi `
+  -ExpectedSha256 "<manifest 中的 SHA-256>" `
+  -RollbackMsiPath .\ai-jinyiwei-agent_0.1.14_x64_en-US.msi
+```
+
+只校验而不安装时加 `-VerifyOnly`。脚本不负责从互联网下载 MSI；企业软件分发系统应负责下载、审批和投放已签名产物。
+
 ## 6. 员工离职、设备转交与卸载
 
 卸载不是删除服务端历史的替代操作，按以下顺序执行：
@@ -76,6 +89,6 @@ Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @('/x', $entry.PSChild
 
 ## 7. 目前的发布边界
 
-- 当前发布方式是 GitHub Release + 签名 MSI，**尚未启用静默自动更新**；客户环境需要通过企业软件分发或管理员手动执行升级。
+- 当前发布方式是 GitHub Release + 签名 MSI；`release-manifest.json` 还会提供正式 tag 的下载地址，可交给企业软件分发系统作为升级目录。Agent **尚未启用静默自动更新**，客户环境需要通过企业软件分发或管理员手动执行升级。
 - MSI 卸载默认不主动删除活动数据，避免误删未上传队列；清理动作必须先由 Agent 界面显式确认。
 - 生产交付前必须在干净 Windows 10/11 完成首次安装、升级、回滚、卸载和断网恢复，并把结果附在 `RELEASE_ACCEPTANCE_CHECKLIST.md` 中。

@@ -120,16 +120,22 @@ jobs:
           $package = Get-Content "package.json" | ConvertFrom-Json
           $artifacts = Get-ChildItem "src-tauri\target\release\bundle\msi\*.msi" | ForEach-Object {
             $signature = Get-AuthenticodeSignature $_.FullName
+            $downloadUrl = $null
+            if ($env:GITHUB_REF -like 'refs/tags/v*') {
+              $downloadUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$($_.Name)"
+            }
             @{
               file = $_.Name
               sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
               signature_status = $signature.Status.ToString()
               signer = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null }
+              download_url = $downloadUrl
             }
           }
           @{
             product = "AI锦衣卫 Agent"
             agent_version = $package.version
+            release_channel = if ($env:GITHUB_REF -like 'refs/tags/v*') { "stable" } else { "build" }
             commit = $env:GITHUB_SHA
             generated_at_utc = (Get-Date).ToUniversalTime().ToString("o")
             artifacts = @($artifacts)

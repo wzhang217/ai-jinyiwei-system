@@ -120,6 +120,7 @@ const HIDDEN_AGENT_PROCESSES = new Set([
 
 const isoNow = () => new Date().toISOString();
 const SHANGHAI_OFFSET_MS = 8 * 3600_000;
+const aiAlertState = new Map();
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const newId = (prefix) => `${prefix}_${randomBytes(12).toString("hex")}`;
 const newToken = () => randomBytes(32).toString("base64url");
@@ -1460,13 +1461,54 @@ function verifyAuditChain(db, organizationId = DEFAULT_ORGANIZATION_ID) {
   };
 }
 
-function recordAiUsage(db, usage = {}) {
+async function sendAiAlert(payload, logger = console) {
+  const webhookUrl = String(process.env.AI_ALERT_WEBHOOK_URL || "").trim();
+  if (!webhookUrl || typeof globalThis.fetch !== "function") return;
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(webhookUrl);
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) return;
+  } catch {
+    return;
+  }
+  const alertKey = `${payload.organization_id}:${payload.alert_type}`;
+  const cooldownMs = Math.max(60, Number(process.env.AI_ALERT_COOLDOWN_SECONDS) || 1800) * 1000;
+  const lastSent = aiAlertState.get(alertKey) || 0;
+  if (Date.now() - lastSent < cooldownMs) return;
+  aiAlertState.set(alertKey, Date.now());
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(webhookUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          service: "ai-jinyiwei-agent-server",
+          event: "ai_usage_alert",
+          occurred_at: isoNow(),
+          ...payload,
+        }),
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch (error) {
+    logger.warn?.(`AI alert webhook failed: ${error.message}`);
+  }
+}
+
+function recordAiUsage(db, usage = {}, logger = console) {
   const requestedOrganizationId = organizationIdOrDefault(usage.organization_id);
   const organizationId = db.prepare("SELECT id FROM organizations WHERE id = ?").get(requestedOrganizationId)?.id || DEFAULT_ORGANIZATION_ID;
   const operation = ["memory_summary", "history_answer", "unknown"].includes(usage.operation) ? usage.operation : "unknown";
   const status = String(usage.status || "failed").slice(0, 40);
   const finiteInteger = (value) => Number.isFinite(Number(value)) && Number(value) >= 0 ? Math.round(Number(value)) : null;
   const finiteMoney = Number(usage.estimated_cost_usd);
+  const estimatedCostUsd = Number.isFinite(finiteMoney) && finiteMoney >= 0 ? finiteMoney : 0;
+  const createdAt = isoNow();
   db.prepare(`
     INSERT INTO ai_usage
       (id, organization_id, operation, model, status, http_status, latency_ms,
@@ -1484,12 +1526,43 @@ function recordAiUsage(db, usage = {}) {
     finiteInteger(usage.input_tokens),
     finiteInteger(usage.output_tokens),
     finiteInteger(usage.total_tokens),
-    Number.isFinite(finiteMoney) && finiteMoney >= 0 ? finiteMoney : 0,
+    estimatedCostUsd,
     String(usage.prompt_version || "").slice(0, 120),
     usage.error_code ? String(usage.error_code).slice(0, 80) : null,
     usage.error_message ? String(usage.error_message).slice(0, 300) : null,
-    isoNow(),
+    createdAt,
   );
+  const alertPayload = {
+    organization_id: organizationId,
+    operation,
+    model: String(usage.model || "unknown").slice(0, 120),
+    status,
+    error_code: usage.error_code ? String(usage.error_code).slice(0, 80) : null,
+    estimated_cost_usd: estimatedCostUsd,
+  };
+  if (status !== "succeeded") {
+    void sendAiAlert({ ...alertPayload, alert_type: status === "quota_blocked" ? "ai_quota_blocked" : "ai_provider_failure" }, logger);
+    return;
+  }
+  const limits = aiUsageLimits(db, organizationId);
+  const usageToday = db.prepare(`
+    SELECT COUNT(*) AS calls, COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd
+    FROM ai_usage
+    WHERE organization_id = ? AND created_at >= ?
+  `).get(organizationId, currentShanghaiDayStartIso());
+  const budgetRatio = Math.min(Math.max(Number(process.env.AI_BUDGET_ALERT_RATIO) || 0.8, 0.5), 0.99);
+  const requestRatio = Math.min(Math.max(Number(process.env.AI_REQUEST_ALERT_RATIO) || 0.8, 0.5), 0.99);
+  if ((limits.daily_budget_usd && Number(usageToday.estimated_cost_usd || 0) >= limits.daily_budget_usd * budgetRatio)
+    || (limits.daily_request_limit && Number(usageToday.calls || 0) >= limits.daily_request_limit * requestRatio)) {
+    void sendAiAlert({
+      ...alertPayload,
+      alert_type: "ai_quota_warning",
+      daily_calls: Number(usageToday.calls || 0),
+      daily_cost_usd: Number(usageToday.estimated_cost_usd || 0),
+      daily_request_limit: limits.daily_request_limit,
+      daily_budget_usd: limits.daily_budget_usd,
+    }, logger);
+  }
 }
 
 function refreshStaleDeviceStatuses(db) {
@@ -4368,7 +4441,7 @@ export function createAgentServer({ dbPath = process.env.AGENT_DB_PATH || defaul
   mkdirSync(dirname(resolve(dbPath)), { recursive: true });
   const db = new DatabaseSync(resolve(dbPath));
   createSchema(db);
-  if (typeof ai.setUsageReporter === "function") ai.setUsageReporter((usage) => recordAiUsage(db, usage));
+  if (typeof ai.setUsageReporter === "function") ai.setUsageReporter((usage) => recordAiUsage(db, usage, logger));
   if (typeof ai.setRequestGuard === "function") ai.setRequestGuard(({ organization_id }) => enforceAiUsageLimit(db, { organization_id }));
   recoverRunningMemoryJobs(db);
   const server = createHttpServer(createRequestHandler({ db, adminToken, sessionSecret, ai, logger }));

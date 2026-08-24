@@ -61,4 +61,4 @@ GitHub 仓库建议配置：
 
 升级使用新版本 MSI 直接安装，保留现有注册信息和本地队列；安装完成后检查托盘版本、心跳和队列是否正常。回滚时停止 Agent，安装上一个已签名 MSI，再启动并检查版本、注册状态和补传结果。不要通过删除 SQLite 文件来“回滚”，否则会丢失尚未上传的活动队列。
 
-正式交付的升级、卸载和回滚步骤见 `../docs/commercial/AGENT_RELEASE_RUNBOOK.md`；每个版本同时保存 GitHub Actions 生成的 `release-manifest.json`，其中包含 MSI SHA-256 和签名状态。
+正式交付的升级、卸载和回滚步骤见 `../docs/commercial/AGENT_RELEASE_RUNBOOK.md`；每个版本同时保存 GitHub Actions 生成的 `release-manifest.json`，其中包含 MSI SHA-256 和签名状态。Windows 管理员也可以使用 `scripts/Upgrade-Agent.ps1`，它会先校验 SHA-256 和 Authenticode 签名，再静默升级；传入上一版本的 `-RollbackMsiPath` 时，升级失败会自动尝试回滚。脚本不会删除 Agent 的注册信息、Windows 凭据或本地队列。
