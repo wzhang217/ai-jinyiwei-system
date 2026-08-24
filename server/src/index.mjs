@@ -8,7 +8,7 @@ import { createAiService } from "./ai.mjs";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const defaultDbPath = resolve(moduleDir, "../data/agent.sqlite");
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 6;
 const DEFAULT_ORGANIZATION_ID = /^[a-z0-9][a-z0-9_-]{2,63}$/.test(String(process.env.DEFAULT_ORGANIZATION_ID || "org_default"))
   ? String(process.env.DEFAULT_ORGANIZATION_ID || "org_default")
   : "org_default";
@@ -52,6 +52,8 @@ const defaultOrganizationSettings = {
   ai_model: "qwen3.7-plus",
   ai_summary_interval_seconds: "600",
   ai_budget_per_minute: "30",
+  ai_daily_request_limit: "0",
+  ai_daily_budget_usd: "0",
   privacy_policy_version: "2026-08-24.v1",
   privacy_policy_title: "AI锦衣卫员工活动数据采集说明",
   privacy_policy_notice: "本系统仅采集前台应用活动、空闲状态、有限的脱敏工作标识和网站域名，用于生成个人与团队工作上下文。系统不采集键盘内容、剪贴板、屏幕、聊天正文、文件正文、原始窗口标题或完整网页内容。数据断网时保存在本机队列，恢复网络后按策略同步。",
@@ -495,6 +497,30 @@ function createSchema(db) {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS ai_usage (
+      id TEXT PRIMARY KEY,
+      organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      operation TEXT NOT NULL CHECK (operation IN ('memory_summary', 'history_answer', 'unknown')),
+      model TEXT NOT NULL,
+      status TEXT NOT NULL,
+      http_status INTEGER,
+      latency_ms INTEGER NOT NULL DEFAULT 0,
+      input_tokens INTEGER,
+      output_tokens INTEGER,
+      total_tokens INTEGER,
+      estimated_cost_usd REAL NOT NULL DEFAULT 0,
+      prompt_version TEXT NOT NULL DEFAULT '',
+      error_code TEXT,
+      error_message TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_org_created_at
+      ON ai_usage (organization_id, created_at DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_ai_usage_org_operation_created_at
+      ON ai_usage (organization_id, operation, created_at DESC);
+
     CREATE TABLE IF NOT EXISTS organization_settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL,
@@ -721,6 +747,9 @@ function applySchemaMigrations(db, organizationDefault, now = isoNow()) {
   if (!applied.has(5)) {
     insert.run(5, "account-mfa-secrets", hash("schema:account-mfa-secrets:v5"), now);
   }
+  if (!applied.has(6)) {
+    insert.run(6, "ai-usage-metrics-and-quotas", hash("schema:ai-usage-metrics-and-quotas:v6"), now);
+  }
 }
 
 function purgeInvalidIdleSummaries(db) {
@@ -843,6 +872,41 @@ function getOrganizationSettings(db, organizationId = DEFAULT_ORGANIZATION_ID) {
   const scopedOrganizationId = organizationIdOrDefault(organizationId);
   return db.prepare("SELECT key, value FROM scoped_organization_settings WHERE organization_id = ? ORDER BY key").all(scopedOrganizationId)
     .reduce((settings, row) => ({ ...settings, [row.key]: row.value }), {});
+}
+
+function aiUsageLimits(db, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const settings = getOrganizationSettings(db, organizationId);
+  const requestLimit = Math.max(0, Math.floor(Number(settings.ai_daily_request_limit) || 0));
+  const budgetUsd = Math.max(0, Number(settings.ai_daily_budget_usd) || 0);
+  return {
+    daily_request_limit: requestLimit,
+    daily_budget_usd: Number.isFinite(budgetUsd) ? budgetUsd : 0,
+  };
+}
+
+function currentShanghaiDayStartIso() {
+  return new Date(shanghaiDayStart()).toISOString();
+}
+
+function enforceAiUsageLimit(db, { organization_id: organizationId } = {}) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  const limits = aiUsageLimits(db, scopedOrganizationId);
+  if (!limits.daily_request_limit && !limits.daily_budget_usd) return;
+  const usage = db.prepare(`
+    SELECT COUNT(*) AS calls, COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd
+    FROM ai_usage
+    WHERE organization_id = ? AND created_at >= ?
+  `).get(scopedOrganizationId, currentShanghaiDayStartIso());
+  if (limits.daily_request_limit && Number(usage.calls || 0) >= limits.daily_request_limit) {
+    const error = new Error("AI daily request limit reached");
+    error.code = "ai_daily_request_limit";
+    throw error;
+  }
+  if (limits.daily_budget_usd && Number(usage.estimated_cost_usd || 0) >= limits.daily_budget_usd) {
+    const error = new Error("AI daily budget reached");
+    error.code = "ai_daily_budget_exceeded";
+    throw error;
+  }
 }
 
 function getPrivacyPolicy(db, organizationId = DEFAULT_ORGANIZATION_ID) {
@@ -1350,6 +1414,38 @@ function recordAudit(db, action, actor, target, detail = "", organizationId = nu
   ).run(newId("audit"), action, actor, target, detail, organizationId || organizationForAuditTarget(db, target), isoNow());
 }
 
+function recordAiUsage(db, usage = {}) {
+  const requestedOrganizationId = organizationIdOrDefault(usage.organization_id);
+  const organizationId = db.prepare("SELECT id FROM organizations WHERE id = ?").get(requestedOrganizationId)?.id || DEFAULT_ORGANIZATION_ID;
+  const operation = ["memory_summary", "history_answer", "unknown"].includes(usage.operation) ? usage.operation : "unknown";
+  const status = String(usage.status || "failed").slice(0, 40);
+  const finiteInteger = (value) => Number.isFinite(Number(value)) && Number(value) >= 0 ? Math.round(Number(value)) : null;
+  const finiteMoney = Number(usage.estimated_cost_usd);
+  db.prepare(`
+    INSERT INTO ai_usage
+      (id, organization_id, operation, model, status, http_status, latency_ms,
+       input_tokens, output_tokens, total_tokens, estimated_cost_usd,
+       prompt_version, error_code, error_message, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    newId("ai_usage"),
+    organizationId,
+    operation,
+    String(usage.model || "unknown").slice(0, 120),
+    status,
+    finiteInteger(usage.http_status),
+    finiteInteger(usage.latency_ms) || 0,
+    finiteInteger(usage.input_tokens),
+    finiteInteger(usage.output_tokens),
+    finiteInteger(usage.total_tokens),
+    Number.isFinite(finiteMoney) && finiteMoney >= 0 ? finiteMoney : 0,
+    String(usage.prompt_version || "").slice(0, 120),
+    usage.error_code ? String(usage.error_code).slice(0, 80) : null,
+    usage.error_message ? String(usage.error_message).slice(0, 300) : null,
+    isoNow(),
+  );
+}
+
 function refreshStaleDeviceStatuses(db) {
   const devices = db.prepare(`
     SELECT d.id, d.status, d.last_heartbeat_at, e.organization_id
@@ -1742,7 +1838,7 @@ function historyEventRows(db, deviceId, principal = null, team = null) {
     conditions.push("e.team = ?");
     params.push(team);
   }
-  const query = `SELECT ev.*, d.employee_id, e.name AS employee_name, e.team AS employee_team, d.hostname
+  const query = `SELECT ev.*, d.employee_id, e.name AS employee_name, e.team AS employee_team, e.organization_id, d.hostname
     FROM events ev
     JOIN devices d ON d.id = ev.device_id
     JOIN employees e ON e.id = d.employee_id
@@ -1923,6 +2019,7 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
         employeeId: row.employee_id,
         employeeName: row.employee_name,
         employeeTeam: row.employee_team,
+        organizationId: row.organization_id,
         hostname: row.hostname,
         isIdle,
         startMs,
@@ -2041,6 +2138,7 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
       return {
         id: `history_${episode.deviceId}_${episode.startMs}`,
         user_id: episode.employeeId,
+        organization_id: episode.organizationId,
         employee_name: episode.employeeName,
         employee_team: episode.employeeTeam,
         device_id: episode.deviceId,
@@ -2101,6 +2199,7 @@ function buildHistoryRecords(db, { deviceId = null, limit = 200, principal = nul
 function aiInputForRecord(record) {
   return {
     ...record,
+    organization_id: record.organization_id || null,
     summary: record.summary,
     prior_context: record.prior_context,
     important_context: record.important_context || record.non_obvious,
@@ -3526,6 +3625,71 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         return sendJson(response, 200, getAdminSettings(db, organizationId));
       }
 
+      if (method === "GET" && url.pathname === "/api/admin/ai/usage") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal || principal.role === "employee") return sendError(response, 403, "AI usage is not available for employee accounts", "forbidden");
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        const requestedDays = Number(url.searchParams.get("days") || 7);
+        const days = Math.min(Math.max(Number.isFinite(requestedDays) ? Math.floor(requestedDays) : 7, 1), 90);
+        const from = new Date(Date.now() - days * 24 * 3600_000).toISOString();
+        const totals = db.prepare(`
+          SELECT COUNT(*) AS calls,
+            SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
+            SUM(CASE WHEN status NOT IN ('succeeded') THEN 1 ELSE 0 END) AS failed,
+            COALESCE(SUM(input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS output_tokens,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens,
+            COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd,
+            COALESCE(AVG(latency_ms), 0) AS average_latency_ms
+          FROM ai_usage
+          WHERE organization_id = ? AND created_at >= ?
+        `).get(organizationId, from);
+        const byOperation = db.prepare(`
+          SELECT operation, COUNT(*) AS calls,
+            SUM(CASE WHEN status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens,
+            COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd
+          FROM ai_usage
+          WHERE organization_id = ? AND created_at >= ?
+          GROUP BY operation ORDER BY calls DESC
+        `).all(organizationId, from);
+        const byModel = db.prepare(`
+          SELECT model, COUNT(*) AS calls,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens,
+            COALESCE(SUM(estimated_cost_usd), 0) AS estimated_cost_usd
+          FROM ai_usage
+          WHERE organization_id = ? AND created_at >= ?
+          GROUP BY model ORDER BY calls DESC
+        `).all(organizationId, from);
+        const recent = db.prepare(`
+          SELECT operation, model, status, http_status, latency_ms,
+            input_tokens, output_tokens, total_tokens, estimated_cost_usd,
+            prompt_version, error_code, created_at
+          FROM ai_usage
+          WHERE organization_id = ? AND created_at >= ?
+          ORDER BY created_at DESC LIMIT 100
+        `).all(organizationId, from);
+        return sendJson(response, 200, {
+          window_days: days,
+          from,
+          to: isoNow(),
+          limits: aiUsageLimits(db, organizationId),
+          totals: {
+            calls: Number(totals?.calls || 0),
+            succeeded: Number(totals?.succeeded || 0),
+            failed: Number(totals?.failed || 0),
+            input_tokens: Number(totals?.input_tokens || 0),
+            output_tokens: Number(totals?.output_tokens || 0),
+            total_tokens: Number(totals?.total_tokens || 0),
+            estimated_cost_usd: Number(totals?.estimated_cost_usd || 0),
+            average_latency_ms: Math.round(Number(totals?.average_latency_ms || 0)),
+          },
+          by_operation: byOperation,
+          by_model: byModel,
+          recent,
+        });
+      }
+
       if (method === "PUT" && url.pathname === "/api/admin/settings/organization") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
@@ -3808,7 +3972,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const timeScopedRecords = filterHistoryRecordsByTime(records, queryTimeRange);
         const retrieval = searchHistoryRecords(body.question.trim(), timeScopedRecords);
         const rankedRecords = retrieval.records;
-        const answer = await ai.answerHistory({ question: body.question.trim(), records: rankedRecords, timeRange: queryTimeRange });
+        const answer = await ai.answerHistory({ question: body.question.trim(), records: rankedRecords, timeRange: queryTimeRange, organization_id: principal.organization_id || DEFAULT_ORGANIZATION_ID });
         const evidenceIds = Array.isArray(answer.evidence_ids) ? answer.evidence_ids : [];
         const evidence = evidenceIds.map((id) => rankedRecords.find((record) => record.id === id)).filter(Boolean);
         const selectedEvidence = evidence.length ? evidence : rankedRecords.slice(0, 3);
@@ -4183,6 +4347,8 @@ export function createAgentServer({ dbPath = process.env.AGENT_DB_PATH || defaul
   mkdirSync(dirname(resolve(dbPath)), { recursive: true });
   const db = new DatabaseSync(resolve(dbPath));
   createSchema(db);
+  if (typeof ai.setUsageReporter === "function") ai.setUsageReporter((usage) => recordAiUsage(db, usage));
+  if (typeof ai.setRequestGuard === "function") ai.setRequestGuard(({ organization_id }) => enforceAiUsageLimit(db, { organization_id }));
   recoverRunningMemoryJobs(db);
   const server = createHttpServer(createRequestHandler({ db, adminToken, sessionSecret, ai, logger }));
   let memoryWarmupRunning = false;

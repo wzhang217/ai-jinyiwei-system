@@ -204,6 +204,10 @@ export async function getLiveAdminSettings() {
   return request("/api/admin/settings");
 }
 
+export async function getLiveAiUsage(days = 7) {
+  return request(`/api/admin/ai/usage?days=${encodeURIComponent(days)}`);
+}
+
 export async function updateOrganizationSettings(settings) {
   const body = await request("/api/admin/settings/organization", {
     method: "PUT",

@@ -63,6 +63,9 @@ AI_MAX_REQUESTS_PER_MINUTE=30
 AI_MAX_INPUT_RECORDS=200
 AI_REQUEST_TIMEOUT_MS=60000
 AI_ENABLE_THINKING=false
+# Optional provider pricing in USD per 1M tokens; leave 0 when unknown.
+AI_INPUT_COST_PER_MILLION_TOKENS=0
+AI_OUTPUT_COST_PER_MILLION_TOKENS=0
 AI_SUMMARY_WINDOW_SECONDS=600
 AI_ACTIVE_GRACE_SECONDS=45
 AI_GENERATION_BATCH_SIZE=1
@@ -125,6 +128,8 @@ History Skill 的召回使用 `semantic-metadata-v1`：先按时间和权限过�
 历史记录同时提供 Leaf、连续窗口、小时、每日、个人每周和团队周 Rollup Summary。模型暂时不可用时会先返回规则兜底摘要，并写入 `memory_generation_jobs`，后台会按退避策略重试，最多 5 次。`AI_MAX_REQUESTS_PER_MINUTE` 控制单个服务进程的模型调用预算，超过后暂时使用规则摘要并进入重试队列。模型请求默认 60 秒超时，并默认关闭 qwen3.7-plus 的思考模式以适配短摘要和实时问答；超时同样会进入规则兜底和重试流程。需要保留思考过程时可设置 `AI_ENABLE_THINKING=true`，但应同步提高 `AI_REQUEST_TIMEOUT_MS`。
 
 AI 摘要和活动采集采用不同频率：Agent 仍按采集策略实时上报活动区间，但服务端只对已经闭合且达到 `AI_SUMMARY_WINDOW_SECONDS`（默认 10 分钟）的 Leaf 窗口生成一次 AI 摘要；当前仍在增长的窗口显示规则摘要并标记为 `window_pending`，不会因为每次 15 秒活动更新、心跳或前端刷新而重新调用模型。小时、每日、每周等 Rollup 由已生成的 Leaf 和规则聚合得到，不额外触发模型调用，避免一次活动同时派生多次 AI 请求；失败的 Leaf 任务仍按原有退避策略重试。`AI_ACTIVE_GRACE_SECONDS`（默认 45 秒）用于判断最近活动是否仍在增长。后台默认每 15 秒最多处理 1 个生成任务，`AI_GENERATION_BATCH_SIZE` 可按服务端额度调整，避免历史补偿队列瞬间打满模型请求。
+
+服务端会把每次实际模型调用的操作类型、状态、HTTP 状态、耗时、供应商返回的 Token（若有）、提示词版本和费用估算写入 `ai_usage`，不保存 Prompt、API Key 或活动正文。后台“设置 → AI 设置”可配置每日请求上限和每日费用上限（填 `0` 表示不限），并查看最近 7 天的调用、Token、延迟和失败情况；也可通过 `GET /api/admin/ai/usage?days=7` 读取同一统计。费用估算依赖 `AI_INPUT_COST_PER_MILLION_TOKENS` 和 `AI_OUTPUT_COST_PER_MILLION_TOKENS`，价格未知时保持 `0`。达到额度后，新的模型请求会被拦截并保留规则摘要，避免继续产生供应商费用。
 
 管理员可以先预览再执行数据留存删除，删除活动事件、Leaf/Rollup Summary，并写入审计日志：
 

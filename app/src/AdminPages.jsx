@@ -39,7 +39,7 @@ import {
 } from "@phosphor-icons/react";
 import { historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, downloadRecordsMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, deleteLivePrivacySubject, disableLiveMfa, enableLiveMfa, exportLiveAudit, exportLivePrivacySubject, getAdminAccounts, getLiveAdminSettings, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveMfaStatus, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setAdminAccountStatus, setLiveDeviceStatus, setupLiveMfa, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateNotificationSettings, updateOrganizationSettings } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, deleteLivePrivacySubject, disableLiveMfa, enableLiveMfa, exportLiveAudit, exportLivePrivacySubject, getAdminAccounts, getLiveAdminSettings, getLiveAiUsage, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveMfaStatus, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setAdminAccountStatus, setLiveDeviceStatus, setupLiveMfa, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateNotificationSettings, updateOrganizationSettings } from "./services/agentApi.js";
 import { auditData, deviceData, employeeData, permissionRoles, settingsData, teamData } from "./adminData.js";
 import { SHANGHAI_TIME_ZONE, formatShanghaiTime, shanghaiDateAtStart, shanghaiDateInput, shanghaiDayKey, shanghaiWeekKey } from "./time.js";
 
@@ -1050,13 +1050,22 @@ function SettingsForm({ role = "admin", settings, onChanged, onToast }) {
 }
 function AiSettings({ role = "admin", settings, onChanged, onToast }) {
   const canEdit = role === "admin";
-  const [draft, setDraft] = useState({ ai_model: "qwen3.7-plus", ai_summary_interval_seconds: "600", ai_budget_per_minute: "30" });
+  const [draft, setDraft] = useState({ ai_model: "qwen3.7-plus", ai_summary_interval_seconds: "600", ai_budget_per_minute: "30", ai_daily_request_limit: "0", ai_daily_budget_usd: "0" });
+  const [usage, setUsage] = useState(null);
+  const [usageError, setUsageError] = useState("");
   useEffect(() => { if (settings) setDraft((current) => ({ ...current, ...settings })); }, [settings]);
+  useEffect(() => {
+    if (!agentApiEnabled) return undefined;
+    let cancelled = false;
+    getLiveAiUsage(7).then((result) => { if (!cancelled) setUsage(result); }).catch((error) => { if (!cancelled) setUsageError(error.message); });
+    return () => { cancelled = true; };
+  }, []);
   const save = async () => {
     if (!canEdit) return onToast("当前角色只能查看 AI 设置；请切换为老板后保存");
     try { const saved = agentApiEnabled ? await updateOrganizationSettings(draft) : draft; onChanged(saved); onToast("AI 设置已保存；摘要仍按十分钟窗口生成"); } catch (error) { onToast(`AI 设置保存失败：${error.message}`); }
   };
-  return <SectionCard title="AI 模型适配层" description="摘要和问答保留 Citations，并对活动元数据进行不可信数据隔离"><div className="settings-grid"><SettingField label="摘要语言" value="简体中文 / English" disabled /><SettingField label="默认模型" value={draft.ai_model} disabled={!canEdit} onChange={(value) => setDraft((current) => ({ ...current, ai_model: value }))} /><SettingField label="摘要间隔（秒）" value={draft.ai_summary_interval_seconds} disabled={!canEdit} onChange={(value) => setDraft((current) => ({ ...current, ai_summary_interval_seconds: value }))} /><SettingField label="调用预算 / 分钟" value={draft.ai_budget_per_minute} disabled={!canEdit} onChange={(value) => setDraft((current) => ({ ...current, ai_budget_per_minute: value }))} /><SettingField label="原始内容读取" value="禁止" disabled /></div><button className="outline-button" disabled={!canEdit} onClick={() => void save()}><CheckCircle size={16} />{canEdit ? "保存 AI 设置" : "老板可编辑"}</button></SectionCard>;
+  const totals = usage?.totals;
+  return <><SectionCard title="AI 模型适配层" description="摘要和问答保留 Citations，并对活动元数据进行不可信数据隔离"><div className="settings-grid"><SettingField label="摘要语言" value="简体中文 / English" disabled /><SettingField label="默认模型" value={draft.ai_model} disabled={!canEdit} onChange={(value) => setDraft((current) => ({ ...current, ai_model: value }))} /><SettingField label="摘要间隔（秒）" value={draft.ai_summary_interval_seconds} disabled={!canEdit} onChange={(value) => setDraft((current) => ({ ...current, ai_summary_interval_seconds: value }))} /><SettingField label="调用预算 / 分钟" value={draft.ai_budget_per_minute} disabled={!canEdit} onChange={(value) => setDraft((current) => ({ ...current, ai_budget_per_minute: value }))} /><SettingField label="每日请求上限（0=不限）" value={draft.ai_daily_request_limit} disabled={!canEdit} onChange={(value) => setDraft((current) => ({ ...current, ai_daily_request_limit: value }))} /><SettingField label="每日费用上限 USD（0=不限）" value={draft.ai_daily_budget_usd} disabled={!canEdit} onChange={(value) => setDraft((current) => ({ ...current, ai_daily_budget_usd: value }))} /><SettingField label="原始内容读取" value="禁止" disabled /></div><button className="outline-button" disabled={!canEdit} onClick={() => void save()}><CheckCircle size={16} />{canEdit ? "保存 AI 设置" : "老板可编辑"}</button></SectionCard><SectionCard title="AI 用量与故障" description="最近 7 天的调用、Token、延迟和费用估算；不显示 Prompt 或活动正文"><div className="settings-grid"><SettingField label="调用次数" value={totals ? `${totals.calls}（成功 ${totals.succeeded}）` : usageError ? "读取失败" : "读取中…"} disabled /><SettingField label="Token 总量" value={totals ? String(totals.total_tokens) : "—"} disabled /><SettingField label="估算费用" value={totals ? `$${Number(totals.estimated_cost_usd || 0).toFixed(4)}` : "—"} disabled /><SettingField label="平均延迟" value={totals ? `${totals.average_latency_ms} ms` : "—"} disabled /></div>{usageError && <div className="error-box">AI 用量读取失败：{usageError}</div>}{usage && <div className="helper-text">窗口：最近 {usage.window_days} 天；当前每日额度：{usage.limits.daily_request_limit || "不限"} 次 / {usage.limits.daily_budget_usd ? `$${usage.limits.daily_budget_usd}` : "不限"}。</div>}</SectionCard></>;
 }
 function SettingField({ label, value, disabled = false, onChange }) { return <label className="setting-field"><span>{label}</span><input disabled={disabled} value={value ?? ""} onChange={(event) => onChange?.(event.target.value)} /></label>; }
 function CategorySettings({ role = "admin", categories, onChanged, onToast }) {

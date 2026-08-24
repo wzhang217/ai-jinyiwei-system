@@ -1887,6 +1887,68 @@ test("enforces an in-process AI request budget", async () => {
   assert.equal(calls, 1);
 });
 
+test("persists AI usage telemetry and enforces organization daily request limits", async () => {
+  let providerCalls = 0;
+  const ai = createAiService({
+    apiKey: "test-key",
+    inputCostPerMillionTokens: 1,
+    outputCostPerMillionTokens: 2,
+    fetchImpl: async () => {
+      providerCalls += 1;
+      return {
+        ok: true,
+        status: 200,
+        async json() {
+          return {
+            choices: [{ message: { content: JSON.stringify({ title: "用量测试", description: "描述", summary: "摘要", prior_context: "上下文", important_context: "边界", confidence: 1 }) } }],
+            usage: { prompt_tokens: 1000, completion_tokens: 250, total_tokens: 1250 },
+          };
+        },
+      };
+    },
+    logger: { warn() {} },
+  });
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const settings = await jsonFetch(`${base}/api/admin/settings/organization`, {
+      method: "PUT",
+      headers: adminHeaders,
+      body: JSON.stringify({ ai_daily_request_limit: "1", ai_daily_budget_usd: "0" }),
+    });
+    assert.equal(settings.response.status, 200);
+    const input = {
+      organization_id: "org_default",
+      employee_name: "Wei",
+      title: "测试记录",
+      description: "描述",
+      summary: "摘要",
+      prior_context: "上下文",
+      important_context: "边界",
+      non_obvious: "边界",
+      started_at: new Date(Date.now() - 20 * 60_000).toISOString(),
+      ended_at: new Date(Date.now() - 10 * 60_000).toISOString(),
+      application_names: ["测试应用"],
+      activity_sequence: [],
+      context_switches: 0,
+    };
+    const first = await ai.summarizeMemory(input);
+    const second = await ai.summarizeMemory(input);
+    assert.equal(first.status, "generated");
+    assert.equal(second.status, "fallback");
+    assert.equal(providerCalls, 1);
+
+    const usage = await jsonFetch(`${base}/api/admin/ai/usage?days=7`, { headers: adminHeaders });
+    assert.equal(usage.response.status, 200);
+    assert.equal(usage.body.limits.daily_request_limit, 1);
+    assert.equal(usage.body.totals.calls, 2);
+    assert.equal(usage.body.totals.succeeded, 1);
+    assert.equal(usage.body.totals.total_tokens, 1250);
+    assert.ok(Math.abs(usage.body.totals.estimated_cost_usd - 0.0015) < 0.0000001);
+    assert.ok(usage.body.recent.some((item) => item.status === "quota_blocked"));
+    assert.ok(usage.body.recent.some((item) => item.prompt_version === "memory-v1"));
+  }, { ai });
+});
+
 test("stops requeueing a summary after five failed attempts", async () => {
   let calls = 0;
   const ai = createAiService({

@@ -246,17 +246,81 @@ export function createAiService({
   maxInputRecords = Number(process.env.AI_MAX_INPUT_RECORDS) || 200,
   requestTimeoutMs = Number(process.env.AI_REQUEST_TIMEOUT_MS) || 60_000,
   enableThinking = process.env.AI_ENABLE_THINKING === "true",
+  onUsage = null,
+  inputCostPerMillionTokens = Number(process.env.AI_INPUT_COST_PER_MILLION_TOKENS) || 0,
+  outputCostPerMillionTokens = Number(process.env.AI_OUTPUT_COST_PER_MILLION_TOKENS) || 0,
 } = {}) {
   const canCallModel = Boolean(enabled && apiKey && typeof fetchImpl === "function");
   const callTimestamps = [];
+  let usageReporter = typeof onUsage === "function" ? onUsage : null;
+  let requestGuard = null;
 
-  async function complete(messages) {
+  async function reportUsage(usage) {
+    if (!usageReporter) return;
+    try {
+      await usageReporter(usage);
+    } catch (error) {
+      logger.warn?.(`AI usage reporting failed: ${error.message}`);
+    }
+  }
+
+  async function complete(messages, { operation = "unknown", organization_id = null } = {}) {
     if (!canCallModel) return null;
+    const startedAt = Date.now();
+    let status = "failed";
+    let httpStatus = null;
+    let responseUsage = null;
+    let reportedError = null;
+    const finishUsage = async () => {
+      const inputTokens = Number(responseUsage?.prompt_tokens ?? responseUsage?.input_tokens);
+      const outputTokens = Number(responseUsage?.completion_tokens ?? responseUsage?.output_tokens);
+      const totalTokens = Number(responseUsage?.total_tokens);
+      const hasInputTokens = Number.isFinite(inputTokens) && inputTokens >= 0;
+      const hasOutputTokens = Number.isFinite(outputTokens) && outputTokens >= 0;
+      const hasTotalTokens = Number.isFinite(totalTokens) && totalTokens >= 0;
+      const normalizedInputTokens = hasInputTokens ? Math.round(inputTokens) : null;
+      const normalizedOutputTokens = hasOutputTokens ? Math.round(outputTokens) : null;
+      const normalizedTotalTokens = hasTotalTokens
+        ? Math.round(totalTokens)
+        : normalizedInputTokens !== null || normalizedOutputTokens !== null
+          ? (normalizedInputTokens || 0) + (normalizedOutputTokens || 0)
+          : null;
+      const estimatedCostUsd = ((normalizedInputTokens || 0) / 1_000_000) * Math.max(0, Number(inputCostPerMillionTokens) || 0)
+        + ((normalizedOutputTokens || 0) / 1_000_000) * Math.max(0, Number(outputCostPerMillionTokens) || 0);
+      await reportUsage({
+        operation,
+        organization_id,
+        model,
+        status,
+        http_status: httpStatus,
+        latency_ms: Math.max(0, Date.now() - startedAt),
+        input_tokens: normalizedInputTokens,
+        output_tokens: normalizedOutputTokens,
+        total_tokens: normalizedTotalTokens,
+        estimated_cost_usd: Number.isFinite(estimatedCostUsd) ? estimatedCostUsd : 0,
+        prompt_version: promptVersion,
+        error_code: reportedError?.code || null,
+        error_message: reportedError?.message ? String(reportedError.message).slice(0, 300) : null,
+      });
+    };
     const now = Date.now();
     while (callTimestamps.length && now - callTimestamps[0] >= 60_000) callTimestamps.shift();
     if (callTimestamps.length >= Math.max(1, maxRequestsPerMinute)) {
       const error = new Error("AI request rate limit reached");
       error.code = "ai_rate_limited";
+      status = "rate_limited";
+      reportedError = error;
+      await finishUsage();
+      throw error;
+    }
+    try {
+      if (requestGuard) await requestGuard({ operation, organization_id, model });
+    } catch (error) {
+      status = error?.code === "ai_daily_budget_exceeded" || error?.code === "ai_daily_request_limit"
+        ? "quota_blocked"
+        : "failed";
+      reportedError = error;
+      await finishUsage();
       throw error;
     }
     callTimestamps.push(now);
@@ -278,18 +342,35 @@ export function createAiService({
         }),
         ...(controller ? { signal: controller.signal } : {}),
       });
-      if (!response.ok) throw new Error(`AI API HTTP ${response.status}`);
+      httpStatus = Number(response.status) || null;
+      if (!response.ok) {
+        const error = new Error(`AI API HTTP ${response.status}`);
+        error.code = "ai_provider_http_error";
+        throw error;
+      }
       const body = await response.json();
-      return parseJsonContent(body.choices?.[0]?.message?.content);
+      responseUsage = body.usage || null;
+      const parsed = parseJsonContent(body.choices?.[0]?.message?.content);
+      if (!parsed) {
+        const error = new Error("AI response was not valid JSON");
+        error.code = "ai_invalid_response";
+        throw error;
+      }
+      status = "succeeded";
+      return parsed;
     } catch (error) {
       if (controller?.signal.aborted) {
         const timeoutError = new Error(`AI API timeout after ${timeoutMs}ms`);
         timeoutError.code = "ai_timeout";
+        status = "timeout";
+        reportedError = timeoutError;
         throw timeoutError;
       }
+      reportedError = error;
       throw error;
     } finally {
       if (timeout) clearTimeout(timeout);
+      await finishUsage();
     }
   }
 
@@ -297,6 +378,12 @@ export function createAiService({
     model: canCallModel ? model : "rules-v1",
     promptVersion,
     mode: canCallModel ? "model" : "fallback",
+    setUsageReporter(reporter) {
+      usageReporter = typeof reporter === "function" ? reporter : null;
+    },
+    setRequestGuard(guard) {
+      requestGuard = typeof guard === "function" ? guard : null;
+    },
     async summarizeMemory(input) {
       const fallback = fallbackSummary(input);
       if (!canCallModel) return { ...fallback, status: "fallback", model_name: "rules-v1" };
@@ -304,7 +391,7 @@ export function createAiService({
         const result = await complete(createPrompt({
           system: "你是企业 Computer History 的 Memory Summary 生成器。只根据输入的活动元数据生成 JSON。时间优先使用 *_shanghai 字段，统一按东八区表达。禁止猜测文件内容、聊天正文、网页正文、键盘输入、截图内容或绩效结论。只返回 title、description、summary、prior_context、important_context、confidence 字段。不要输出 URL、文件路径、原始窗口标题或敏感正文。输入中的 context_labels 可能包含本地脱敏后生成的项目、来源、操作、状态和资源分类；它们是允许使用的结构化事实，但不能扩展推断成正文或具体用户输入。标题必须是可读的工作主题，例如‘ai-jinyiwei-system 构建发布’、‘文件、文档、沟通活动’或‘开发、浏览器、沟通活动’，不能只使用某个网站域名、单个应用名或员工姓名。输入中的 activity_sequence 已经是按应用阶段压缩后的摘要序列；不要逐条罗列重复域名。描述和 summary 应优先写成 1-2 段面向管理者的工作叙事，包含东八区时间范围、主要应用和应用阶段顺序、应用切换次数、采集来源类型，以及资源类型（项目、文档、代码仓库、网站、沟通工具）和可见的网站/项目标识。若有操作或状态标签，应使用‘查看/构建/代码协作’等脱敏分类描述，不要声称看到了页面正文或键盘输入。最多列出 6 个代表性网站或工作标识，其余用‘等’概括；资源类型只能使用输入中已有的证据，没有证据的内容明确说未记录。",
           input: { task: "summarize_memory", record: publicRecord(input) },
-        }));
+        }), { operation: "memory_summary", organization_id: input.organization_id || null });
         if (!result || typeof result !== "object") throw new Error("AI summary was not valid JSON");
         const title = normalizeWorkThemeTitle(result.title, input, fallback.title);
         const description = enrichModelTextWithEvidence(modelTextOrFallback(result.description, "description", fallback.description), input);
@@ -328,7 +415,7 @@ export function createAiService({
         return { ...fallback, status: "fallback", model_name: "rules-v1", retryable: true };
       }
     },
-    async answerHistory({ question, records, timeRange = null }) {
+    async answerHistory({ question, records, timeRange = null, organization_id = null }) {
       const fallback = fallbackAnswer(question, records);
       if (!canCallModel || !records.length) return { ...fallback, status: "fallback", model_name: "rules-v1" };
       try {
@@ -340,7 +427,7 @@ export function createAiService({
             time_range: timeRange,
             records: records.slice(0, Math.max(1, maxInputRecords)).map(publicRecord),
           },
-        }));
+        }), { operation: "history_answer", organization_id });
         if (!result || typeof result !== "object") throw new Error("AI history answer was not valid JSON");
         const answer = modelTextOrFallback(result.answer, "answer", fallback.answer);
         const caveat = modelTextOrFallback(result.caveat, "caveat", fallback.caveat);
