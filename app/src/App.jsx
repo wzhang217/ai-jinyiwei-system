@@ -47,7 +47,7 @@ import {
 } from "@phosphor-icons/react";
 import { applications, defaultQuestions, historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, auditLiveExport, createAdminSession, demoMode, getLiveHistory, getLiveHistorySources } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, auditLiveExport, clearAdminSession, demoMode, getAdminMe, getLiveHistory, getLiveHistorySources, getStoredAdminPrincipal, loginAdmin, logoutAdmin } from "./services/agentApi.js";
 import { AdminPage, roleLabel } from "./AdminPages.jsx";
 import { formatShanghaiTime } from "./time.js";
 
@@ -131,8 +131,45 @@ const sourceKindText = (kind) => ({
   system_app: "系统组件",
 }[kind] || "活动元数据");
 
+function AuthLoadingView() {
+  return <div className="auth-screen"><div className="auth-card"><div className="organization-mark"><Buildings size={23} weight="fill" /></div><h1>正在验证登录状态</h1><p>正在连接 AI 锦衣卫服务端…</p></div></div>;
+}
+
+function LoginView({ error, onLogin }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [formError, setFormError] = useState("");
+
+  const submit = async (event) => {
+    event.preventDefault();
+    setFormError("");
+    setLoading(true);
+    try {
+      await onLogin(username, password);
+    } catch (loginError) {
+      setFormError(loginError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return <div className="auth-screen"><form className="auth-card auth-form" onSubmit={submit}>
+    <div className="organization-mark"><Buildings size={23} weight="fill" /></div>
+    <div className="auth-eyebrow">AI JINYIWEI · COMPUTER HISTORY</div>
+    <h1>登录管理后台</h1>
+    <p>请使用企业账号登录，系统将按账号角色展示数据范围。</p>
+    <label>用户名<input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required /></label>
+    <label>密码<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
+    {(formError || error) && <div className="error-box">{formError || error}</div>}
+    <button className="primary-button auth-submit" type="submit" disabled={loading}>{loading ? "登录中…" : "登录"}</button>
+  </form></div>;
+}
+
 function App() {
-  const [role, setRole] = useState("admin");
+  const [principal, setPrincipal] = useState(() => agentApiEnabled ? getStoredAdminPrincipal() : { role: "admin", actor: "演示管理员", team: null });
+  const [authChecking, setAuthChecking] = useState(agentApiEnabled);
+  const [authError, setAuthError] = useState("");
   const [activeNav, setActiveNav] = useState("overview");
   const [navigationTarget, setNavigationTarget] = useState(null);
   const [query, setQuery] = useState("");
@@ -142,6 +179,27 @@ function App() {
   const [liveUpdatedAt, setLiveUpdatedAt] = useState(null);
   const [liveRefreshing, setLiveRefreshing] = useState(false);
   const [liveError, setLiveError] = useState("");
+  const role = principal?.role || "admin";
+
+  useEffect(() => {
+    if (!agentApiEnabled) {
+      setAuthChecking(false);
+      return undefined;
+    }
+    const storedPrincipal = getStoredAdminPrincipal();
+    if (!storedPrincipal) {
+      setAuthChecking(false);
+      return undefined;
+    }
+    getAdminMe()
+      .then(({ principal: currentPrincipal }) => setPrincipal(currentPrincipal))
+      .catch(() => {
+        clearAdminSession();
+        setPrincipal(null);
+      })
+      .finally(() => setAuthChecking(false));
+    return undefined;
+  }, []);
 
   const visibleNavGroups = useMemo(() => navGroups.map((group) => ({ ...group, items: group.items.filter((item) => roleNavigation[role].has(item.id)) })).filter((group) => group.items.length), [role]);
 
@@ -166,37 +224,17 @@ function App() {
   };
 
   useEffect(() => {
-    if (!agentApiEnabled) return undefined;
+    if (!agentApiEnabled || !principal) return undefined;
     refreshLiveRecords();
     const timer = window.setInterval(refreshLiveRecords, 15000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [principal?.account_id]);
 
   useEffect(() => {
     if (!selectedRecord || !liveRecords) return;
     const refreshedRecord = liveRecords.find((record) => record.id === selectedRecord.id);
     if (refreshedRecord) setSelectedRecord(refreshedRecord);
   }, [liveRecords, selectedRecord?.id]);
-
-  useEffect(() => {
-    if (!agentApiEnabled) return undefined;
-    let cancelled = false;
-    // Do not keep rendering the previous role's records while the new
-    // server-side scope is being established.
-    setLiveRecords(null);
-    setLiveUpdatedAt(null);
-    setLiveError("");
-    createAdminSession({
-      role,
-      employeeId: role === "employee" ? "employee-wei" : undefined,
-      team: role === "manager" ? "研发与产品中心" : undefined,
-    }).then(() => {
-      if (!cancelled) void refreshLiveRecords();
-    }).catch((error) => {
-      if (!cancelled) setLiveError(`权限会话创建失败：${error.message}`);
-    });
-    return () => { cancelled = true; };
-  }, [role]);
 
   const notify = (message) => {
     setToast(message);
@@ -218,18 +256,30 @@ function App() {
 
   const activeLabel = visibleNavGroups.flatMap((group) => group.items).find((item) => item.id === activeNav)?.label || "工作区";
 
+  if (agentApiEnabled && authChecking) return <AuthLoadingView />;
+  if (agentApiEnabled && !principal) return <LoginView error={authError} onLogin={async (username, password) => {
+    setAuthError("");
+    try {
+      const result = await loginAdmin(username, password);
+      setPrincipal(result.principal);
+    } catch (error) {
+      setAuthError(error.message);
+      throw error;
+    }
+  }} />;
+
   return <div className="shell">
     <aside className="sidebar">
       <div className="window-controls" aria-hidden="true"><span className="window-dot window-dot-red" /><span className="window-dot window-dot-yellow" /><span className="window-dot window-dot-green" /></div>
       <button className="back-button" onClick={() => notify("已返回企业工作区")}><ArrowLeft size={19} /><span>返回工作区</span></button>
       <div className="sidebar-search"><MagnifyingGlass size={17} /><input aria-label="搜索设置和功能" placeholder="搜索设置..." value={query} onChange={(event) => setQuery(event.target.value)} /></div>
-      <div className="organization-switcher"><div className="organization-mark"><Buildings size={20} weight="fill" /></div><div><strong>锦衣卫科技</strong><span>研发与产品中心</span></div><CaretDown size={15} /></div>
+      <div className="organization-switcher"><div className="organization-mark"><Buildings size={20} weight="fill" /></div><div><strong>锦衣卫科技</strong><span>{principal?.team || "全企业数据范围"}</span></div><CaretDown size={15} /></div>
       <nav className="sidebar-nav" aria-label="企业导航">{visibleNavGroups.map((group) => <div className="nav-group" key={group.label}><div className="nav-group-label">{group.label}</div>{group.items.map(({ id, label, icon: Icon }) => <button className={`nav-item ${activeNav === id ? "active" : ""}`} key={id} onClick={() => navigate(id)}><Icon size={19} weight={activeNav === id ? "fill" : "regular"} /><span>{role === "employee" && id === "overview" ? "我的工作状态" : label}</span>{id === "skill" && <span className="nav-new">AI</span>}</button>)}</div>)}</nav>
-      <div className="sidebar-footer"><div className="privacy-status"><ShieldCheck size={16} weight="fill" /><span>采集策略正常</span><span className="status-dot" /></div><div className="account-row"><span className="avatar">魏</span><div><strong>Wei</strong><span>{roleLabel[role]}</span></div><DotsThree size={20} /></div></div>
+      <div className="sidebar-footer"><div className="privacy-status"><ShieldCheck size={16} weight="fill" /><span>采集策略正常</span><span className="status-dot" /></div><div className="account-row"><span className="avatar">{(principal?.actor || "W").slice(0, 1)}</span><div><strong>{principal?.actor || "Wei"}</strong><span>{roleLabel[role]}</span></div><button className="account-menu-button" title="退出登录" onClick={() => { void logoutAdmin().then(() => setPrincipal(null)); }}><DotsThree size={20} /></button></div></div>
     </aside>
 
     <main className="main-content">
-      <header className="topbar"><div className="breadcrumb"><span>{role === "employee" ? "我的工作区" : "工作区"}</span><span>/</span><strong>{activeLabel}</strong></div><div className="topbar-actions"><span className="role-switch-label">查看身份</span><select className="role-select" aria-label="切换查看身份" value={role} onChange={(event) => setRole(event.target.value)}>{Object.entries(roleLabel).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select><button className="icon-button" title="当前企业安全策略"><ShieldCheck size={19} /></button><span className="topbar-divider" /><button className="topbar-avatar">W</button></div></header>
+      <header className="topbar"><div className="breadcrumb"><span>{role === "employee" ? "我的工作区" : "工作区"}</span><span>/</span><strong>{activeLabel}</strong></div><div className="topbar-actions"><span className="role-switch-label">当前身份</span><span className="role-select role-select-static">{roleLabel[role]}</span><button className="icon-button" title="当前企业安全策略"><ShieldCheck size={19} /></button><span className="topbar-divider" /><button className="topbar-avatar">{(principal?.actor || "W").slice(0, 1)}</button></div></header>
       {activeNav === "history" ? <HistoryView role={role} query={query} records={liveRecords ?? (demoMode ? historyRecords : [])} lastUpdatedAt={liveUpdatedAt} refreshing={liveRefreshing} liveError={liveError} onRefresh={refreshLiveRecords} onToast={notify} onOpenRecord={setSelectedRecord} /> : <AdminPage page={activeNav} role={role} query={query} target={navigationTarget} liveRecords={liveRecords} onNavigate={navigate} onToast={notify} />}
     </main>
 

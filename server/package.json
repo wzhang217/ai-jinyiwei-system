@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node --env-file-if-exists=.env --experimental-sqlite src/index.mjs",
     "dev": "node --env-file-if-exists=.env --watch --experimental-sqlite src/index.mjs",
+    "backup": "node --env-file-if-exists=.env --experimental-sqlite scripts/backup.mjs",
     "test": "node --test --experimental-sqlite tests/server.test.mjs"
   }
 }

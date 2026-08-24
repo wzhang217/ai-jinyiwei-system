@@ -4,18 +4,43 @@
 
 ## 启动
 
-首次配置先复制环境变量模板，并只在服务端填写百炼 API Key：
+首次配置先复制环境变量模板，并只在服务端填写管理员初始密码和百炼 API Key：
 
 ```bash
 cp .env.example .env
-# 编辑 .env，填写 DASHSCOPE_API_KEY
+# 编辑 .env，至少填写 ADMIN_PASSWORD、AGENT_SESSION_SECRET 和 DASHSCOPE_API_KEY
 ```
 
 ```bash
 npm start
 ```
 
-`npm start` 和 `npm run dev` 会自动读取 `server/.env`。默认监听 `0.0.0.0:8787`，每次启动会生成随机管理员 Token 并打印到服务端终端。正式试点请设置 `AGENT_ADMIN_TOKEN`，并在反向代理后使用 HTTPS。
+`npm start` 和 `npm run dev` 会自动读取 `server/.env`。默认监听 `0.0.0.0:8787`。首次启动时，如果 `ADMIN_PASSWORD` 已设置，服务端会创建一个管理员账号；之后管理后台使用用户名和密码登录，服务端签发可撤销的数据库会话。`AGENT_ADMIN_TOKEN` 仅保留给迁移脚本和 CLI，不能放入 `app/.env` 或前端构建产物。正式试点请设置随机的 `AGENT_SESSION_SECRET`、明确的 `AGENT_CORS_ORIGIN`，并在反向代理后使用 HTTPS。
+
+### 管理后台登录
+
+在 `server/.env` 设置以下值后重启服务端：
+
+```bash
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=请替换为至少12位密码
+ADMIN_DISPLAY_NAME=企业管理员
+AUTH_SESSION_TTL_SECONDS=28800
+```
+
+前端只需要设置 `VITE_AGENT_API_BASE_URL=http://localhost:8787`，不再设置 `VITE_AGENT_ADMIN_TOKEN`。登录成功后的会话存放在浏览器会话存储中，退出登录、账号停用或会话过期后立即失效。
+
+### 数据库备份与恢复
+
+MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
+
+```bash
+npm run backup
+# 或指定源库和备份文件
+AGENT_DB_PATH=./data/agent.sqlite AGENT_BACKUP_PATH=./data/backups/manual.sqlite npm run backup
+```
+
+恢复前先停止服务端，再用经过校验的备份文件替换 `AGENT_DB_PATH`，然后启动服务并检查 `/health`、设备心跳、历史记录和审计日志。不要在服务运行时直接覆盖 SQLite 文件；备份文件应进入企业自己的加密存储和异地保留策略。
 
 ## AI 摘要与 History Skill
 
@@ -72,7 +97,7 @@ curl -X POST http://localhost:8787/api/admin/retention \
   -d '{"before":"2026-05-01T00:00:00.000Z","apply":true}'
 ```
 
-管理员可以用启动 Token 换取有范围的会话令牌：
+迁移期间仍可以用启动 Token 换取有范围的旧版会话令牌：
 
 ```bash
 curl -X POST http://localhost:8787/api/admin/sessions \
@@ -81,7 +106,7 @@ curl -X POST http://localhost:8787/api/admin/sessions \
   -d '{"role":"employee","employee_id":"employee-wei"}'
 ```
 
-之后用返回的 Token 放在 `x-admin-session` 中访问历史、设备、事件和问答接口。`admin` 角色只能由启动 Token 使用；正式试点应设置随机的 `AGENT_SESSION_SECRET` 并接入企业登录系统。
+之后用返回的 Token 放在 `x-admin-session` 中访问历史、设备、事件和问答接口。正式管理后台通过 `POST /api/auth/login` 创建数据库会话，并可通过 `POST /api/auth/logout` 撤销；旧版启动 Token 仅用于迁移脚本和 CLI。
 
 浏览器来源扩展位于 `../agent/browser-extension/`，Chrome 和 Edge 共用同一套 MV3 文件，并继续调用 `/api/agent/events`。正式配对流程如下：
 
@@ -91,7 +116,7 @@ curl -X POST http://localhost:8787/api/admin/sessions \
 
 浏览器凭据只允许上传脱敏的网站来源事件，不能发送心跳、读取采集策略或生成新的配对码；扩展不会保存或要求员工粘贴 Windows Agent Token。
 
-前端默认连接真实服务端。只有在 `app/.env` 明确设置 `VITE_DEMO_MODE=true` 时才启用演示数据；推荐配置 `VITE_AGENT_API_BASE_URL` 和 `VITE_AGENT_ADMIN_TOKEN` 后使用真实数据。
+前端默认连接真实服务端。只有在 `app/.env` 明确设置 `VITE_DEMO_MODE=true` 时才启用演示数据；真实环境只配置 `VITE_AGENT_API_BASE_URL`，用户在登录页输入企业账号密码。
 
 ## 生成注册码
 

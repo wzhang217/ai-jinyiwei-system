@@ -39,7 +39,7 @@ import {
 } from "@phosphor-icons/react";
 import { historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, downloadRecordsMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, createRegistrationCode, demoMode, exportLiveAudit, getLiveAdminSettings, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLivePolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setLiveDeviceStatus, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateNotificationSettings, updateOrganizationSettings } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, exportLiveAudit, getAdminAccounts, getLiveAdminSettings, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLivePolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setAdminAccountStatus, setLiveDeviceStatus, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateNotificationSettings, updateOrganizationSettings } from "./services/agentApi.js";
 import { auditData, deviceData, employeeData, permissionRoles, settingsData, teamData } from "./adminData.js";
 import { SHANGHAI_TIME_ZONE, formatShanghaiTime, shanghaiDateAtStart, shanghaiDateInput, shanghaiDayKey, shanghaiWeekKey } from "./time.js";
 
@@ -738,7 +738,60 @@ function PermissionsPage({ role, target, onToast }) {
     return undefined;
   }, []);
   const roleItems = liveRoles?.length ? liveRoles.map((item) => ({ ...item, role: item.label, users: "—" })) : permissionRoles;
-  return <div className="page-content"><PageHeader eyebrow="ACCESS CONTROL" title="权限" description="管理老板、高管、员工三种角色、数据范围和采集策略。" meta="RBAC 已启用" action={<button className="outline-button" onClick={() => onToast(canEdit ? "系统角色固定为老板、高管和员工" : "当前角色只能查看权限配置")}><Key size={17} />固定三种角色</button>} />{error && <div className="error-box">权限配置读取失败：{error}</div>}<Tabs tabs={["角色", "组织关系", "数据范围", "采集策略", "应用/网站排除", "保留策略"]} active={tab} onChange={setTab} />{tab === "角色" && <SectionCard title="角色权限" description="权限变更会记录操作者和生效时间"><div className="role-list">{roleItems.map((item) => <div className="role-row" key={item.role}><span className="role-icon"><Key size={18} /></span><span><strong>{item.role}</strong><small>{item.scope} · {item.users || "—"} 人 · {item.description || item.detail}</small></span><button className="outline-button" onClick={() => onToast(`${item.role}：${item.scope}，${item.description || item.detail}`)}>查看</button></div>)}</div></SectionCard>}{tab === "组织关系" && <OrgTree onToast={onToast} />}{tab === "数据范围" && <ScopePolicy role={role} onToast={onToast} />}{tab === "采集策略" && <PolicyEditor role={role} onToast={onToast} />}{tab === "应用/网站排除" && <ExclusionPolicy role={role} onToast={onToast} />}{tab === "保留策略" && <RetentionPolicy role={role} onToast={onToast} />}</div>;
+  const tabs = canEdit ? ["账号", "角色", "组织关系", "数据范围", "采集策略", "应用/网站排除", "保留策略"] : ["角色", "组织关系", "数据范围", "采集策略", "应用/网站排除", "保留策略"];
+  return <div className="page-content"><PageHeader eyebrow="ACCESS CONTROL" title="权限" description="管理老板、高管、员工三种角色、数据范围和采集策略。" meta="RBAC 已启用" action={<button className="outline-button" onClick={() => onToast(canEdit ? "系统角色固定为老板、高管和员工" : "当前角色只能查看权限配置")}><Key size={17} />固定三种角色</button>} />{error && <div className="error-box">权限配置读取失败：{error}</div>}<Tabs tabs={tabs} active={tab} onChange={setTab} />{tab === "账号" && canEdit && <AccountManagement onToast={onToast} />}{tab === "角色" && <SectionCard title="角色权限" description="系统只保留老板、高管、员工三种角色，权限由服务端强制执行"><div className="role-list">{roleItems.map((item) => <div className="role-row" key={item.role}><span className="role-icon"><Key size={18} /></span><span><strong>{item.role}</strong><small>{item.scope} · {item.users || "—"} 人 · {item.description || item.detail}</small></span><button className="outline-button" onClick={() => onToast(`${item.role}：${item.scope}，${item.description || item.detail}`)}>查看</button></div>)}</div></SectionCard>}{tab === "组织关系" && <OrgTree onToast={onToast} />}{tab === "数据范围" && <ScopePolicy role={role} onToast={onToast} />}{tab === "采集策略" && <PolicyEditor role={role} onToast={onToast} />}{tab === "应用/网站排除" && <ExclusionPolicy role={role} onToast={onToast} />}{tab === "保留策略" && <RetentionPolicy role={role} onToast={onToast} />}</div>;
+}
+
+function AccountManagement({ onToast }) {
+  const [accounts, setAccounts] = useState([]);
+  const [employees, setEmployees] = useState([]);
+  const [draft, setDraft] = useState({ username: "", password: "", display_name: "", role: "employee", employee_id: "", team: "" });
+  const [loading, setLoading] = useState(agentApiEnabled);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  const refresh = () => {
+    if (!agentApiEnabled) return;
+    setLoading(true);
+    Promise.all([getAdminAccounts(), getLiveEmployees()]).then(([nextAccounts, nextEmployees]) => {
+      setAccounts(nextAccounts);
+      setEmployees(nextEmployees);
+      setDraft((current) => ({ ...current, employee_id: current.employee_id || nextEmployees[0]?.id || "", team: current.team || nextEmployees[0]?.team || "" }));
+    }).catch((requestError) => setError(requestError.message)).finally(() => setLoading(false));
+  };
+
+  useEffect(() => { refresh(); }, []);
+
+  const save = async (event) => {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const account = await createAdminAccount({ ...draft, employee_id: draft.role === "employee" ? draft.employee_id : undefined, team: draft.role === "manager" ? draft.team : undefined });
+      setAccounts((current) => [...current, account]);
+      setDraft({ username: "", password: "", display_name: "", role: "employee", employee_id: employees[0]?.id || "", team: employees[0]?.team || "" });
+      onToast("账号已创建");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggle = async (account) => {
+    try {
+      await setAdminAccountStatus(account.id, Boolean(account.disabled_at));
+      setAccounts((current) => current.map((item) => item.id === account.id ? { ...item, disabled_at: account.disabled_at ? null : new Date().toISOString() } : item));
+      onToast(account.disabled_at ? "账号已启用" : "账号已停用，会话已撤销");
+    } catch (requestError) {
+      setError(requestError.message);
+    }
+  };
+
+  return <SectionCard title="后台账号" description="账号登录决定真实数据范围；停用账号会立即撤销其后台会话" action={<span className="scope-pill">{accounts.length} 个账号</span>}>
+    <div className="account-admin-list">{loading ? <span className="empty-inline">正在读取账号…</span> : accounts.map((account) => <div className="account-admin-row" key={account.id}><span className="person-avatar">{account.display_name.slice(0, 1)}</span><span><strong>{account.display_name}</strong><small>{account.username} · {roleLabel[account.role]}{account.team ? ` · ${account.team}` : ""}</small></span><StatusPill status={account.disabled_at ? "offline" : "online"} /><button className="outline-button" onClick={() => void toggle(account)}>{account.disabled_at ? "启用" : "停用"}</button></div>)}</div>
+    <form className="account-create-form" onSubmit={save}><strong>创建账号</strong><div className="settings-grid"><label className="setting-field"><span>用户名</span><input required value={draft.username} onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))} /></label><label className="setting-field"><span>显示名称</span><input required value={draft.display_name} onChange={(event) => setDraft((current) => ({ ...current, display_name: event.target.value }))} /></label><label className="setting-field"><span>初始密码（至少12位）</span><input required type="password" minLength="12" value={draft.password} onChange={(event) => setDraft((current) => ({ ...current, password: event.target.value }))} /></label><label className="setting-field"><span>角色</span><select value={draft.role} onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value }))}><option value="admin">老板</option><option value="manager">高管</option><option value="employee">员工</option></select></label>{draft.role === "employee" && <label className="setting-field"><span>绑定员工</span><select required value={draft.employee_id} onChange={(event) => setDraft((current) => ({ ...current, employee_id: event.target.value }))}>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name} · {employee.team}</option>)}</select></label>}{draft.role === "manager" && <label className="setting-field"><span>管理团队</span><input required value={draft.team} onChange={(event) => setDraft((current) => ({ ...current, team: event.target.value }))} /></label>}</div>{error && <div className="error-box">账号操作失败：{error}</div>}<button className="primary-button" disabled={saving}>{saving ? "创建中…" : "创建账号"}</button></form>
+  </SectionCard>;
 }
 function OrgTree({ onToast }) { return <SectionCard title="组织关系" description="直属管理关系决定团队和个人历史的默认可见范围"><div className="org-tree"><div className="org-node root"><Buildings size={18} /><span><strong>锦衣卫科技</strong><small>管理员 Wei</small></span></div><div className="org-branch"><div className="org-node"><UsersThree size={18} /><span><strong>研发与产品中心</strong><small>负责人 Wei · 12 人</small></span><button className="text-button" onClick={() => onToast("已打开团队权限")}>管理</button></div><div className="org-node"><UsersThree size={18} /><span><strong>客户与销售团队</strong><small>负责人 Lin · 8 人</small></span><button className="text-button" onClick={() => onToast("已打开团队权限")}>管理</button></div><div className="org-node"><UsersThree size={18} /><span><strong>运营与支持团队</strong><small>负责人 Ming · 6 人</small></span><button className="text-button" onClick={() => onToast("已打开团队权限")}>管理</button></div></div></div></SectionCard>; }
 function ScopePolicy({ role = "admin", onToast }) {

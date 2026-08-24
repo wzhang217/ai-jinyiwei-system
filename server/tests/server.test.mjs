@@ -1127,6 +1127,50 @@ test("enforces server-side employee scope with signed admin sessions", async () 
   });
 });
 
+test("supports database-backed account login, revocation, and admin account controls", async () => {
+  await withServer(async ({ base }) => {
+    const created = await jsonFetch(`${base}/api/admin/accounts`, {
+      method: "POST",
+      headers: { "x-admin-token": "test-admin" },
+      body: JSON.stringify({
+        username: "owner-test",
+        password: "a-secure-test-password",
+        display_name: "测试老板",
+        role: "admin",
+      }),
+    });
+    assert.equal(created.response.status, 201);
+    assert.equal(created.body.account.username, "owner-test");
+    assert.equal(created.body.account.password_hash, undefined);
+
+    const wrongPassword = await jsonFetch(`${base}/api/auth/login`, {
+      method: "POST",
+      body: JSON.stringify({ username: "owner-test", password: "wrong-password" }),
+    });
+    assert.equal(wrongPassword.response.status, 401);
+
+    const login = await jsonFetch(`${base}/api/auth/login`, {
+      method: "POST",
+      body: JSON.stringify({ username: "owner-test", password: "a-secure-test-password" }),
+    });
+    assert.equal(login.response.status, 200);
+    assert.equal(login.body.principal.role, "admin");
+    const sessionHeaders = { "x-admin-session": login.body.token };
+
+    const me = await jsonFetch(`${base}/api/auth/me`, { headers: sessionHeaders });
+    assert.equal(me.response.status, 200);
+    assert.equal(me.body.principal.username, "owner-test");
+    const accounts = await jsonFetch(`${base}/api/admin/accounts`, { headers: sessionHeaders });
+    assert.equal(accounts.response.status, 200);
+    assert.ok(accounts.body.accounts.some((account) => account.username === "owner-test"));
+
+    const logout = await jsonFetch(`${base}/api/auth/logout`, { method: "POST", headers: sessionHeaders });
+    assert.equal(logout.response.status, 200);
+    const revoked = await jsonFetch(`${base}/api/auth/me`, { headers: sessionHeaders });
+    assert.equal(revoked.response.status, 401);
+  });
+});
+
 test("rejects invalid, expired, and reused registration codes", async () => {
   await withServer(async ({ base }) => {
     const invalid = await jsonFetch(`${base}/api/agent/enroll`, {

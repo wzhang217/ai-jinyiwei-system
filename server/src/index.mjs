@@ -615,7 +615,7 @@ function sendJson(response, status, payload) {
 
 function corsHeaders() {
   return {
-    "access-control-allow-origin": process.env.AGENT_CORS_ORIGIN || "*",
+    "access-control-allow-origin": process.env.AGENT_CORS_ORIGIN || (process.env.NODE_ENV === "production" ? "null" : "*"),
     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
     "access-control-allow-headers": "content-type, authorization, x-admin-token, x-admin-session",
     "access-control-max-age": "600",
@@ -2408,6 +2408,19 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
   // Keep the old x-admin-token path available for one-time migration and CLI
   // operations, while all web sessions use revocable database-backed tokens.
   const requireAdmin = (request) => resolveAdminPrincipal(request, adminToken, sessionSecret, db);
+  const requestBuckets = new Map();
+  const requestsPerMinute = Math.max(60, Number(process.env.HTTP_RATE_LIMIT_PER_MINUTE) || 600);
+  const withinRateLimit = (request) => {
+    const now = Date.now();
+    const bucket = Math.floor(now / 60_000);
+    const key = `${request.socket?.remoteAddress || "unknown"}:${bucket}`;
+    const count = (requestBuckets.get(key) || 0) + 1;
+    requestBuckets.set(key, count);
+    if (requestBuckets.size > 1000) {
+      for (const [entry] of requestBuckets) if (!entry.endsWith(`:${bucket}`)) requestBuckets.delete(entry);
+    }
+    return count <= requestsPerMinute;
+  };
   return async (request, response) => {
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
     const method = request.method || "GET";
@@ -2417,6 +2430,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         response.writeHead(204, corsHeaders());
         return response.end();
       }
+      if (!withinRateLimit(request)) return sendError(response, 429, "请求过于频繁，请稍后重试", "rate_limited");
       if (method === "GET" && url.pathname === "/health") {
         return sendJson(response, 200, { ok: true, service: "ai-jinyiwei-agent-server", now: isoNow() });
       }
@@ -2477,6 +2491,95 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const token = signAdminSession({ role, actor, employee_id: employeeId, team, exp: Date.parse(expiresAt) }, sessionSecret);
         recordAudit(db, "admin_session_created", "admin", actor, `role=${role}`);
         return sendJson(response, 201, { token, expires_at: expiresAt, principal: { role, actor, employee_id: employeeId, team } });
+      }
+
+      if (url.pathname === "/api/admin/accounts" && method === "GET") {
+        const principal = requireAdmin(request);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin account permission required", "forbidden");
+        const accounts = db.prepare(`
+          SELECT id, username, display_name, role, employee_id, team, created_at, updated_at, last_login_at, disabled_at
+          FROM user_accounts
+          ORDER BY created_at ASC
+        `).all();
+        return sendJson(response, 200, { accounts });
+      }
+
+      if (url.pathname === "/api/admin/accounts" && method === "POST") {
+        const principal = requireAdmin(request);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin account permission required", "forbidden");
+        const body = await readJson(request);
+        const username = normalizeUsername(body.username);
+        const password = typeof body.password === "string" ? body.password : "";
+        const displayName = typeof body.display_name === "string" ? body.display_name.trim().slice(0, 120) : "";
+        const role = ["admin", "manager", "employee"].includes(body.role) ? body.role : null;
+        if (!/^[a-z0-9][a-z0-9._-]{2,63}$/.test(username)) return sendError(response, 400, "username must be 3-64 lowercase letters, numbers, dot, underscore, or hyphen", "invalid_username");
+        if (password.length < 12 || password.length > 200) return sendError(response, 400, "password must be 12-200 characters", "invalid_password");
+        if (!displayName) return sendError(response, 400, "display_name is required", "invalid_display_name");
+        if (!role) return sendError(response, 400, "role must be admin, manager, or employee", "invalid_role");
+        if (db.prepare("SELECT id FROM user_accounts WHERE username = ?").get(username)) return sendError(response, 409, "username already exists", "username_exists");
+
+        let employeeId = null;
+        let team = null;
+        if (role === "employee") {
+          const employee = db.prepare("SELECT id, team FROM employees WHERE id = ?").get(body.employee_id);
+          if (!employee) return sendError(response, 404, "employee not found", "employee_not_found");
+          employeeId = employee.id;
+          team = employee.team;
+        } else if (role === "manager") {
+          team = typeof body.team === "string" ? body.team.trim().slice(0, 120) : "";
+          if (!team) return sendError(response, 400, "team is required for manager accounts", "invalid_team");
+        }
+
+        const now = isoNow();
+        const account = {
+          id: newId("account"),
+          username,
+          display_name: displayName,
+          role,
+          employee_id: employeeId,
+          team,
+          password_hash: hashPassword(password),
+          created_at: now,
+          updated_at: now,
+        };
+        db.prepare(`
+          INSERT INTO user_accounts
+            (id, username, display_name, role, employee_id, team, password_hash, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(account.id, account.username, account.display_name, account.role, account.employee_id, account.team, account.password_hash, account.created_at, account.updated_at);
+        recordAudit(db, "account_created", principal.actor || "admin", account.id, `username=${username}; role=${role}`);
+        return sendJson(response, 201, { account: accountPrincipal(account) });
+      }
+
+      const accountAction = url.pathname.match(/^\/api\/admin\/accounts\/([^/]+)\/(disable|enable|password)$/);
+      if (accountAction && method === "POST") {
+        const principal = requireAdmin(request);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin account permission required", "forbidden");
+        const accountId = decodeURIComponent(accountAction[1]);
+        const action = accountAction[2];
+        const account = db.prepare("SELECT id, username, display_name, role, employee_id, team, password_hash, disabled_at FROM user_accounts WHERE id = ?").get(accountId);
+        if (!account) return sendError(response, 404, "account not found", "account_not_found");
+
+        if (action === "password") {
+          const body = await readJson(request);
+          const password = typeof body.password === "string" ? body.password : "";
+          if (password.length < 12 || password.length > 200) return sendError(response, 400, "password must be 12-200 characters", "invalid_password");
+          const now = isoNow();
+          db.prepare("UPDATE user_accounts SET password_hash = ?, updated_at = ? WHERE id = ?").run(hashPassword(password), now, account.id);
+          db.prepare("UPDATE admin_sessions SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL").run(now, account.id);
+          recordAudit(db, "account_password_reset", principal.actor || "admin", account.id, `username=${account.username}`);
+          return sendJson(response, 200, { ok: true });
+        }
+
+        const nextDisabledAt = action === "disable" ? isoNow() : null;
+        if (action === "disable" && !account.disabled_at && account.role === "admin") {
+          const activeAdmins = db.prepare("SELECT COUNT(*) AS count FROM user_accounts WHERE role = 'admin' AND disabled_at IS NULL").get();
+          if (Number(activeAdmins?.count || 0) <= 1) return sendError(response, 409, "cannot disable the last active admin", "last_admin");
+        }
+        db.prepare("UPDATE user_accounts SET disabled_at = ?, updated_at = ? WHERE id = ?").run(nextDisabledAt, isoNow(), account.id);
+        if (action === "disable") db.prepare("UPDATE admin_sessions SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL").run(isoNow(), account.id);
+        recordAudit(db, action === "disable" ? "account_disabled" : "account_enabled", principal.actor || "admin", account.id, `username=${account.username}`);
+        return sendJson(response, 200, { ok: true, disabled_at: nextDisabledAt });
       }
 
       if (method === "POST" && url.pathname === "/api/admin/registration-codes") {
@@ -3130,6 +3233,11 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
 }
 
 export function createAgentServer({ dbPath = process.env.AGENT_DB_PATH || defaultDbPath, adminToken = process.env.AGENT_ADMIN_TOKEN || `admin_${randomBytes(18).toString("base64url")}`, sessionSecret = process.env.AGENT_SESSION_SECRET || adminToken, logger = console, ai = createAiService({ logger }) } = {}) {
+  if (process.env.NODE_ENV === "production") {
+    if (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 12) throw new Error("production requires ADMIN_PASSWORD with at least 12 characters");
+    if (!process.env.AGENT_SESSION_SECRET || process.env.AGENT_SESSION_SECRET.length < 32) throw new Error("production requires a random AGENT_SESSION_SECRET with at least 32 characters");
+    if (!process.env.AGENT_CORS_ORIGIN || process.env.AGENT_CORS_ORIGIN === "*") throw new Error("production requires an explicit AGENT_CORS_ORIGIN");
+  }
   mkdirSync(dirname(resolve(dbPath)), { recursive: true });
   const db = new DatabaseSync(resolve(dbPath));
   createSchema(db);
@@ -3184,7 +3292,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const host = process.env.HOST || "0.0.0.0";
   app.listen(port, host).then((address) => {
     console.log(`AI锦衣卫 Agent Server listening on http://${address.address === "::" ? "localhost" : address.address}:${address.port}`);
-    console.log(`Admin token: ${process.env.AGENT_ADMIN_TOKEN ? "configured via AGENT_ADMIN_TOKEN" : app.adminToken}`);
+    if (process.env.NODE_ENV === "production") console.log("Admin token: configured for migration/CLI only");
+    else console.log(`Admin token: ${process.env.AGENT_ADMIN_TOKEN ? "configured via AGENT_ADMIN_TOKEN" : app.adminToken}`);
     console.log(`AI provider: ${app.ai?.model || "rules-v1"} (${app.ai?.mode || "fallback"})`);
   });
 }

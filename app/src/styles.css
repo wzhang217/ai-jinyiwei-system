@@ -96,3 +96,27 @@ button, input, select { font: inherit; } button { color: inherit; border: 0; cur
 .timeline-row p small { color: #9b968e; font-size: 10px; }
 .sequence-note { display: flex; flex-direction: column; gap: 5px; margin-top: 12px; padding: 10px 12px; border-radius: 8px; background: #f5f2fb; color: #71628e; font-size: 10px; line-height: 1.6; }
 .sequence-note strong { color: #514369; font-size: 11px; }
+.auth-screen { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: #f4f4f1; }
+.auth-card { width: min(420px, 100%); padding: 32px; border: 1px solid #e4e2de; border-radius: 16px; background: #fff; box-shadow: 0 16px 45px rgba(48, 45, 40, .08); }
+.auth-card > .organization-mark { margin-bottom: 18px; }
+.auth-card h1 { margin: 0 0 8px; color: #292824; font-size: 25px; letter-spacing: -.04em; }
+.auth-card p { margin: 0 0 22px; color: #85817a; font-size: 12px; line-height: 1.7; }
+.auth-eyebrow { margin-bottom: 9px; color: #74639d; font-family: "DM Mono", monospace; font-size: 9px; letter-spacing: .06em; }
+.auth-form { display: flex; flex-direction: column; gap: 13px; }
+.auth-form label { display: flex; flex-direction: column; gap: 6px; color: #6f6b63; font-size: 11px; }
+.auth-form input { height: 39px; padding: 0 11px; border: 1px solid #deddd9; border-radius: 8px; outline: 0; background: #fafaf8; color: #48453f; font-size: 12px; }
+.auth-form input:focus { border-color: #b9a9d5; box-shadow: 0 0 0 3px #f0ebfa; }
+.auth-submit { width: 100%; height: 40px; margin-top: 3px; }
+.auth-form .error-box { margin: 0; }
+.account-menu-button { display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: #85817a; }
+.account-menu-button:hover { color: #4e4b45; }
+.role-select-static { display: inline-flex; align-items: center; }
+.account-admin-list { display: flex; flex-direction: column; gap: 7px; margin-bottom: 22px; }
+.account-admin-row { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 9px 10px; border: 1px solid #e9e7e2; border-radius: 8px; background: #fff; }
+.account-admin-row > span:nth-child(2) { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
+.account-admin-row strong { color: #514d46; font-size: 11px; }
+.account-admin-row small { color: #9e9991; font-size: 10px; }
+.account-admin-row .outline-button { height: 30px; }
+.account-create-form { padding-top: 18px; border-top: 1px solid #e8e6e1; }
+.account-create-form > strong { display: block; margin-bottom: 13px; color: #514d46; font-size: 12px; }
+.account-create-form .setting-field select { height: 36px; padding: 0 10px; border: 1px solid #e4e1db; border-radius: 8px; background: #fafaf8; color: #565149; font-size: 11px; }

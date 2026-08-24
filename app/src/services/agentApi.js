@@ -1,7 +1,6 @@
 import { formatShanghaiDate, formatShanghaiTime, shanghaiDayKey } from "../time.js";
 
 const configuredBaseUrl = (import.meta.env.VITE_AGENT_API_BASE_URL || "").trim().replace(/\/$/, "");
-const adminToken = (import.meta.env.VITE_AGENT_ADMIN_TOKEN || "").trim();
 const sourceKindLabels = {
   desktop_app: "桌面应用",
   browser_native: "浏览器原生",
@@ -13,8 +12,16 @@ const sourceKindLabels = {
 // never silently fall back to fabricated history when the API is unavailable.
 export const demoMode = import.meta.env.DEV && import.meta.env.VITE_DEMO_MODE === "true";
 let adminSessionToken = typeof window !== "undefined" ? window.sessionStorage.getItem("jinyiwei_admin_session") || "" : "";
+let adminPrincipal = null;
+if (typeof window !== "undefined") {
+  try {
+    adminPrincipal = JSON.parse(window.sessionStorage.getItem("jinyiwei_admin_principal") || "null");
+  } catch {
+    window.sessionStorage.removeItem("jinyiwei_admin_principal");
+  }
+}
 
-export const agentApiEnabled = Boolean(configuredBaseUrl && adminToken);
+export const agentApiEnabled = Boolean(configuredBaseUrl);
 
 export function setAdminSession(token) {
   adminSessionToken = typeof token === "string" ? token : "";
@@ -24,11 +31,27 @@ export function setAdminSession(token) {
   }
 }
 
-async function request(path, options = {}, { bootstrap = false } = {}) {
+export function setAdminPrincipal(principal) {
+  adminPrincipal = principal && typeof principal === "object" ? principal : null;
+  if (typeof window !== "undefined") {
+    if (adminPrincipal) window.sessionStorage.setItem("jinyiwei_admin_principal", JSON.stringify(adminPrincipal));
+    else window.sessionStorage.removeItem("jinyiwei_admin_principal");
+  }
+}
+
+export function getStoredAdminPrincipal() {
+  return adminPrincipal;
+}
+
+export function clearAdminSession() {
+  setAdminSession("");
+  setAdminPrincipal(null);
+}
+
+async function request(path, options = {}, { publicEndpoint = false } = {}) {
   if (!agentApiEnabled) throw new Error("Agent API is not configured");
-  const authHeaders = bootstrap || !adminSessionToken
-    ? { "x-admin-token": adminToken }
-    : { "x-admin-session": adminSessionToken };
+  if (!publicEndpoint && !adminSessionToken) throw new Error("请先登录管理后台");
+  const authHeaders = adminSessionToken ? { "x-admin-session": adminSessionToken } : {};
   const response = await fetch(`${configuredBaseUrl}${path}`, {
     ...options,
     headers: {
@@ -42,13 +65,28 @@ async function request(path, options = {}, { bootstrap = false } = {}) {
   return body;
 }
 
-export async function createAdminSession({ role, employeeId, team } = {}) {
-  const body = await request("/api/admin/sessions", {
+export async function loginAdmin(username, password) {
+  const body = await request("/api/auth/login", {
     method: "POST",
-    body: JSON.stringify({ role, ...(employeeId ? { employee_id: employeeId } : {}), ...(team ? { team } : {}) }),
-  }, { bootstrap: true });
+    body: JSON.stringify({ username, password }),
+  }, { publicEndpoint: true });
   setAdminSession(body.token);
+  setAdminPrincipal(body.principal);
   return body;
+}
+
+export async function getAdminMe() {
+  const body = await request("/api/auth/me");
+  setAdminPrincipal(body.principal);
+  return body;
+}
+
+export async function logoutAdmin() {
+  try {
+    if (adminSessionToken) await request("/api/auth/logout", { method: "POST" });
+  } finally {
+    clearAdminSession();
+  }
 }
 
 export async function getLiveDevices() {
@@ -187,6 +225,24 @@ export async function updateLiveRolePolicies(roles) {
     body: JSON.stringify({ roles }),
   });
   return body.roles || [];
+}
+
+export async function getAdminAccounts() {
+  const body = await request("/api/admin/accounts");
+  return body.accounts || [];
+}
+
+export async function createAdminAccount(account) {
+  const body = await request("/api/admin/accounts", {
+    method: "POST",
+    body: JSON.stringify(account),
+  });
+  return body.account;
+}
+
+export async function setAdminAccountStatus(accountId, enabled) {
+  const action = enabled ? "enable" : "disable";
+  return request(`/api/admin/accounts/${encodeURIComponent(accountId)}/${action}`, { method: "POST" });
 }
 
 export async function getLiveDeviceDetail(deviceId) {
