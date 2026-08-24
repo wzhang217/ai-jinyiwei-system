@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -113,6 +113,36 @@ const newId = (prefix) => `${prefix}_${randomBytes(12).toString("hex")}`;
 const newToken = () => randomBytes(32).toString("base64url");
 const newRegistrationCode = () => `JY-${randomBytes(5).toString("hex").toUpperCase()}`;
 const newBrowserPairingCode = () => `BP-${randomBytes(5).toString("hex").toUpperCase()}`;
+const normalizeUsername = (value) => String(value || "").trim().toLowerCase();
+
+function hashPassword(password) {
+  const salt = randomBytes(16).toString("base64url");
+  const digest = scryptSync(String(password), salt, 32).toString("base64url");
+  return `scrypt$${salt}$${digest}`;
+}
+
+function verifyPassword(password, encoded) {
+  const [algorithm, salt, expectedValue] = String(encoded || "").split("$");
+  if (algorithm !== "scrypt" || !salt || !expectedValue) return false;
+  try {
+    const actual = scryptSync(String(password), salt, 32);
+    const expected = Buffer.from(expectedValue, "base64url");
+    return actual.length === expected.length && timingSafeEqual(actual, expected);
+  } catch {
+    return false;
+  }
+}
+
+function accountPrincipal(account) {
+  return {
+    account_id: account.id,
+    username: account.username,
+    role: account.role,
+    actor: account.display_name,
+    employee_id: account.employee_id || null,
+    team: account.team || null,
+  };
+}
 
 function configuredAiGenerationBatchSize() {
   return Math.min(Math.max(Number(process.env.AI_GENERATION_BATCH_SIZE) || 1, 1), 20);
@@ -128,6 +158,34 @@ function createSchema(db) {
       name TEXT NOT NULL,
       team TEXT NOT NULL,
       created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS user_accounts (
+      id TEXT PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      display_name TEXT NOT NULL,
+      role TEXT NOT NULL CHECK (role IN ('admin', 'manager', 'employee')),
+      employee_id TEXT REFERENCES employees(id),
+      team TEXT,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_login_at TEXT,
+      disabled_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS admin_sessions (
+      id TEXT PRIMARY KEY,
+      token_hash TEXT NOT NULL UNIQUE,
+      account_id TEXT REFERENCES user_accounts(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK (role IN ('admin', 'manager', 'employee')),
+      actor TEXT NOT NULL,
+      employee_id TEXT,
+      team TEXT,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      revoked_at TEXT
     );
 
     CREATE TABLE IF NOT EXISTS registration_codes (
@@ -324,6 +382,23 @@ function createSchema(db) {
   );
   const createdAt = isoNow();
   for (const employee of defaultEmployees) employeeInsert.run(...employee, createdAt);
+
+  const adminUsername = normalizeUsername(process.env.ADMIN_USERNAME || "admin");
+  const adminPassword = String(process.env.ADMIN_PASSWORD || "");
+  if (adminPassword && !db.prepare("SELECT id FROM user_accounts WHERE username = ?").get(adminUsername)) {
+    db.prepare(`
+      INSERT INTO user_accounts
+        (id, username, display_name, role, employee_id, team, password_hash, created_at, updated_at)
+      VALUES (?, ?, ?, 'admin', NULL, NULL, ?, ?, ?)
+    `).run(
+      newId("account"),
+      adminUsername,
+      process.env.ADMIN_DISPLAY_NAME || "企业管理员",
+      hashPassword(adminPassword),
+      createdAt,
+      createdAt,
+    );
+  }
 
   const policyInsert = db.prepare("INSERT OR IGNORE INTO policies (key, value) VALUES (?, ?)");
   for (const [key, value] of Object.entries(defaultPolicy)) {
@@ -597,11 +672,68 @@ function verifyAdminSession(token, secret) {
   }
 }
 
-function requireAdmin(request, adminToken, sessionSecret = adminToken) {
+function createDatabaseSession(db, account) {
+  const token = newToken();
+  const now = isoNow();
+  const ttl = Math.min(Math.max(Number(process.env.AUTH_SESSION_TTL_SECONDS) || 8 * 3600, 300), 24 * 3600);
+  const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
+  db.prepare(`
+    INSERT INTO admin_sessions
+      (id, token_hash, account_id, role, actor, employee_id, team, expires_at, created_at, last_seen_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    newId("session"),
+    hash(token),
+    account.id,
+    account.role,
+    account.display_name,
+    account.employee_id || null,
+    account.team || null,
+    expiresAt,
+    now,
+    now,
+  );
+  return { token, expires_at: expiresAt, principal: accountPrincipal(account) };
+}
+
+function databaseSessionPrincipal(db, token) {
+  if (!token) return null;
+  const session = db.prepare(`
+    SELECT s.id, s.role, s.actor, s.employee_id, s.team, s.expires_at,
+      a.id AS account_id, a.username
+    FROM admin_sessions s
+    JOIN user_accounts a ON a.id = s.account_id
+    WHERE s.token_hash = ?
+      AND s.revoked_at IS NULL
+      AND s.expires_at > ?
+      AND a.disabled_at IS NULL
+  `).get(hash(token), isoNow());
+  if (!session) return null;
+  db.prepare("UPDATE admin_sessions SET last_seen_at = ? WHERE id = ?").run(isoNow(), session.id);
+  return {
+    account_id: session.account_id,
+    username: session.username,
+    role: session.role,
+    actor: session.actor,
+    employee_id: session.employee_id || null,
+    team: session.team || null,
+    source: "session",
+  };
+}
+
+function revokeDatabaseSession(db, token) {
+  if (!token) return false;
+  const result = db.prepare("UPDATE admin_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL").run(isoNow(), hash(token));
+  return Number(result.changes || 0) > 0;
+}
+
+function resolveAdminPrincipal(request, adminToken, sessionSecret = adminToken, db = null) {
+  const token = request.headers["x-admin-session"] || "";
+  const databasePrincipal = db ? databaseSessionPrincipal(db, token) : null;
+  if (databasePrincipal) return databasePrincipal;
   if (request.headers["x-admin-token"] === adminToken) {
     return { role: "admin", actor: "admin", employee_id: null, team: null, source: "bootstrap" };
   }
-  const token = request.headers["x-admin-session"] || "";
   const payload = verifyAdminSession(token, sessionSecret);
   return payload ? { ...payload, source: "session" } : null;
 }
@@ -2273,6 +2405,9 @@ function readPersistedMemoryRecords(db, { deviceId = null, principal = null, tea
 }
 
 function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, logger = console }) {
+  // Keep the old x-admin-token path available for one-time migration and CLI
+  // operations, while all web sessions use revocable database-backed tokens.
+  const requireAdmin = (request) => resolveAdminPrincipal(request, adminToken, sessionSecret, db);
   return async (request, response) => {
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
     const method = request.method || "GET";
@@ -2284,6 +2419,39 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
       }
       if (method === "GET" && url.pathname === "/health") {
         return sendJson(response, 200, { ok: true, service: "ai-jinyiwei-agent-server", now: isoNow() });
+      }
+
+      if (method === "POST" && url.pathname === "/api/auth/login") {
+        const body = await readJson(request);
+        const username = normalizeUsername(body.username);
+        const password = typeof body.password === "string" ? body.password : "";
+        const account = db.prepare(`
+          SELECT id, username, display_name, role, employee_id, team, password_hash
+          FROM user_accounts
+          WHERE username = ? AND disabled_at IS NULL
+        `).get(username);
+        if (!account || !verifyPassword(password, account.password_hash)) {
+          return sendError(response, 401, "用户名或密码错误", "invalid_credentials");
+        }
+        const now = isoNow();
+        db.prepare("UPDATE user_accounts SET last_login_at = ?, updated_at = ? WHERE id = ?").run(now, now, account.id);
+        const session = createDatabaseSession(db, account);
+        recordAudit(db, "login_succeeded", account.display_name, account.id, "password login");
+        return sendJson(response, 200, session);
+      }
+
+      if (method === "GET" && url.pathname === "/api/auth/me") {
+        const principal = requireAdmin(request);
+        if (!principal) return sendError(response, 401, "登录已失效，请重新登录", "unauthorized");
+        return sendJson(response, 200, { principal });
+      }
+
+      if (method === "POST" && url.pathname === "/api/auth/logout") {
+        const principal = requireAdmin(request);
+        const sessionToken = request.headers["x-admin-session"] || "";
+        if (sessionToken) revokeDatabaseSession(db, sessionToken);
+        if (principal) recordAudit(db, "logout", principal.actor || "unknown", principal.account_id || "session", "session revoked");
+        return sendJson(response, 200, { ok: true });
       }
 
       if (method === "POST" && url.pathname === "/api/admin/sessions") {
