@@ -1,6 +1,6 @@
 [package]
 name = "ai-jinyiwei-agent"
-version = "0.1.12"
+version = "0.1.13"
 description = "AI锦衣卫 Windows activity metadata agent"
 authors = ["AI锦衣卫"]
 edition = "2021"

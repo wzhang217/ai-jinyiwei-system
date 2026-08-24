@@ -19,7 +19,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
-const AGENT_VERSION: &str = "0.1.12";
+const AGENT_VERSION: &str = "0.1.13";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const LOCAL_QUEUE_KEY_ACCOUNT: &str = "__local-queue-key";
 const MAX_PENDING_EVENTS: i64 = 10_000;

@@ -12,7 +12,7 @@ const fallbackStatus = {
   last_error: null,
   last_browser_capture_at: null,
   last_browser_capture_source: null,
-  agent_version: "0.1.12",
+  agent_version: "0.1.13",
   privacy_policy: null,
   privacy_acknowledged: false,
   policy: {
