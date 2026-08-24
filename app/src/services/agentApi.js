@@ -288,6 +288,20 @@ export async function setAdminAccountStatus(accountId, enabled) {
   return request(`/api/admin/accounts/${encodeURIComponent(accountId)}/${action}`, { method: "POST" });
 }
 
+export async function resetAdminAccountPassword(accountId, password) {
+  return request(`/api/admin/accounts/${encodeURIComponent(accountId)}/password`, {
+    method: "POST",
+    body: JSON.stringify({ password }),
+  });
+}
+
+export async function changeCurrentAccountPassword(currentPassword, newPassword) {
+  return request("/api/auth/password", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+}
+
 export async function getLiveDeviceDetail(deviceId) {
   return request(`/api/admin/devices/${encodeURIComponent(deviceId)}`);
 }

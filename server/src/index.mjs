@@ -8,7 +8,7 @@ import { createAiService } from "./ai.mjs";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const defaultDbPath = resolve(moduleDir, "../data/agent.sqlite");
-const CURRENT_SCHEMA_VERSION = 7;
+const CURRENT_SCHEMA_VERSION = 8;
 const DEFAULT_ORGANIZATION_ID = /^[a-z0-9][a-z0-9_-]{2,63}$/.test(String(process.env.DEFAULT_ORGANIZATION_ID || "org_default"))
   ? String(process.env.DEFAULT_ORGANIZATION_ID || "org_default")
   : "org_default";
@@ -335,6 +335,7 @@ function createSchema(db) {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       last_login_at TEXT,
+      password_changed_at TEXT,
       disabled_at TEXT,
       failed_login_count INTEGER NOT NULL DEFAULT 0,
       locked_until TEXT,
@@ -625,6 +626,7 @@ function createSchema(db) {
   ensureColumn(db, "events", "source_kind", "TEXT NOT NULL DEFAULT 'desktop_app'");
   ensureColumn(db, "user_accounts", "failed_login_count", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "user_accounts", "locked_until", "TEXT");
+  ensureColumn(db, "user_accounts", "password_changed_at", "TEXT");
   ensureColumn(db, "user_accounts", "mfa_enabled", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "user_accounts", "mfa_secret_enc", "TEXT");
   ensureColumn(db, "user_accounts", "mfa_recovery_codes_json", "TEXT NOT NULL DEFAULT '[]'");
@@ -693,14 +695,15 @@ function createSchema(db) {
   if (adminPassword && !db.prepare("SELECT id FROM user_accounts WHERE username = ?").get(adminUsername)) {
     db.prepare(`
       INSERT INTO user_accounts
-        (id, username, display_name, role, employee_id, team, organization_id, password_hash, created_at, updated_at)
-      VALUES (?, ?, ?, 'admin', NULL, NULL, ?, ?, ?, ?)
+        (id, username, display_name, role, employee_id, team, organization_id, password_hash, created_at, updated_at, password_changed_at)
+      VALUES (?, ?, ?, 'admin', NULL, NULL, ?, ?, ?, ?, ?)
     `).run(
       newId("account"),
       adminUsername,
       process.env.ADMIN_DISPLAY_NAME || "企业管理员",
       DEFAULT_ORGANIZATION_ID,
       hashPassword(adminPassword),
+      createdAt,
       createdAt,
       createdAt,
     );
@@ -756,6 +759,9 @@ function applySchemaMigrations(db, organizationDefault, now = isoNow()) {
   }
   if (!applied.has(7)) {
     insert.run(7, "audit-log-integrity-chain", hash("schema:audit-log-integrity-chain:v7"), now);
+  }
+  if (!applied.has(8)) {
+    insert.run(8, "jwt-password-invalidation", hash("schema:jwt-password-invalidation:v8"), now);
   }
 }
 
@@ -1316,6 +1322,7 @@ function createJwtSession(account, secret) {
     employee_id: account.employee_id || null,
     team: account.team || null,
     organization_id: account.organization_id || DEFAULT_ORGANIZATION_ID,
+    password_changed_at: account.password_changed_at || null,
     iat: now,
     exp: Math.floor(Date.parse(expiresAt) / 1000),
   }, secret);
@@ -1326,11 +1333,12 @@ function jwtPrincipal(db, payload) {
   const accountId = payload?.account_id || payload?.sub;
   if (!accountId) return null;
   const account = db.prepare(`
-    SELECT id, username, display_name, role, employee_id, team, organization_id, mfa_enabled
+    SELECT id, username, display_name, role, employee_id, team, organization_id, mfa_enabled, password_changed_at
     FROM user_accounts
     WHERE id = ? AND disabled_at IS NULL
   `).get(accountId);
   if (!account || (payload.organization_id && payload.organization_id !== account.organization_id)) return null;
+  if ((account.password_changed_at || null) !== (payload.password_changed_at || null)) return null;
   return { ...accountPrincipal(account), source: "jwt" };
 }
 
@@ -3241,7 +3249,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const password = typeof body.password === "string" ? body.password : "";
         const account = db.prepare(`
           SELECT id, username, display_name, role, employee_id, team, organization_id, password_hash,
-            mfa_enabled
+            mfa_enabled, password_changed_at
           FROM user_accounts
           WHERE username = ? AND disabled_at IS NULL
         `).get(username);
@@ -3260,6 +3268,25 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const principal = requireAdmin(request);
         if (!principal) return sendError(response, 401, "登录已失效，请重新登录", "unauthorized");
         return sendJson(response, 200, { principal });
+      }
+
+      if (method === "POST" && url.pathname === "/api/auth/password") {
+        const principal = requireAdmin(request);
+        if (!principal?.account_id) return sendError(response, 401, "需要真实账号会话", "unauthorized");
+        const body = await readJson(request);
+        const currentPassword = typeof body.current_password === "string" ? body.current_password : "";
+        const newPassword = typeof body.new_password === "string" ? body.new_password : "";
+        if (newPassword.length < 12 || newPassword.length > 200) return sendError(response, 400, "new_password must be 12-200 characters", "invalid_password");
+        const account = db.prepare("SELECT id, display_name, organization_id, password_hash FROM user_accounts WHERE id = ? AND organization_id = ? AND disabled_at IS NULL")
+          .get(principal.account_id, principal.organization_id || DEFAULT_ORGANIZATION_ID);
+        if (!account || !verifyPassword(currentPassword, account.password_hash)) return sendError(response, 401, "当前密码错误", "invalid_current_password");
+        if (verifyPassword(newPassword, account.password_hash)) return sendError(response, 400, "新密码不能与当前密码相同", "password_unchanged");
+        const now = isoNow();
+        db.prepare("UPDATE user_accounts SET password_hash = ?, password_changed_at = ?, updated_at = ? WHERE id = ?")
+          .run(hashPassword(newPassword), now, now, account.id);
+        db.prepare("UPDATE admin_sessions SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL").run(now, account.id);
+        recordAudit(db, "account_password_changed", principal.actor || account.display_name, account.id, "password changed; jwt re-login required", account.organization_id);
+        return sendJson(response, 200, { ok: true, requires_relogin: true });
       }
 
       if (method === "GET" && url.pathname === "/api/auth/mfa/status") {
@@ -3408,12 +3435,13 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           password_hash: hashPassword(password),
           created_at: now,
           updated_at: now,
+          password_changed_at: now,
         };
         db.prepare(`
           INSERT INTO user_accounts
-            (id, username, display_name, role, employee_id, team, organization_id, password_hash, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(account.id, account.username, account.display_name, account.role, account.employee_id, account.team, account.organization_id, account.password_hash, account.created_at, account.updated_at);
+            (id, username, display_name, role, employee_id, team, organization_id, password_hash, created_at, updated_at, password_changed_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(account.id, account.username, account.display_name, account.role, account.employee_id, account.team, account.organization_id, account.password_hash, account.created_at, account.updated_at, account.password_changed_at);
         recordAudit(db, "account_created", principal.actor || "admin", account.id, `username=${username}; role=${role}`, account.organization_id);
         return sendJson(response, 201, { account: accountPrincipal(account) });
       }
@@ -3432,7 +3460,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           const password = typeof body.password === "string" ? body.password : "";
           if (password.length < 12 || password.length > 200) return sendError(response, 400, "password must be 12-200 characters", "invalid_password");
           const now = isoNow();
-          db.prepare("UPDATE user_accounts SET password_hash = ?, updated_at = ? WHERE id = ?").run(hashPassword(password), now, account.id);
+          db.prepare("UPDATE user_accounts SET password_hash = ?, password_changed_at = ?, updated_at = ? WHERE id = ?").run(hashPassword(password), now, now, account.id);
           db.prepare("UPDATE admin_sessions SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL").run(now, account.id);
           recordAudit(db, "account_password_reset", principal.actor || "admin", account.id, `username=${account.username}`, account.organization_id);
           return sendJson(response, 200, { ok: true });

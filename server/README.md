@@ -32,7 +32,7 @@ AUTH_JWT_TTL_SECONDS=28800
 
 前端只需要设置 `VITE_AGENT_API_BASE_URL=http://localhost:8787`，不再设置 `VITE_AGENT_ADMIN_TOKEN`。登录成功后的 JWT 存放在浏览器会话存储中，每次请求通过 `Authorization: Bearer <jwt>` 发送；退出登录会清除本机 JWT，账号停用或 JWT 过期后服务端拒绝请求。
 
-登录只校验用户名和密码，不启用 MFA、数据库会话或登录失败锁定；登录成功、失败和退出仍写入审计。员工 Agent 注册后必须确认当前隐私策略版本，服务端会记录组织、员工、设备、策略哈希和确认时间；策略版本更新后需要重新确认。相关接口为 `/api/agent/privacy-policy`、`/api/agent/privacy-acknowledgement` 和 `/api/admin/privacy/acknowledgements`。后台的“员工数据权利”支持 `POST /api/admin/privacy/subject-export` 导出员工活动元数据，以及 `POST /api/admin/privacy/subject-delete` 先预览再执行删除；两者均按老板/高管/员工服务端范围过滤并写入审计。导出不会包含密码、Token 或原始正文；删除会清理活动事件、Memory Summary、生成队列和浏览器临时凭据，但保留员工/设备身份、审计日志和隐私确认记录。
+登录只校验用户名和密码，不启用 MFA、数据库会话或登录失败锁定；登录成功、失败和退出仍写入审计。管理员可以在账号管理中重置密码，也可以由当前账号调用 `POST /api/auth/password` 修改自己的密码。密码变更会更新 `password_changed_at`，使该账号已有 JWT 立即失效，之后使用新密码重新登录即可。员工 Agent 注册后必须确认当前隐私策略版本，服务端会记录组织、员工、设备、策略哈希和确认时间；策略版本更新后需要重新确认。相关接口为 `/api/agent/privacy-policy`、`/api/agent/privacy-acknowledgement` 和 `/api/admin/privacy/acknowledgements`。后台的“员工数据权利”支持 `POST /api/admin/privacy/subject-export` 导出员工活动元数据，以及 `POST /api/admin/privacy/subject-delete` 先预览再执行删除；两者均按老板/高管/员工服务端范围过滤并写入审计。导出不会包含密码、Token 或原始正文；删除会清理活动事件、Memory Summary、生成队列和浏览器临时凭据，但保留员工/设备身份、审计日志和隐私确认记录。
 
 ### 新客户组织初始化
 
@@ -53,7 +53,7 @@ unset PROVISION_ADMIN_PASSWORD
 
 ### 数据库迁移、备份与恢复
 
-服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 7，包含组织归属字段、按组织隔离的采集策略和企业设置、隐私策略确认记录、兼容旧版本的账号字段、AI 用量统计和审计日志哈希链；旧版 SQLite 会在启动时补列并建立组织配置，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
+服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 8，包含组织归属字段、按组织隔离的采集策略和企业设置、隐私策略确认记录、兼容旧版本的账号字段、JWT 密码变更失效时间、AI 用量统计和审计日志哈希链；旧版 SQLite 会在启动时补列并建立组织配置，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
 
 ```bash
 npm run backup

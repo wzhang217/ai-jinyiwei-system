@@ -45,9 +45,9 @@ try {
     const accountId = `account_${randomBytes(12).toString("hex")}`;
     db.prepare(`
       INSERT INTO user_accounts
-        (id, username, display_name, role, employee_id, team, organization_id, password_hash, created_at, updated_at)
-      VALUES (?, ?, ?, 'admin', NULL, NULL, ?, ?, ?, ?)
-    `).run(accountId, adminUsername, adminDisplayName, organizationId, passwordHash, now, now);
+        (id, username, display_name, role, employee_id, team, organization_id, password_hash, created_at, updated_at, password_changed_at)
+      VALUES (?, ?, ?, 'admin', NULL, NULL, ?, ?, ?, ?, ?)
+    `).run(accountId, adminUsername, adminDisplayName, organizationId, passwordHash, now, now, now);
     recordAudit(db, "organization_provisioned", "provisioning-cli", organizationId, `slug=${organizationSlug}; owner=${adminUsername}`, organizationId);
     db.exec("COMMIT");
   } catch (error) {

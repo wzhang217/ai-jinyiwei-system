@@ -1229,6 +1229,51 @@ test("supports JWT account login, account controls, and bearer authorization", a
   });
 });
 
+test("invalidates old JWTs when an account password is reset", async () => {
+  await withServer(async ({ base }) => {
+    const created = await jsonFetch(`${base}/api/admin/accounts`, {
+      method: "POST",
+      headers: { "x-admin-token": "test-admin" },
+      body: JSON.stringify({ username: "password-reset-test", password: "old-secure-password", display_name: "密码重置测试", role: "admin" }),
+    });
+    assert.equal(created.response.status, 201);
+
+    const oldLogin = await jsonFetch(`${base}/api/auth/login`, {
+      method: "POST",
+      body: JSON.stringify({ username: "password-reset-test", password: "old-secure-password" }),
+    });
+    assert.equal(oldLogin.response.status, 200);
+    const oldHeaders = { authorization: `Bearer ${oldLogin.body.token}` };
+
+    const reset = await jsonFetch(`${base}/api/admin/accounts/${created.body.account.account_id}/password`, {
+      method: "POST",
+      headers: { "x-admin-token": "test-admin" },
+      body: JSON.stringify({ password: "new-secure-password" }),
+    });
+    assert.equal(reset.response.status, 200);
+
+    const oldMe = await jsonFetch(`${base}/api/auth/me`, { headers: oldHeaders });
+    assert.equal(oldMe.response.status, 401);
+    const newLogin = await jsonFetch(`${base}/api/auth/login`, {
+      method: "POST",
+      body: JSON.stringify({ username: "password-reset-test", password: "new-secure-password" }),
+    });
+    assert.equal(newLogin.response.status, 200);
+    const changed = await jsonFetch(`${base}/api/auth/password`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${newLogin.body.token}` },
+      body: JSON.stringify({ current_password: "new-secure-password", new_password: "final-secure-password" }),
+    });
+    assert.equal(changed.response.status, 200);
+    assert.equal(changed.body.requires_relogin, true);
+    const finalLogin = await jsonFetch(`${base}/api/auth/login`, {
+      method: "POST",
+      body: JSON.stringify({ username: "password-reset-test", password: "final-secure-password" }),
+    });
+    assert.equal(finalLogin.response.status, 200);
+  });
+});
+
 test("keeps legacy MFA fields from blocking simple password plus JWT login", async () => {
   await withServer(async ({ base }) => {
     const adminHeaders = { "x-admin-token": "test-admin" };

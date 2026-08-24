@@ -39,7 +39,7 @@ import {
 } from "@phosphor-icons/react";
 import { historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, downloadRecordsMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, deleteLivePrivacySubject, exportLiveAudit, exportLivePrivacySubject, getAdminAccounts, getLiveAdminSettings, getLiveAiUsage, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setAdminAccountStatus, setLiveDeviceStatus, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateNotificationSettings, updateOrganizationSettings, verifyLiveAuditIntegrity } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, deleteLivePrivacySubject, exportLiveAudit, exportLivePrivacySubject, getAdminAccounts, getLiveAdminSettings, getLiveAiUsage, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, resetAdminAccountPassword, runRetention, setAdminAccountStatus, setLiveDeviceStatus, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateNotificationSettings, updateOrganizationSettings, verifyLiveAuditIntegrity } from "./services/agentApi.js";
 import { auditData, deviceData, employeeData, permissionRoles, settingsData, teamData } from "./adminData.js";
 import { SHANGHAI_TIME_ZONE, formatShanghaiTime, shanghaiDateAtStart, shanghaiDateInput, shanghaiDayKey, shanghaiWeekKey } from "./time.js";
 
@@ -806,6 +806,8 @@ function AccountManagement({ onToast }) {
   const [draft, setDraft] = useState({ username: "", password: "", display_name: "", role: "employee", employee_id: "", team: "" });
   const [loading, setLoading] = useState(agentApiEnabled);
   const [saving, setSaving] = useState(false);
+  const [passwordReset, setPasswordReset] = useState(null);
+  const [passwordSaving, setPasswordSaving] = useState(false);
   const [error, setError] = useState("");
 
   const refresh = () => {
@@ -846,8 +848,27 @@ function AccountManagement({ onToast }) {
     }
   };
 
+  const resetPassword = async (account) => {
+    const password = String(passwordReset?.password || "");
+    if (password.length < 12) {
+      setError("新密码至少需要12位");
+      return;
+    }
+    setPasswordSaving(true);
+    setError("");
+    try {
+      await resetAdminAccountPassword(account.id, password);
+      setPasswordReset(null);
+      onToast(`${account.display_name} 的密码已重置，旧 JWT 已失效`);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setPasswordSaving(false);
+    }
+  };
+
   return <SectionCard title="后台账号" description="账号登录决定真实数据范围；停用账号会立即撤销其后台会话" action={<span className="scope-pill">{accounts.length} 个账号</span>}>
-    <div className="account-admin-list">{loading ? <span className="empty-inline">正在读取账号…</span> : accounts.map((account) => <div className="account-admin-row" key={account.id}><span className="person-avatar">{account.display_name.slice(0, 1)}</span><span><strong>{account.display_name}</strong><small>{account.username} · {roleLabel[account.role]}{account.team ? ` · ${account.team}` : ""}</small></span><StatusPill status={account.disabled_at ? "offline" : "online"} /><button className="outline-button" onClick={() => void toggle(account)}>{account.disabled_at ? "启用" : "停用"}</button></div>)}</div>
+    <div className="account-admin-list">{loading ? <span className="empty-inline">正在读取账号…</span> : accounts.map((account) => <div className="account-admin-row" key={account.id}><span className="person-avatar">{account.display_name.slice(0, 1)}</span><span><strong>{account.display_name}</strong><small>{account.username} · {roleLabel[account.role]}{account.team ? ` · ${account.team}` : ""}</small></span>{passwordReset?.id === account.id ? <div className="account-password-reset"><input type="password" minLength="12" placeholder="新密码至少12位" value={passwordReset.password} onChange={(event) => setPasswordReset((current) => ({ ...current, password: event.target.value }))} autoFocus /><button className="primary-button" disabled={passwordSaving} onClick={() => void resetPassword(account)}>{passwordSaving ? "保存中…" : "保存"}</button><button className="outline-button" disabled={passwordSaving} onClick={() => setPasswordReset(null)}>取消</button></div> : <><StatusPill status={account.disabled_at ? "offline" : "online"} /><button className="outline-button" onClick={() => void toggle(account)}>{account.disabled_at ? "启用" : "停用"}</button><button className="outline-button" onClick={() => { setError(""); setPasswordReset({ id: account.id, password: "" }); }}>重置密码</button></>}</div>)}</div>
     <form className="account-create-form" onSubmit={save}><strong>创建账号</strong><div className="settings-grid"><label className="setting-field"><span>用户名</span><input required value={draft.username} onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))} /></label><label className="setting-field"><span>显示名称</span><input required value={draft.display_name} onChange={(event) => setDraft((current) => ({ ...current, display_name: event.target.value }))} /></label><label className="setting-field"><span>初始密码（至少12位）</span><input required type="password" minLength="12" value={draft.password} onChange={(event) => setDraft((current) => ({ ...current, password: event.target.value }))} /></label><label className="setting-field"><span>角色</span><select value={draft.role} onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value }))}><option value="admin">老板</option><option value="manager">高管</option><option value="employee">员工</option></select></label>{draft.role === "employee" && <label className="setting-field"><span>绑定员工</span><select required value={draft.employee_id} onChange={(event) => setDraft((current) => ({ ...current, employee_id: event.target.value }))}>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name} · {employee.team}</option>)}</select></label>}{draft.role === "manager" && <label className="setting-field"><span>管理团队</span><input required value={draft.team} onChange={(event) => setDraft((current) => ({ ...current, team: event.target.value }))} /></label>}</div>{error && <div className="error-box">账号操作失败：{error}</div>}<button className="primary-button" disabled={saving}>{saving ? "创建中…" : "创建账号"}</button></form>
   </SectionCard>;
 }
