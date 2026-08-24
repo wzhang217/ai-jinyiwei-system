@@ -11,6 +11,8 @@ png = "0.17"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+aes-gcm = "0.10"
+base64 = "0.22"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 hostname = "0.4"
 keyring = { version = "3", features = ["windows-native"] }

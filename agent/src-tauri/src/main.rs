@@ -1,5 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Timelike, Utc};
 use reqwest::blocking::Client;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -16,6 +21,7 @@ use uuid::Uuid;
 
 const AGENT_VERSION: &str = "0.1.12";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
+const LOCAL_QUEUE_KEY_ACCOUNT: &str = "__local-queue-key";
 const MAX_PENDING_EVENTS: i64 = 10_000;
 // A resumed/sleeping Windows session must not create a full-day idle span
 // that extends History into the future. The service keeps the last 12 hours
@@ -174,6 +180,7 @@ struct Core {
     http: Client,
     status: AgentStatus,
     token: Option<String>,
+    local_queue_key: [u8; 32],
     active_session: Option<ActiveSession>,
     idle_session: Option<IdleSession>,
     last_heartbeat: Instant,
@@ -284,6 +291,7 @@ impl Core {
         )
         .map_err(|error| error.to_string())?;
         ensure_event_metadata_columns(&db)?;
+        let local_queue_key = load_or_create_local_queue_key()?;
 
         let server_url = read_config(&db, "server_url");
         let device_id = read_config(&db, "device_id");
@@ -300,7 +308,7 @@ impl Core {
             status.state = "offline".into();
         }
 
-        Ok(Self {
+        let mut core = Self {
             db,
             http: Client::builder()
                 .timeout(Duration::from_secs(8))
@@ -308,6 +316,7 @@ impl Core {
                 .map_err(|error| error.to_string())?,
             status,
             token,
+            local_queue_key,
             active_session: None,
             idle_session: None,
             last_heartbeat: Instant::now() - Duration::from_secs(60),
@@ -315,7 +324,82 @@ impl Core {
                 - Duration::from_secs(DEFAULT_ACTIVITY_CHECKPOINT_SECONDS),
             pending_registration_code: None,
             last_auto_enroll_attempt: Instant::now() - Duration::from_secs(60),
-        })
+        };
+        core.migrate_legacy_events()?;
+        Ok(core)
+    }
+
+    fn migrate_legacy_events(&mut self) -> Result<(), String> {
+        let mut statement = self
+            .db
+            .prepare("SELECT event_id, app_name, process_name, source_kind, context_label, web_domain FROM events")
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        drop(statement);
+
+        let legacy = rows
+            .into_iter()
+            .filter(
+                |(_, app_name, process_name, source_kind, context_label, web_domain)| {
+                    !is_encrypted_local_value(app_name)
+                        || !is_encrypted_local_value(process_name)
+                        || !is_encrypted_local_value(source_kind)
+                        || context_label
+                            .as_deref()
+                            .map(|value| !is_encrypted_local_value(value))
+                            .unwrap_or(false)
+                        || web_domain
+                            .as_deref()
+                            .map(|value| !is_encrypted_local_value(value))
+                            .unwrap_or(false)
+                },
+            )
+            .collect::<Vec<_>>();
+        if legacy.is_empty() {
+            return Ok(());
+        }
+
+        let key = self.local_queue_key;
+        let transaction = self.db.transaction().map_err(|error| error.to_string())?;
+        let mut update = transaction
+            .prepare("UPDATE events SET app_name = ?1, process_name = ?2, source_kind = ?3, context_label = ?4, web_domain = ?5 WHERE event_id = ?6")
+            .map_err(|error| error.to_string())?;
+        for (event_id, app_name, process_name, source_kind, context_label, web_domain) in legacy {
+            let encrypted_context = context_label
+                .as_deref()
+                .map(|value| encrypt_local_value(&key, value))
+                .transpose()?;
+            let encrypted_domain = web_domain
+                .as_deref()
+                .map(|value| encrypt_local_value(&key, value))
+                .transpose()?;
+            update
+                .execute(params![
+                    encrypt_local_value(&key, &app_name)?,
+                    encrypt_local_value(&key, &process_name)?,
+                    encrypt_local_value(&key, &source_kind)?,
+                    encrypted_context,
+                    encrypted_domain,
+                    event_id,
+                ])
+                .map_err(|error| error.to_string())?;
+        }
+        drop(update);
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(())
     }
 
     fn load_bootstrap(&mut self, resource_dir: PathBuf) {
@@ -358,12 +442,20 @@ impl Core {
         self.active_session = None;
         self.idle_session = None;
         self.pending_registration_code = None;
+        remove_secret(LOCAL_QUEUE_KEY_ACCOUNT);
+        self.local_queue_key = load_or_create_local_queue_key()?;
         self.status.queued_events = 0;
         Ok(())
     }
 
     fn report_storage_error(&mut self, action: &str, error: rusqlite::Error) -> String {
         let message = format!("本地缓存{action}失败：{error}");
+        self.status.state = "error".into();
+        self.status.last_error = Some(message.clone());
+        message
+    }
+
+    fn report_local_error(&mut self, message: String) -> String {
         self.status.state = "error".into();
         self.status.last_error = Some(message.clone());
         message
@@ -379,9 +471,40 @@ impl Core {
     }
 
     fn queue_event(&mut self, event: AgentEvent) -> Result<(), String> {
+        let key = self.local_queue_key;
+        let app_name = match encrypt_local_value(&key, &event.app_name) {
+            Ok(value) => value,
+            Err(error) => return Err(self.report_local_error(format!("本地缓存加密失败：{error}"))),
+        };
+        let process_name = match encrypt_local_value(&key, &event.process_name) {
+            Ok(value) => value,
+            Err(error) => return Err(self.report_local_error(format!("本地缓存加密失败：{error}"))),
+        };
+        let source_kind = match encrypt_local_value(&key, &event.source_kind) {
+            Ok(value) => value,
+            Err(error) => return Err(self.report_local_error(format!("本地缓存加密失败：{error}"))),
+        };
+        let context_label = match event.context_label.as_deref() {
+            Some(value) => match encrypt_local_value(&key, value) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    return Err(self.report_local_error(format!("本地缓存加密失败：{error}")))
+                }
+            },
+            None => None,
+        };
+        let web_domain = match event.web_domain.as_deref() {
+            Some(value) => match encrypt_local_value(&key, value) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    return Err(self.report_local_error(format!("本地缓存加密失败：{error}")))
+                }
+            },
+            None => None,
+        };
         if let Err(error) = self.db.execute(
             "INSERT INTO events (event_id, occurred_at, event_type, app_name, process_name, source_kind, context_label, web_domain, duration_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(event_id) DO UPDATE SET source_kind = excluded.source_kind, context_label = excluded.context_label, web_domain = excluded.web_domain, duration_seconds = MAX(events.duration_seconds, excluded.duration_seconds)",
-            params![event.event_id, event.occurred_at, event.event_type, event.app_name, event.process_name, event.source_kind, event.context_label, event.web_domain, event.duration_seconds],
+            params![event.event_id, event.occurred_at, event.event_type, app_name, process_name, source_kind, context_label, web_domain, event.duration_seconds],
         ) {
             return Err(self.report_storage_error("写入", error));
         }
@@ -399,25 +522,44 @@ impl Core {
         Ok(())
     }
 
-    fn pending_events(&self, limit: usize) -> Result<Vec<AgentEventPayload>, String> {
-        let mut statement = self.db.prepare("SELECT event_id, occurred_at, event_type, app_name, process_name, source_kind, context_label, web_domain, duration_seconds FROM events WHERE uploaded = 0 ORDER BY occurred_at ASC LIMIT ?1").map_err(|error| error.to_string())?;
-        let rows = statement
-            .query_map(params![limit as i64], |row| {
-                Ok(AgentEventPayload {
-                    event_id: row.get(0)?,
-                    occurred_at: row.get(1)?,
-                    event_type: row.get(2)?,
-                    app_name: row.get(3)?,
-                    process_name: row.get(4)?,
-                    source_kind: row.get(5)?,
-                    context_label: row.get(6)?,
-                    web_domain: row.get(7)?,
-                    duration_seconds: row.get::<_, i64>(8)?.clamp(0, MAX_EVENT_DURATION_SECONDS),
-                })
-            })
+    fn pending_events(&mut self, limit: usize) -> Result<Vec<AgentEventPayload>, String> {
+        let mut statement = self
+            .db
+            .prepare("SELECT event_id, occurred_at, event_type, app_name, process_name, source_kind, context_label, web_domain, duration_seconds FROM events WHERE uploaded = 0 ORDER BY occurred_at ASC LIMIT ?1")
             .map_err(|error| error.to_string())?;
-        rows.map(|row| row.map_err(|error| error.to_string()))
-            .collect()
+        let mut rows = statement
+            .query(params![limit as i64])
+            .map_err(|error| error.to_string())?;
+        let key = self.local_queue_key;
+        let mut events = Vec::new();
+        while let Some(row) = rows.next().map_err(|error| error.to_string())? {
+            let app_name: String = row.get(3).map_err(|error| error.to_string())?;
+            let process_name: String = row.get(4).map_err(|error| error.to_string())?;
+            let source_kind: String = row.get(5).map_err(|error| error.to_string())?;
+            let context_label: Option<String> = row.get(6).map_err(|error| error.to_string())?;
+            let web_domain: Option<String> = row.get(7).map_err(|error| error.to_string())?;
+            events.push(AgentEventPayload {
+                event_id: row.get(0).map_err(|error| error.to_string())?,
+                occurred_at: row.get(1).map_err(|error| error.to_string())?,
+                event_type: row.get(2).map_err(|error| error.to_string())?,
+                app_name: decrypt_local_value(&key, &app_name)?,
+                process_name: decrypt_local_value(&key, &process_name)?,
+                source_kind: Some(decrypt_local_value(&key, &source_kind)?),
+                context_label: context_label
+                    .as_deref()
+                    .map(|value| decrypt_local_value(&key, value))
+                    .transpose()?,
+                web_domain: web_domain
+                    .as_deref()
+                    .map(|value| decrypt_local_value(&key, value))
+                    .transpose()?,
+                duration_seconds: row
+                    .get::<_, i64>(8)
+                    .map_err(|error| error.to_string())?
+                    .clamp(0, MAX_EVENT_DURATION_SECONDS),
+            });
+        }
+        Ok(events)
     }
 
     fn mark_uploaded(&mut self, ids: &[String]) -> Result<(), String> {
@@ -446,7 +588,9 @@ impl Core {
         {
             return Ok(());
         }
-        let events = self.pending_events(100)?;
+        let events = self
+            .pending_events(100)
+            .map_err(|error| self.report_local_error(error))?;
         if events.is_empty() {
             return Ok(());
         }
@@ -1035,6 +1179,63 @@ fn remove_secret(device_id: &str) {
     if let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, device_id) {
         let _ = entry.delete_credential();
     }
+}
+
+fn load_or_create_local_queue_key() -> Result<[u8; 32], String> {
+    if let Some(encoded) = load_secret(LOCAL_QUEUE_KEY_ACCOUNT) {
+        let decoded = URL_SAFE_NO_PAD
+            .decode(encoded)
+            .map_err(|error| format!("本地缓存密钥无法读取：{error}"))?;
+        if decoded.len() == 32 {
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&decoded);
+            return Ok(key);
+        }
+        return Err("本地缓存密钥长度无效，请重新注册 Agent".into());
+    }
+
+    let first = *Uuid::new_v4().as_bytes();
+    let second = *Uuid::new_v4().as_bytes();
+    let mut key = [0u8; 32];
+    key[..16].copy_from_slice(&first);
+    key[16..].copy_from_slice(&second);
+    store_secret(LOCAL_QUEUE_KEY_ACCOUNT, &URL_SAFE_NO_PAD.encode(key))?;
+    Ok(key)
+}
+
+fn is_encrypted_local_value(value: &str) -> bool {
+    value.starts_with("enc:v1:")
+}
+
+fn encrypt_local_value(key: &[u8; 32], value: &str) -> Result<String, String> {
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|error| error.to_string())?;
+    let nonce_bytes = Uuid::new_v4().as_bytes()[..12].to_vec();
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce_bytes), value.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let mut payload = nonce_bytes;
+    payload.extend(ciphertext);
+    Ok(format!("enc:v1:{}", URL_SAFE_NO_PAD.encode(payload)))
+}
+
+fn decrypt_local_value(key: &[u8; 32], value: &str) -> Result<String, String> {
+    if !is_encrypted_local_value(value) {
+        return Ok(value.to_string());
+    }
+    let encoded = value
+        .strip_prefix("enc:v1:")
+        .ok_or_else(|| "本地缓存密文格式无效".to_string())?;
+    let payload = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|error| format!("本地缓存密文无法读取：{error}"))?;
+    if payload.len() <= 12 {
+        return Err("本地缓存密文长度无效".into());
+    }
+    let cipher = Aes256Gcm::new_from_slice(key).map_err(|error| error.to_string())?;
+    let plaintext = cipher
+        .decrypt(Nonce::from_slice(&payload[..12]), &payload[12..])
+        .map_err(|error| format!("本地缓存解密失败：{error}"))?;
+    String::from_utf8(plaintext).map_err(|error| format!("本地缓存编码无效：{error}"))
 }
 
 #[cfg(windows)]
@@ -1860,6 +2061,34 @@ pub fn run() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn main() {
     run();
+}
+
+#[cfg(test)]
+mod local_queue_crypto_tests {
+    use super::{decrypt_local_value, encrypt_local_value, is_encrypted_local_value};
+
+    #[test]
+    fn encrypts_and_decrypts_local_activity_metadata() {
+        let key = [7u8; 32];
+        let encrypted = encrypt_local_value(&key, "AI锦衣卫系统 / GitHub")
+            .expect("local metadata should encrypt");
+        assert!(is_encrypted_local_value(&encrypted));
+        assert_ne!(encrypted, "AI锦衣卫系统 / GitHub");
+        assert_eq!(
+            decrypt_local_value(&key, &encrypted).expect("local metadata should decrypt"),
+            "AI锦衣卫系统 / GitHub"
+        );
+    }
+
+    #[test]
+    fn keeps_legacy_plaintext_readable_for_startup_migration() {
+        let key = [9u8; 32];
+        assert_eq!(
+            decrypt_local_value(&key, "legacy-app").expect("legacy value should be readable"),
+            "legacy-app"
+        );
+        assert!(!is_encrypted_local_value("legacy-app"));
+    }
 }
 
 #[cfg(all(test, windows))]

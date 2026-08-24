@@ -40,6 +40,8 @@ curl -X POST http://localhost:8787/api/admin/registration-codes \
 
 MVP 不采集键盘、剪贴板、屏幕、聊天正文、文件正文、原始窗口标题或完整网页内容。开发工具只保留经过清洗的项目标识；浏览器原生 UI Automation 和可选扩展只保留域名、有限来源提示以及允许的结构化工作标签，不上传页面文字。已注册 Agent 可以在界面中生成一次性浏览器配对码，Chrome/Edge 扩展用它换取独立的短期凭据，不需要把设备 Token 粘贴到浏览器。
 
+本地 SQLite 队列中的应用名、进程名、来源标签、项目标签和网站域名使用随机 AES-256-GCM 密钥加密；密钥保存在当前 Windows 用户的凭据存储中，不写入 SQLite。上传前仅在内存中解密，注销时会删除队列和本地密钥。旧版本的明文队列会在 Agent 启动时迁移加密；如果密钥不可用，Agent 会显示启动错误并停止上传，不会静默丢弃队列。
+
 ## Windows 一键安装包
 
 `.github/workflows/build-agent-windows.yml` 会在 Windows runner 上生成通用 MSI。安装包只预置局域网服务地址，不预置员工注册码；员工首次启动 Agent 后，在注册页面输入管理员临时生成的一次性注册码完成绑定，不需要为每台电脑重新构建安装包。
