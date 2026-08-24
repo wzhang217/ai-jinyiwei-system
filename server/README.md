@@ -15,7 +15,7 @@ cp .env.example .env
 npm start
 ```
 
-`npm start` 和 `npm run dev` 会自动读取 `server/.env`。默认监听 `0.0.0.0:8787`。首次启动时，如果 `ADMIN_PASSWORD` 已设置，服务端会创建一个管理员账号；之后管理后台使用用户名和密码登录，服务端签发可撤销的数据库会话。生产环境默认拒绝 `x-admin-token`，不能把管理员 Token 放入 `app/.env` 或前端构建产物；只有设置 `AGENT_ALLOW_BOOTSTRAP_TOKEN=true` 才会临时开放维护入口。正式试点请设置随机的 `AGENT_SESSION_SECRET`、明确的 `AGENT_CORS_ORIGIN`，并在反向代理后使用 HTTPS。
+`npm start` 和 `npm run dev` 会自动读取 `server/.env`。默认监听 `0.0.0.0:8787`。首次启动时，如果 `ADMIN_PASSWORD` 已设置，服务端会创建一个管理员账号；之后管理后台使用用户名和密码登录，服务端签发短期 HS256 JWT。生产环境默认拒绝 `x-admin-token`，不能把管理员 Token 放入 `app/.env` 或前端构建产物；只有设置 `AGENT_ALLOW_BOOTSTRAP_TOKEN=true` 才会临时开放维护入口。正式试点请设置随机的 `AGENT_SESSION_SECRET`、明确的 `AGENT_CORS_ORIGIN`，并在反向代理后使用 HTTPS。
 
 ### 管理后台登录
 
@@ -25,14 +25,12 @@ npm start
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=请替换为至少12位密码
 ADMIN_DISPLAY_NAME=企业管理员
-AUTH_SESSION_TTL_SECONDS=28800
-AUTH_MAX_LOGIN_FAILURES=5
-AUTH_LOCKOUT_SECONDS=900
+AUTH_JWT_TTL_SECONDS=28800
 ```
 
-前端只需要设置 `VITE_AGENT_API_BASE_URL=http://localhost:8787`，不再设置 `VITE_AGENT_ADMIN_TOKEN`。登录成功后的会话存放在浏览器会话存储中，退出登录、账号停用或会话过期后立即失效。
+前端只需要设置 `VITE_AGENT_API_BASE_URL=http://localhost:8787`，不再设置 `VITE_AGENT_ADMIN_TOKEN`。登录成功后的 JWT 存放在浏览器会话存储中，每次请求通过 `Authorization: Bearer <jwt>` 发送；退出登录会清除本机 JWT，账号停用或 JWT 过期后服务端拒绝请求。
 
-登录连续失败达到阈值后账号会暂时锁定，成功登录会清零失败计数。员工 Agent 注册后必须确认当前隐私策略版本，服务端会记录组织、员工、设备、策略哈希和确认时间；策略版本更新后需要重新确认。相关接口为 `/api/agent/privacy-policy`、`/api/agent/privacy-acknowledgement` 和 `/api/admin/privacy/acknowledgements`。后台的“员工数据权利”支持 `POST /api/admin/privacy/subject-export` 导出员工活动元数据，以及 `POST /api/admin/privacy/subject-delete` 先预览再执行删除；两者均按老板/高管/员工服务端范围过滤并写入审计。导出不会包含密码、Token 或原始正文；删除会清理活动事件、Memory Summary、生成队列和浏览器临时凭据，但保留员工/设备身份、审计日志和隐私确认记录。
+登录只校验用户名和密码，不启用 MFA、数据库会话或登录失败锁定；登录成功、失败和退出仍写入审计。员工 Agent 注册后必须确认当前隐私策略版本，服务端会记录组织、员工、设备、策略哈希和确认时间；策略版本更新后需要重新确认。相关接口为 `/api/agent/privacy-policy`、`/api/agent/privacy-acknowledgement` 和 `/api/admin/privacy/acknowledgements`。后台的“员工数据权利”支持 `POST /api/admin/privacy/subject-export` 导出员工活动元数据，以及 `POST /api/admin/privacy/subject-delete` 先预览再执行删除；两者均按老板/高管/员工服务端范围过滤并写入审计。导出不会包含密码、Token 或原始正文；删除会清理活动事件、Memory Summary、生成队列和浏览器临时凭据，但保留员工/设备身份、审计日志和隐私确认记录。
 
 ### 新客户组织初始化
 
@@ -53,7 +51,7 @@ unset PROVISION_ADMIN_PASSWORD
 
 ### 数据库迁移、备份与恢复
 
-服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 7，包含组织归属字段、按组织隔离的采集策略和企业设置、隐私策略确认记录、账号登录失败保护、账号 MFA 密钥字段、AI 用量统计和审计日志哈希链；旧版 SQLite 会在启动时补列并建立组织配置，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
+服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 7，包含组织归属字段、按组织隔离的采集策略和企业设置、隐私策略确认记录、兼容旧版本的账号字段、AI 用量统计和审计日志哈希链；旧版 SQLite 会在启动时补列并建立组织配置，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
 
 ```bash
 npm run backup
@@ -166,7 +164,7 @@ systemd 会在进程异常退出后自动重启，日志进入 journald；服务
 
 健康检查分为三类：`GET /health/live` 只判断进程是否能响应；`GET /health` 和 `GET /health/ready` 会检查 SQLite `quick_check` 以及迁移版本，数据库未就绪时返回 HTTP 503。`npm run healthcheck` 额外检查数据库文件系统的剩余空间；`npm run diagnostics` 会输出空间总量、剩余量和阈值。容器探活和 systemd 部署应使用 `/health/ready`，负载均衡器的存活探针可使用 `/health/live`。
 
-账号登录支持可选 TOTP MFA。管理员登录后台后，在“设置 → 安全合规 → 账号多因素认证”生成密钥并用身份验证器确认；恢复码只返回一次，应保存到企业密码管理器。MFA 密钥在 SQLite 中使用 `AGENT_SESSION_SECRET` 派生的 AES-256-GCM 密钥加密，修改或轮换 `AGENT_SESSION_SECRET` 前必须完成密钥迁移方案，否则旧 MFA 密钥无法解密。
+当前 MVP 使用简单 JWT 账号验证：用户名和密码正确后签发 HS256 JWT，默认有效期由 `AUTH_JWT_TTL_SECONDS` 控制，最长 24 小时。JWT 不包含密码或采集数据；服务端每次请求仍查询账号是否存在、是否停用，并按老板/高管/员工角色执行数据范围过滤。数据库中保留旧版 MFA 字段仅用于兼容已有 SQLite，不再作为登录流程或后台设置项。
 
 History Skill 的召回使用 `semantic-metadata-v1`：先按时间和权限过滤，再用工作语义分组（开发、浏览器、沟通、文档、项目管理、AI 工作台等）结合应用、域名、来源类型、工作标识和活动顺序进行排序，最后把排序后的脱敏证据交给 Qwen 生成回答。这个检索层不读取原始窗口标题、完整 URL、文件正文或聊天正文，也不会为每条活动额外调用模型。
 
@@ -230,7 +228,7 @@ curl -X POST http://localhost:8787/api/admin/retention \
   -d '{"before":"2026-05-01T00:00:00.000Z","apply":true}'
 ```
 
-开发或迁移期间仍可以用启动 Token 换取有范围的旧版会话令牌；生产默认关闭此入口，临时开启后应在维护完成立即恢复 `AGENT_ALLOW_BOOTSTRAP_TOKEN=false` 并重启服务：
+开发或迁移期间仍可以用启动 Token 换取有范围的临时 JWT；生产默认关闭此入口，临时开启后应在维护完成立即恢复 `AGENT_ALLOW_BOOTSTRAP_TOKEN=false` 并重启服务：
 
 ```bash
 curl -X POST http://localhost:8787/api/admin/sessions \
@@ -239,7 +237,7 @@ curl -X POST http://localhost:8787/api/admin/sessions \
   -d '{"role":"employee","employee_id":"employee-wei"}'
 ```
 
-之后用返回的 Token 放在 `x-admin-session` 中访问历史、设备、事件和问答接口。正式管理后台通过 `POST /api/auth/login` 创建数据库会话，并可通过 `POST /api/auth/logout` 撤销；旧版启动 Token 不进入前端构建产物。
+之后用返回的 Token 放在 `Authorization: Bearer <token>` 中访问历史、设备、事件和问答接口；`x-admin-session` 仅作为旧版客户端的过渡别名。正式管理后台通过 `POST /api/auth/login` 获取 JWT，`POST /api/auth/logout` 记录退出并由前端清除 Token；旧版启动 Token 不进入前端构建产物。
 
 浏览器来源扩展位于 `../agent/browser-extension/`，Chrome 和 Edge 共用同一套 MV3 文件，并继续调用 `/api/agent/events`。正式配对流程如下：
 

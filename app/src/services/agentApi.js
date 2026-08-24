@@ -11,7 +11,10 @@ const sourceKindLabels = {
 // Demo data is a local development preview only. A production build must
 // never silently fall back to fabricated history when the API is unavailable.
 export const demoMode = import.meta.env.DEV && import.meta.env.VITE_DEMO_MODE === "true";
-let adminSessionToken = typeof window !== "undefined" ? window.sessionStorage.getItem("jinyiwei_admin_session") || "" : "";
+const storedJwt = typeof window !== "undefined"
+  ? window.sessionStorage.getItem("jinyiwei_admin_jwt") || window.sessionStorage.getItem("jinyiwei_admin_session") || ""
+  : "";
+let adminJwt = storedJwt;
 let adminPrincipal = null;
 if (typeof window !== "undefined") {
   try {
@@ -24,10 +27,11 @@ if (typeof window !== "undefined") {
 export const agentApiEnabled = Boolean(configuredBaseUrl);
 
 export function setAdminSession(token) {
-  adminSessionToken = typeof token === "string" ? token : "";
+  adminJwt = typeof token === "string" ? token : "";
   if (typeof window !== "undefined") {
-    if (adminSessionToken) window.sessionStorage.setItem("jinyiwei_admin_session", adminSessionToken);
-    else window.sessionStorage.removeItem("jinyiwei_admin_session");
+    if (adminJwt) window.sessionStorage.setItem("jinyiwei_admin_jwt", adminJwt);
+    else window.sessionStorage.removeItem("jinyiwei_admin_jwt");
+    window.sessionStorage.removeItem("jinyiwei_admin_session");
   }
 }
 
@@ -50,8 +54,8 @@ export function clearAdminSession() {
 
 async function request(path, options = {}, { publicEndpoint = false } = {}) {
   if (!agentApiEnabled) throw new Error("Agent API is not configured");
-  if (!publicEndpoint && !adminSessionToken) throw new Error("请先登录管理后台");
-  const authHeaders = adminSessionToken ? { "x-admin-session": adminSessionToken } : {};
+  if (!publicEndpoint && !adminJwt) throw new Error("请先登录管理后台");
+  const authHeaders = adminJwt ? { Authorization: `Bearer ${adminJwt}` } : {};
   const response = await fetch(`${configuredBaseUrl}${path}`, {
     ...options,
     headers: {
@@ -70,30 +74,14 @@ async function request(path, options = {}, { publicEndpoint = false } = {}) {
   return body;
 }
 
-export async function loginAdmin(username, password, otp = "") {
+export async function loginAdmin(username, password) {
   const body = await request("/api/auth/login", {
     method: "POST",
-    body: JSON.stringify({ username, password, ...(otp ? { otp } : {}) }),
+    body: JSON.stringify({ username, password }),
   }, { publicEndpoint: true });
   setAdminSession(body.token);
   setAdminPrincipal(body.principal);
   return body;
-}
-
-export async function getLiveMfaStatus() {
-  return request("/api/auth/mfa/status");
-}
-
-export async function setupLiveMfa() {
-  return request("/api/auth/mfa/setup", { method: "POST" });
-}
-
-export async function enableLiveMfa(secret, code) {
-  return request("/api/auth/mfa/enable", { method: "POST", body: JSON.stringify({ secret, code }) });
-}
-
-export async function disableLiveMfa(code) {
-  return request("/api/auth/mfa/disable", { method: "POST", body: JSON.stringify({ code }) });
 }
 
 export async function getAdminMe() {
@@ -104,7 +92,7 @@ export async function getAdminMe() {
 
 export async function logoutAdmin() {
   try {
-    if (adminSessionToken) await request("/api/auth/logout", { method: "POST" });
+    if (adminJwt) await request("/api/auth/logout", { method: "POST" });
   } finally {
     clearAdminSession();
   }

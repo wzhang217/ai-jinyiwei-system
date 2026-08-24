@@ -11,7 +11,7 @@
 ## 标准流程
 
 1. 记录发现时间、组织、版本、影响范围和当前操作者；不要在工单中粘贴密码、Token、API Key、原始窗口标题或页面内容。
-2. P0 事件先关闭反向代理入口或撤销相关账号会话；必要时将 Agent 设备标记为 disabled，阻止继续上传。
+2. P0 事件先关闭反向代理入口或停用相关账号；必要时将 Agent 设备标记为 disabled，阻止继续上传。JWT 无服务端单 token 撤销接口，紧急情况下轮换 `AGENT_SESSION_SECRET` 使全部旧 JWT 立即失效。
 3. 在服务端执行 `npm run diagnostics -- --output ./data/diagnostics/<timestamp>.json`，保留文件权限并通过客户批准的渠道交接。
 4. 检查 `GET /health/live`、`GET /health/ready`、磁盘空间、数据库 `integrity_check`、最近备份和审计哈希链。
 5. 若怀疑密钥泄露，轮换 `AGENT_SESSION_SECRET`、AI API Key、反向代理凭据和必要的 Agent 注册码；轮换后重新启动服务并验证旧会话已失效。

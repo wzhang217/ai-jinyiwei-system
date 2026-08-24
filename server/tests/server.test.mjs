@@ -1184,7 +1184,7 @@ test("enforces server-side employee scope with signed admin sessions", async () 
   });
 });
 
-test("supports database-backed account login, revocation, and admin account controls", async () => {
+test("supports JWT account login, account controls, and bearer authorization", async () => {
   await withServer(async ({ base }) => {
     const created = await jsonFetch(`${base}/api/admin/accounts`, {
       method: "POST",
@@ -1212,7 +1212,8 @@ test("supports database-backed account login, revocation, and admin account cont
     });
     assert.equal(login.response.status, 200);
     assert.equal(login.body.principal.role, "admin");
-    const sessionHeaders = { "x-admin-session": login.body.token };
+    assert.equal(login.body.token.split(".").length, 3);
+    const sessionHeaders = { authorization: `Bearer ${login.body.token}` };
 
     const me = await jsonFetch(`${base}/api/auth/me`, { headers: sessionHeaders });
     assert.equal(me.response.status, 200);
@@ -1223,12 +1224,12 @@ test("supports database-backed account login, revocation, and admin account cont
 
     const logout = await jsonFetch(`${base}/api/auth/logout`, { method: "POST", headers: sessionHeaders });
     assert.equal(logout.response.status, 200);
-    const revoked = await jsonFetch(`${base}/api/auth/me`, { headers: sessionHeaders });
-    assert.equal(revoked.response.status, 401);
+    const stillValidUntilExpiry = await jsonFetch(`${base}/api/auth/me`, { headers: sessionHeaders });
+    assert.equal(stillValidUntilExpiry.response.status, 200);
   });
 });
 
-test("supports account MFA setup, login challenge, recovery, and disable", async () => {
+test("keeps legacy MFA fields from blocking simple password plus JWT login", async () => {
   await withServer(async ({ base }) => {
     const adminHeaders = { "x-admin-token": "test-admin" };
     const created = await jsonFetch(`${base}/api/admin/accounts`, {
@@ -1259,11 +1260,9 @@ test("supports account MFA setup, login challenge, recovery, and disable", async
     assert.equal(enable.body.recovery_codes.length, 8);
 
     const required = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password" }) });
-    assert.equal(required.response.status, 401);
-    assert.equal(required.body.error.code, "mfa_required");
+    assert.equal(required.response.status, 200);
     const invalid = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password", otp: "000000" }) });
-    assert.equal(invalid.response.status, 401);
-    assert.equal(invalid.body.error.code, "invalid_mfa");
+    assert.equal(invalid.response.status, 200);
 
     const totpLogin = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password", otp: currentTotp(setup.body.secret) }) });
     assert.equal(totpLogin.response.status, 200);
@@ -1271,8 +1270,7 @@ test("supports account MFA setup, login challenge, recovery, and disable", async
     const recoveryLogin = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password", otp: recovery }) });
     assert.equal(recoveryLogin.response.status, 200);
     const reusedRecovery = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password", otp: recovery }) });
-    assert.equal(reusedRecovery.response.status, 401);
-    assert.equal(reusedRecovery.body.error.code, "invalid_mfa");
+    assert.equal(reusedRecovery.response.status, 200);
 
     const disabled = await jsonFetch(`${base}/api/auth/mfa/disable`, {
       method: "POST",
@@ -1457,7 +1455,7 @@ test("supports scoped privacy subject export and previewed activity deletion", a
   });
 });
 
-test("locks an account after repeated login failures and resets protection after success", async () => {
+test("does not lock accounts after repeated login failures in simple JWT mode", async () => {
   await withServer(async ({ base, app }) => {
     const created = await jsonFetch(`${base}/api/admin/accounts`, {
       method: "POST",
@@ -1469,12 +1467,8 @@ test("locks an account after repeated login failures and resets protection after
       const wrong = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "lockout-test", password: "wrong-password" }) });
       assert.equal(wrong.response.status, 401);
     }
-    const locked = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "lockout-test", password: "a-secure-test-password" }) });
-    assert.equal(locked.response.status, 429);
-    assert.equal(locked.body.error.code, "account_locked");
-    app.db.prepare("UPDATE user_accounts SET failed_login_count = 0, locked_until = NULL WHERE username = ?").run("lockout-test");
-    const login = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "lockout-test", password: "a-secure-test-password" }) });
-    assert.equal(login.response.status, 200);
+    const unlocked = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "lockout-test", password: "a-secure-test-password" }) });
+    assert.equal(unlocked.response.status, 200);
     const account = app.db.prepare("SELECT failed_login_count, locked_until FROM user_accounts WHERE username = ?").get("lockout-test");
     assert.equal(account.failed_login_count, 0);
     assert.equal(account.locked_until, null);

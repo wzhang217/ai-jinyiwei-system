@@ -127,13 +127,6 @@ const newRegistrationCode = () => `JY-${randomBytes(5).toString("hex").toUpperCa
 const newBrowserPairingCode = () => `BP-${randomBytes(5).toString("hex").toUpperCase()}`;
 const normalizeUsername = (value) => String(value || "").trim().toLowerCase();
 
-function loginProtectionConfig() {
-  return {
-    maxFailures: Math.min(Math.max(Number(process.env.AUTH_MAX_LOGIN_FAILURES) || 5, 3), 20),
-    lockoutSeconds: Math.min(Math.max(Number(process.env.AUTH_LOCKOUT_SECONDS) || 900, 60), 86_400),
-  };
-}
-
 function isWeakSecret(value) {
   const normalized = String(value || "").trim().toLowerCase();
   return !normalized || normalized.length < 32 || [
@@ -1278,94 +1271,78 @@ function decodeBase64Url(value) {
   return Buffer.from(value, "base64url").toString("utf8");
 }
 
-function signAdminSession(payload, secret) {
-  const encoded = encodeBase64Url(JSON.stringify(payload));
-  const signature = createHmac("sha256", secret).update(encoded).digest("base64url");
-  return `${encoded}.${signature}`;
+function authJwtTtlSeconds() {
+  return Math.min(Math.max(Number(process.env.AUTH_JWT_TTL_SECONDS || process.env.AUTH_SESSION_TTL_SECONDS) || 8 * 3600, 300), 24 * 3600);
 }
 
-function verifyAdminSession(token, secret) {
-  const [encoded, signature] = String(token || "").split(".");
-  if (!encoded || !signature) return null;
-  const expected = createHmac("sha256", secret).update(encoded).digest();
-  const received = Buffer.from(signature, "base64url");
+function signJwt(payload, secret) {
+  const header = encodeBase64Url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
+  const body = encodeBase64Url(JSON.stringify(payload));
+  const signingInput = `${header}.${body}`;
+  const signature = createHmac("sha256", secret).update(signingInput).digest("base64url");
+  return `${signingInput}.${signature}`;
+}
+
+function verifyJwt(token, secret) {
+  const [encodedHeader, encodedBody, encodedSignature] = String(token || "").split(".");
+  if (!encodedHeader || !encodedBody || !encodedSignature) return null;
+  const signingInput = `${encodedHeader}.${encodedBody}`;
+  const expected = createHmac("sha256", secret).update(signingInput).digest();
+  const received = Buffer.from(encodedSignature, "base64url");
   if (expected.length !== received.length || !timingSafeEqual(expected, received)) return null;
   try {
-    const payload = JSON.parse(decodeBase64Url(encoded));
-    if (!payload || typeof payload !== "object" || Number(payload.exp) <= Date.now()) return null;
+    const header = JSON.parse(decodeBase64Url(encodedHeader));
+    const payload = JSON.parse(decodeBase64Url(encodedBody));
+    const now = Math.floor(Date.now() / 1000);
+    if (!header || header.typ !== "JWT" || header.alg !== "HS256" || !payload || typeof payload !== "object") return null;
+    if (!Number.isFinite(Number(payload.exp)) || Number(payload.exp) <= now) return null;
+    if (payload.iat && Number(payload.iat) > now + 60) return null;
     return payload;
   } catch {
     return null;
   }
 }
 
-function createDatabaseSession(db, account) {
-  const token = newToken();
-  const now = isoNow();
-  const ttl = Math.min(Math.max(Number(process.env.AUTH_SESSION_TTL_SECONDS) || 8 * 3600, 300), 24 * 3600);
-  const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
-  db.prepare(`
-    INSERT INTO admin_sessions
-      (id, token_hash, account_id, role, actor, employee_id, team, organization_id, expires_at, created_at, last_seen_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    newId("session"),
-    hash(token),
-    account.id,
-    account.role,
-    account.display_name,
-    account.employee_id || null,
-    account.team || null,
-    account.organization_id || DEFAULT_ORGANIZATION_ID,
-    expiresAt,
-    now,
-    now,
-  );
+function createJwtSession(account, secret) {
+  const now = Math.floor(Date.now() / 1000);
+  const expiresAt = new Date((now + authJwtTtlSeconds()) * 1000).toISOString();
+  const token = signJwt({
+    sub: account.id,
+    account_id: account.id,
+    username: account.username,
+    role: account.role,
+    actor: account.display_name,
+    employee_id: account.employee_id || null,
+    team: account.team || null,
+    organization_id: account.organization_id || DEFAULT_ORGANIZATION_ID,
+    iat: now,
+    exp: Math.floor(Date.parse(expiresAt) / 1000),
+  }, secret);
   return { token, expires_at: expiresAt, principal: accountPrincipal(account) };
 }
 
-function databaseSessionPrincipal(db, token) {
-  if (!token) return null;
-  const session = db.prepare(`
-    SELECT s.id, s.role, s.actor, s.employee_id, s.team, s.organization_id, s.expires_at,
-      a.id AS account_id, a.username, a.mfa_enabled
-    FROM admin_sessions s
-    JOIN user_accounts a ON a.id = s.account_id
-    WHERE s.token_hash = ?
-      AND s.revoked_at IS NULL
-      AND s.expires_at > ?
-      AND a.disabled_at IS NULL
-  `).get(hash(token), isoNow());
-  if (!session) return null;
-  db.prepare("UPDATE admin_sessions SET last_seen_at = ? WHERE id = ?").run(isoNow(), session.id);
-  return {
-    account_id: session.account_id,
-    username: session.username,
-    role: session.role,
-    actor: session.actor,
-    employee_id: session.employee_id || null,
-    team: session.team || null,
-    organization_id: session.organization_id || DEFAULT_ORGANIZATION_ID,
-    mfa_enabled: Boolean(session.mfa_enabled),
-    source: "session",
-  };
-}
-
-function revokeDatabaseSession(db, token) {
-  if (!token) return false;
-  const result = db.prepare("UPDATE admin_sessions SET revoked_at = ? WHERE token_hash = ? AND revoked_at IS NULL").run(isoNow(), hash(token));
-  return Number(result.changes || 0) > 0;
+function jwtPrincipal(db, payload) {
+  const accountId = payload?.account_id || payload?.sub;
+  if (!accountId) return null;
+  const account = db.prepare(`
+    SELECT id, username, display_name, role, employee_id, team, organization_id, mfa_enabled
+    FROM user_accounts
+    WHERE id = ? AND disabled_at IS NULL
+  `).get(accountId);
+  if (!account || (payload.organization_id && payload.organization_id !== account.organization_id)) return null;
+  return { ...accountPrincipal(account), source: "jwt" };
 }
 
 function resolveAdminPrincipal(request, adminToken, sessionSecret = adminToken, db = null, { allowBootstrapToken = bootstrapTokenAllowed() } = {}) {
-  const token = request.headers["x-admin-session"] || "";
-  const databasePrincipal = db ? databaseSessionPrincipal(db, token) : null;
-  if (databasePrincipal) return databasePrincipal;
+  const token = bearerToken(request) || request.headers["x-admin-session"] || "";
   if (allowBootstrapToken && request.headers["x-admin-token"] === adminToken) {
     return { role: "admin", actor: "admin", employee_id: null, team: null, organization_id: DEFAULT_ORGANIZATION_ID, source: "bootstrap" };
   }
-  const payload = verifyAdminSession(token, sessionSecret);
-  return payload ? { ...payload, organization_id: payload.organization_id || DEFAULT_ORGANIZATION_ID, source: "session" } : null;
+  const payload = verifyJwt(token, sessionSecret);
+  const accountPrincipalResult = db ? jwtPrincipal(db, payload) : null;
+  if (accountPrincipalResult) return accountPrincipalResult;
+  if (payload?.sub?.startsWith("bootstrap:")) return { ...payload, organization_id: payload.organization_id || DEFAULT_ORGANIZATION_ID, source: "jwt" };
+  return !db && payload ? { ...payload, organization_id: payload.organization_id || DEFAULT_ORGANIZATION_ID, source: "jwt" } : null;
 }
 
 function canMutateAdmin(principal) {
@@ -3144,8 +3121,8 @@ function readPersistedMemoryRecords(db, { deviceId = null, principal = null, tea
 function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, logger = console }) {
   // Keep the old x-admin-token path available for one-time migration and CLI
   // operations in development or during an explicitly enabled maintenance
-  // window. Production web sessions always use revocable database-backed
-  // tokens; the bootstrap header is disabled unless explicitly opted in.
+  // window. Normal web requests use a short-lived HS256 JWT; the bootstrap
+  // header is disabled unless explicitly opted in.
   const allowBootstrapToken = bootstrapTokenAllowed();
   const requireAdmin = (request) => resolveAdminPrincipal(request, adminToken, sessionSecret, db, { allowBootstrapToken });
   const requestBuckets = new Map();
@@ -3191,53 +3168,18 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const password = typeof body.password === "string" ? body.password : "";
         const account = db.prepare(`
           SELECT id, username, display_name, role, employee_id, team, organization_id, password_hash,
-            failed_login_count, locked_until, mfa_enabled, mfa_secret_enc, mfa_recovery_codes_json
+            mfa_enabled
           FROM user_accounts
           WHERE username = ? AND disabled_at IS NULL
         `).get(username);
-        const protection = loginProtectionConfig();
-        const lockedUntil = account?.locked_until ? Date.parse(account.locked_until) : NaN;
-        if (account && Number.isFinite(lockedUntil) && lockedUntil > Date.now()) {
-          const retryAfter = Math.max(1, Math.ceil((lockedUntil - Date.now()) / 1000));
-          response.setHeader?.("retry-after", String(retryAfter));
-          return sendError(response, 429, "登录失败次数过多，请稍后重试", "account_locked");
-        }
         if (!account || !verifyPassword(password, account.password_hash)) {
-          if (account) {
-            const failedCount = Number(account.failed_login_count || 0) + 1;
-            const nextLock = failedCount >= protection.maxFailures
-              ? new Date(Date.now() + protection.lockoutSeconds * 1000).toISOString()
-              : null;
-            const now = isoNow();
-            db.prepare("UPDATE user_accounts SET failed_login_count = ?, locked_until = ?, updated_at = ? WHERE id = ?")
-              .run(failedCount, nextLock, now, account.id);
-            recordAudit(db, "login_failed", "system", account.id, `failed_attempt=${failedCount}`);
-            if (nextLock) recordAudit(db, "account_locked", "system", account.id, `until=${nextLock}`);
-          }
+          if (account) recordAudit(db, "login_failed", "system", account.id, "password authentication failed");
           return sendError(response, 401, "用户名或密码错误", "invalid_credentials");
         }
-        const otp = typeof body.otp === "string" ? body.otp.trim() : "";
-        if (account.mfa_enabled) {
-          if (!otp) return sendError(response, 401, "请输入身份验证器验证码", "mfa_required");
-          const mfaResult = verifyMfaCode(db, account, otp, sessionSecret);
-          if (!mfaResult.valid) {
-            const failedCount = Number(account.failed_login_count || 0) + 1;
-            const nextLock = failedCount >= protection.maxFailures
-              ? new Date(Date.now() + protection.lockoutSeconds * 1000).toISOString()
-              : null;
-            const failedAt = isoNow();
-            db.prepare("UPDATE user_accounts SET failed_login_count = ?, locked_until = ?, updated_at = ? WHERE id = ?")
-              .run(failedCount, nextLock, failedAt, account.id);
-            recordAudit(db, "login_failed", "system", account.id, `factor=mfa; failed_attempt=${failedCount}`);
-            if (nextLock) recordAudit(db, "account_locked", "system", account.id, `until=${nextLock}`);
-            return sendError(response, 401, "身份验证器验证码错误", "invalid_mfa");
-          }
-          if (mfaResult.recovery) recordAudit(db, "mfa_recovery_code_used", account.display_name, account.id, "one-time recovery code consumed");
-        }
         const now = isoNow();
-        db.prepare("UPDATE user_accounts SET failed_login_count = 0, locked_until = NULL, last_login_at = ?, updated_at = ? WHERE id = ?").run(now, now, account.id);
-        const session = createDatabaseSession(db, account);
-        recordAudit(db, "login_succeeded", account.display_name, account.id, account.mfa_enabled ? "password plus mfa login" : "password login");
+        db.prepare("UPDATE user_accounts SET last_login_at = ?, updated_at = ? WHERE id = ?").run(now, now, account.id);
+        const session = createJwtSession(account, sessionSecret);
+        recordAudit(db, "login_succeeded", account.display_name, account.id, "password login; jwt issued");
         return sendJson(response, 200, session);
       }
 
@@ -3309,9 +3251,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
 
       if (method === "POST" && url.pathname === "/api/auth/logout") {
         const principal = requireAdmin(request);
-        const sessionToken = request.headers["x-admin-session"] || "";
-        if (sessionToken) revokeDatabaseSession(db, sessionToken);
-        if (principal) recordAudit(db, "logout", principal.actor || "unknown", principal.account_id || "session", "session revoked");
+        if (principal) recordAudit(db, "logout", principal.actor || "unknown", principal.account_id || "jwt", "jwt cleared by client");
         return sendJson(response, 200, { ok: true });
       }
 
@@ -3339,7 +3279,8 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const ttl = Math.min(Math.max(Number(body.expires_in_seconds) || 8 * 3600, 300), 24 * 3600);
         const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
         const organizationId = DEFAULT_ORGANIZATION_ID;
-        const token = signAdminSession({ role, actor, employee_id: employeeId, team, organization_id: organizationId, exp: Date.parse(expiresAt) }, sessionSecret);
+        const now = Math.floor(Date.now() / 1000);
+        const token = signJwt({ sub: `bootstrap:${role}:${actor}`, role, actor, employee_id: employeeId, team, organization_id: organizationId, iat: now, exp: Math.floor(Date.parse(expiresAt) / 1000) }, sessionSecret);
         recordAudit(db, "admin_session_created", "admin", actor, `role=${role}`, organizationId);
         return sendJson(response, 201, { token, expires_at: expiresAt, principal: { role, actor, employee_id: employeeId, team, organization_id: organizationId } });
       }

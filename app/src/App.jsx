@@ -138,8 +138,6 @@ function AuthLoadingView() {
 function LoginView({ error, onLogin }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [otp, setOtp] = useState("");
-  const [mfaRequired, setMfaRequired] = useState(false);
   const [loading, setLoading] = useState(false);
   const [formError, setFormError] = useState("");
 
@@ -148,9 +146,8 @@ function LoginView({ error, onLogin }) {
     setFormError("");
     setLoading(true);
     try {
-      await onLogin(username, password, otp);
+      await onLogin(username, password);
     } catch (loginError) {
-      if (loginError.code === "mfa_required" || loginError.code === "invalid_mfa") setMfaRequired(true);
       setFormError(loginError.message);
     } finally {
       setLoading(false);
@@ -164,7 +161,6 @@ function LoginView({ error, onLogin }) {
     <p>请使用企业账号登录，系统将按账号角色展示数据范围。</p>
     <label>用户名<input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} required /></label>
     <label>密码<input type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} required /></label>
-    {mfaRequired && <label>身份验证器验证码<input inputMode="numeric" autoComplete="one-time-code" pattern="[0-9A-Za-z-]{6,20}" value={otp} onChange={(event) => setOtp(event.target.value)} placeholder="6 位验证码或恢复码" required /></label>}
     {(formError || error) && <div className="error-box">{formError || error}</div>}
     <button className="primary-button auth-submit" type="submit" disabled={loading}>{loading ? "登录中…" : "登录"}</button>
   </form></div>;
@@ -274,10 +270,10 @@ function App() {
   const activeLabel = visibleNavGroups.flatMap((group) => group.items).find((item) => item.id === activeNav)?.label || "工作区";
 
   if (agentApiEnabled && authChecking) return <AuthLoadingView />;
-  if (agentApiEnabled && !principal) return <LoginView error={authError} onLogin={async (username, password, otp) => {
+  if (agentApiEnabled && !principal) return <LoginView error={authError} onLogin={async (username, password) => {
     setAuthError("");
     try {
-      const result = await loginAdmin(username, password, otp);
+      const result = await loginAdmin(username, password);
       setPrincipal(result.principal);
     } catch (error) {
       setAuthError(error.message);
