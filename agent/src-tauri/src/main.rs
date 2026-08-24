@@ -14,7 +14,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
-const AGENT_VERSION: &str = "0.1.10";
+const AGENT_VERSION: &str = "0.1.11";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const MAX_PENDING_EVENTS: i64 = 10_000;
 // A resumed/sleeping Windows session must not create a full-day idle span
@@ -1599,7 +1599,7 @@ fn enable_startup(_app: &AppHandle) {
     use winreg::enums::{HKEY_CURRENT_USER, KEY_WRITE};
     use winreg::RegKey;
     if let Ok(executable) = std::env::current_exe() {
-        if let Ok(run_key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags(
+        if let Ok((run_key, _)) = RegKey::predef(HKEY_CURRENT_USER).create_subkey_with_flags(
             "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
             KEY_WRITE,
         ) {
