@@ -14,7 +14,7 @@ use std::env;
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, mpsc::Sender, Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
@@ -22,7 +22,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
-const AGENT_VERSION: &str = "0.1.15";
+const AGENT_VERSION: &str = "0.1.16";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const LOCAL_QUEUE_KEY_ACCOUNT: &str = "__local-queue-key";
 const MAX_PENDING_EVENTS: i64 = 10_000;
@@ -31,6 +31,8 @@ const MAX_PENDING_EVENTS: i64 = 10_000;
 // at most; all policy clock comparisons use China Standard Time (UTC+8).
 const MAX_EVENT_DURATION_SECONDS: i64 = 12 * 3600;
 const DEFAULT_ACTIVITY_CHECKPOINT_SECONDS: u64 = 15;
+#[cfg(windows)]
+const BROWSER_METADATA_CACHE_SECONDS: u64 = 3;
 
 fn default_activity_checkpoint_seconds() -> u64 {
     DEFAULT_ACTIVITY_CHECKPOINT_SECONDS
@@ -196,6 +198,17 @@ struct BootstrapConfig {
     registration_code: Option<String>,
 }
 
+#[cfg(windows)]
+#[derive(Clone)]
+struct BrowserMetadataCacheEntry {
+    window_handle: usize,
+    refreshed_at: Instant,
+    metadata: Option<BrowserMetadata>,
+}
+
+#[cfg(not(windows))]
+type BrowserMetadataCacheEntry = ();
+
 struct Core {
     db: Connection,
     http: Client,
@@ -208,10 +221,17 @@ struct Core {
     last_event_flush: Instant,
     pending_registration_code: Option<String>,
     last_auto_enroll_attempt: Instant,
+    browser_metadata_cache: Option<BrowserMetadataCacheEntry>,
+}
+
+enum AgentCommand {
+    AcknowledgePrivacy,
 }
 
 struct AgentState {
     core: Arc<Mutex<Core>>,
+    status: Arc<RwLock<AgentStatus>>,
+    commands: Sender<AgentCommand>,
 }
 
 #[derive(Serialize)]
@@ -349,6 +369,7 @@ impl Core {
                 - Duration::from_secs(DEFAULT_ACTIVITY_CHECKPOINT_SECONDS),
             pending_registration_code: None,
             last_auto_enroll_attempt: Instant::now() - Duration::from_secs(60),
+            browser_metadata_cache: None,
         };
         core.migrate_legacy_events()?;
         Ok(core)
@@ -1004,7 +1025,9 @@ impl Core {
             } else {
                 let _ = self.finish_idle_session(now);
                 if self.status.policy.collect_app_activity {
-                    if let Some(mut activity) = foreground_application() {
+                    if let Some(mut activity) =
+                        foreground_application(&mut self.browser_metadata_cache)
+                    {
                         apply_collection_policy_to_activity(&mut activity, &self.status.policy);
                         if activity.web_domain.is_some() {
                             self.status.last_browser_capture_at = Some(Utc::now().to_rfc3339());
@@ -1257,7 +1280,9 @@ fn decrypt_local_value(key: &[u8; 32], value: &str) -> Result<String, String> {
 }
 
 #[cfg(windows)]
-fn foreground_application() -> Option<ForegroundActivity> {
+fn foreground_application(
+    browser_metadata_cache: &mut Option<BrowserMetadataCacheEntry>,
+) -> Option<ForegroundActivity> {
     use std::ffi::OsString;
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::Foundation::CloseHandle;
@@ -1313,8 +1338,28 @@ fn foreground_application() -> Option<ForegroundActivity> {
         };
 
         let browser_metadata = if is_browser_process(&app_name, &process_name) {
-            native_browser_metadata(window)
+            let window_handle = window as usize;
+            let should_refresh = browser_metadata_cache
+                .as_ref()
+                .map(|entry| {
+                    entry.window_handle != window_handle
+                        || entry.refreshed_at.elapsed()
+                            >= Duration::from_secs(BROWSER_METADATA_CACHE_SECONDS)
+                })
+                .unwrap_or(true);
+            if should_refresh {
+                *browser_metadata_cache = Some(BrowserMetadataCacheEntry {
+                    window_handle,
+                    refreshed_at: Instant::now(),
+                    metadata: native_browser_metadata(window),
+                });
+            }
+            browser_metadata_cache
+                .as_ref()
+                .filter(|entry| entry.window_handle == window_handle)
+                .and_then(|entry| entry.metadata.clone())
         } else {
+            *browser_metadata_cache = None;
             None
         };
         let title_context_label = title
@@ -1355,6 +1400,7 @@ fn foreground_application() -> Option<ForegroundActivity> {
 }
 
 #[cfg(windows)]
+#[derive(Clone)]
 struct BrowserMetadata {
     domain: Option<String>,
     context_label: Option<String>,
@@ -1449,7 +1495,9 @@ fn native_browser_metadata(
 }
 
 #[cfg(not(windows))]
-fn foreground_application() -> Option<ForegroundActivity> {
+fn foreground_application(
+    _browser_metadata_cache: &mut Option<BrowserMetadataCacheEntry>,
+) -> Option<ForegroundActivity> {
     None
 }
 
@@ -1959,10 +2007,9 @@ fn enable_startup(_app: &AppHandle) {}
 #[tauri::command]
 fn get_agent_status(state: State<'_, AgentState>) -> Result<AgentStatus, String> {
     Ok(state
-        .core
-        .lock()
-        .map_err(|error| error.to_string())?
         .status
+        .read()
+        .map_err(|error| error.to_string())?
         .clone())
 }
 
@@ -1974,7 +2021,10 @@ fn enroll_agent(
 ) -> Result<AgentStatus, String> {
     let mut core = state.core.lock().map_err(|error| error.to_string())?;
     core.enroll_from_code(&server_url, &registration_code)?;
-    Ok(core.status.clone())
+    let next_status = core.status.clone();
+    drop(core);
+    *state.status.write().map_err(|error| error.to_string())? = next_status.clone();
+    Ok(next_status)
 }
 
 #[tauri::command]
@@ -1987,9 +2037,19 @@ fn create_browser_pairing_code(
 
 #[tauri::command]
 fn acknowledge_privacy(state: State<'_, AgentState>) -> Result<AgentStatus, String> {
-    let mut core = state.core.lock().map_err(|error| error.to_string())?;
-    core.acknowledge_privacy()?;
-    Ok(core.status.clone())
+    let mut status = state.status.write().map_err(|error| error.to_string())?;
+    if status.privacy_acknowledged {
+        return Ok(status.clone());
+    }
+    status.state = "syncing".into();
+    status.last_error = None;
+    let next_status = status.clone();
+    drop(status);
+    state
+        .commands
+        .send(AgentCommand::AcknowledgePrivacy)
+        .map_err(|error| format!("隐私确认任务无法提交：{error}"))?;
+    Ok(next_status)
 }
 
 #[tauri::command]
@@ -2002,23 +2062,47 @@ fn clear_registration(state: State<'_, AgentState>) -> Result<AgentStatus, Strin
     }
     core.token = None;
     core.status = AgentStatus::default();
-    Ok(core.status.clone())
+    let next_status = core.status.clone();
+    drop(core);
+    *state.status.write().map_err(|error| error.to_string())? = next_status.clone();
+    Ok(next_status)
 }
 
-fn start_worker(app: AppHandle, core: Arc<Mutex<Core>>) {
+fn start_worker(
+    app: AppHandle,
+    core: Arc<Mutex<Core>>,
+    status: Arc<RwLock<AgentStatus>>,
+) -> Sender<AgentCommand> {
+    let (commands, receiver) = mpsc::channel();
     thread::spawn(move || loop {
         let mut runtime = match core.lock() {
             Ok(runtime) => runtime,
             Err(poisoned) => poisoned.into_inner(),
         };
+        while let Ok(command) = receiver.try_recv() {
+            match command {
+                AgentCommand::AcknowledgePrivacy => {
+                    if let Err(error) = runtime.acknowledge_privacy() {
+                        runtime.status.state = "error".into();
+                        runtime.status.last_error = Some(error);
+                    }
+                }
+            }
+        }
         let tick_result = catch_unwind(AssertUnwindSafe(|| runtime.tick()));
         if tick_result.is_err() {
             runtime.status.state = "error".into();
             runtime.status.last_error = Some("Agent 采集线程发生异常，已自动恢复并继续运行".into());
         }
-        let _ = app.emit("agent-status", runtime.status.clone());
+        let next_status = runtime.status.clone();
+        drop(runtime);
+        if let Ok(mut snapshot) = status.write() {
+            *snapshot = next_status.clone();
+        }
+        let _ = app.emit("agent-status", next_status);
         thread::sleep(Duration::from_secs(1));
     });
+    commands
 }
 
 fn create_tray(app: &AppHandle) -> Result<(), tauri::Error> {
@@ -2058,11 +2142,17 @@ pub fn run() {
                 .resource_dir()
                 .map_err(|error| Box::new(error) as Box<dyn std::error::Error>)?;
             runtime.load_bootstrap(resource_dir);
+            let initial_status = runtime.status.clone();
             let core = Arc::new(Mutex::new(runtime));
-            app.manage(AgentState { core: core.clone() });
+            let status = Arc::new(RwLock::new(initial_status));
+            let commands = start_worker(app.handle().clone(), core.clone(), status.clone());
+            app.manage(AgentState {
+                core,
+                status,
+                commands,
+            });
             enable_startup(app.handle());
             create_tray(app.handle())?;
-            start_worker(app.handle().clone(), core);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

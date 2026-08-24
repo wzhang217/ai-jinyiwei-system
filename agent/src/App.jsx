@@ -12,7 +12,7 @@ const fallbackStatus = {
   last_error: null,
   last_browser_capture_at: null,
   last_browser_capture_source: null,
-  agent_version: "0.1.15",
+  agent_version: "0.1.16",
   privacy_policy: null,
   privacy_acknowledged: false,
   policy: {
@@ -128,7 +128,7 @@ export function App() {
     try {
       const next = await call("acknowledge_privacy");
       setStatus(next);
-      notify("已确认当前隐私策略，Agent 将开始记录允许的活动元数据");
+      notify("隐私确认已提交，Agent 将在后台完成同步");
     } catch (error) {
       notify(`隐私确认失败：${error}`);
     } finally {
