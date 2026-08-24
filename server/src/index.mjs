@@ -4460,11 +4460,11 @@ export function createAgentServer({ dbPath = process.env.AGENT_DB_PATH || defaul
     if (!productionOrigins.length || productionOrigins.some((origin) => {
       try {
         const parsed = new URL(origin);
-        return !["http:", "https:"].includes(parsed.protocol) || !parsed.host;
+        return parsed.protocol !== "https:" || !parsed.host;
       } catch {
         return true;
       }
-    })) throw new Error("production requires comma-separated HTTP(S) AGENT_CORS_ORIGIN values");
+    })) throw new Error("production requires comma-separated HTTPS AGENT_CORS_ORIGIN values");
   }
   mkdirSync(dirname(resolve(dbPath)), { recursive: true });
   const db = new DatabaseSync(resolve(dbPath));

@@ -145,3 +145,7 @@ button, input, select { font: inherit; } button { color: inherit; border: 0; cur
 .mfa-setup-box .mfa-uri { max-height: 72px; overflow: auto; font-size: 10px; }
 .mfa-recovery-codes { display: grid; grid-template-columns: repeat(2, minmax(120px, 1fr)); gap: 7px; }
 .mfa-recovery-codes code { padding: 7px 9px; border-radius: 7px; background: #fff; color: #514d46; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; text-align: center; }
+.toggle-button:disabled { cursor: not-allowed; opacity: .65; }
+.toggle-button:hover:not(:disabled) .toggle { filter: brightness(.96); }
+.integration-card:hover:not(:disabled) { border-color: #cfc3e4; background: #fbfaff; }
+.integration-card:disabled { cursor: not-allowed; opacity: .65; }

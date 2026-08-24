@@ -1539,6 +1539,24 @@ test("rejects weak production secrets before opening the service", () => {
   }
 });
 
+test("rejects HTTP production CORS origins before opening the service", () => {
+  const names = ["NODE_ENV", "ADMIN_PASSWORD", "AGENT_ALLOW_BOOTSTRAP_TOKEN", "AGENT_SESSION_SECRET", "AGENT_CORS_ORIGIN"];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  try {
+    process.env.NODE_ENV = "production";
+    process.env.ADMIN_PASSWORD = "a-production-password-long-enough";
+    process.env.AGENT_ALLOW_BOOTSTRAP_TOKEN = "false";
+    process.env.AGENT_SESSION_SECRET = "a-production-session-secret-that-is-long-enough-123456";
+    process.env.AGENT_CORS_ORIGIN = "http://history.example.com";
+    assert.throws(() => createAgentServer({ dbPath: "/tmp/ai-jinyiwei-production-http-cors-test.sqlite" }), /HTTPS/);
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+});
+
 test("keeps employee directory and account binding inside the active organization", async () => {
   await withServer(async ({ base, app }) => {
     const created = await jsonFetch(`${base}/api/admin/employees`, {
