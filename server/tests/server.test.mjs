@@ -2231,6 +2231,10 @@ test("isolates organization configuration and keeps audit logs append-only", asy
     assert.ok(audit?.id);
     assert.throws(() => app.db.prepare("UPDATE audit_logs SET detail = ? WHERE id = ?").run("tampered", audit.id), /audit_logs_are_append_only/);
     assert.throws(() => app.db.prepare("DELETE FROM audit_logs WHERE id = ?").run(audit.id), /audit_logs_are_append_only/);
+    const integrity = await jsonFetch(`${base}/api/admin/audit/verify`, { headers: adminHeaders });
+    assert.equal(integrity.response.status, 200);
+    assert.equal(integrity.body.valid, true);
+    assert.ok(integrity.body.protected_entries >= 1);
   });
 });
 

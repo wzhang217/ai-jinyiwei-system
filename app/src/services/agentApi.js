@@ -397,6 +397,10 @@ export async function getLiveAudit() {
   }));
 }
 
+export async function verifyLiveAuditIntegrity() {
+  return request("/api/admin/audit/verify");
+}
+
 export async function auditLiveExport(recordIds = []) {
   return request("/api/admin/history/export", {
     method: "POST",

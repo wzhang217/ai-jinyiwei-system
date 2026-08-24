@@ -131,6 +131,8 @@ AI 摘要和活动采集采用不同频率：Agent 仍按采集策略实时上�
 
 服务端会把每次实际模型调用的操作类型、状态、HTTP 状态、耗时、供应商返回的 Token（若有）、提示词版本和费用估算写入 `ai_usage`，不保存 Prompt、API Key 或活动正文。后台“设置 → AI 设置”可配置每日请求上限和每日费用上限（填 `0` 表示不限），并查看最近 7 天的调用、Token、延迟和失败情况；也可通过 `GET /api/admin/ai/usage?days=7` 读取同一统计。费用估算依赖 `AI_INPUT_COST_PER_MILLION_TOKENS` 和 `AI_OUTPUT_COST_PER_MILLION_TOKENS`，价格未知时保持 `0`。达到额度后，新的模型请求会被拦截并保留规则摘要，避免继续产生供应商费用。
 
+审计日志除 SQLite 的追加写入保护外，新写入记录还带有按企业隔离的 `previous_hash` / `entry_hash` 哈希链。老板可调用 `GET /api/admin/audit/verify` 或在后台“审计”页查看校验结果；从旧版本升级的历史记录会显示为“历史旧记录”，不会被伪装成已完成哈希校验。
+
 管理员可以先预览再执行数据留存删除，删除活动事件、Leaf/Rollup Summary，并写入审计日志：
 
 ```bash

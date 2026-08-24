@@ -39,7 +39,7 @@ import {
 } from "@phosphor-icons/react";
 import { historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, downloadRecordsMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, deleteLivePrivacySubject, disableLiveMfa, enableLiveMfa, exportLiveAudit, exportLivePrivacySubject, getAdminAccounts, getLiveAdminSettings, getLiveAiUsage, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveMfaStatus, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setAdminAccountStatus, setLiveDeviceStatus, setupLiveMfa, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateNotificationSettings, updateOrganizationSettings } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, deleteLivePrivacySubject, disableLiveMfa, enableLiveMfa, exportLiveAudit, exportLivePrivacySubject, getAdminAccounts, getLiveAdminSettings, getLiveAiUsage, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveMfaStatus, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setAdminAccountStatus, setLiveDeviceStatus, setupLiveMfa, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateNotificationSettings, updateOrganizationSettings, verifyLiveAuditIntegrity } from "./services/agentApi.js";
 import { auditData, deviceData, employeeData, permissionRoles, settingsData, teamData } from "./adminData.js";
 import { SHANGHAI_TIME_ZONE, formatShanghaiTime, shanghaiDateAtStart, shanghaiDateInput, shanghaiDayKey, shanghaiWeekKey } from "./time.js";
 
@@ -984,6 +984,7 @@ function RetentionPolicy({ role = "admin", onToast }) {
 function AuditPage({ role, query, onToast }) {
   const [tab, setTab] = useState("访问日志");
   const [liveLogs, setLiveLogs] = useState(null);
+  const [integrity, setIntegrity] = useState(null);
   const [error, setError] = useState("");
   useEffect(() => {
     if (!agentApiEnabled) return undefined;
@@ -993,8 +994,13 @@ function AuditPage({ role, query, onToast }) {
     }).catch((requestError) => {
       if (!cancelled) setError(requestError.message);
     });
+    if (role === "admin") verifyLiveAuditIntegrity().then((result) => {
+      if (!cancelled) setIntegrity(result);
+    }).catch((requestError) => {
+      if (!cancelled) setError(requestError.message);
+    });
     return () => { cancelled = true; };
-  }, []);
+  }, [role]);
   const sourceLogs = liveLogs ?? (demoMode ? auditData : []);
   const logs = sourceLogs.filter((item) => !query.trim() || `${item.actor} ${item.action} ${item.target} ${item.result} ${item.detail || ""}`.toLowerCase().includes(query.toLowerCase()));
   const exportLogs = async () => {
@@ -1014,7 +1020,7 @@ function AuditPage({ role, query, onToast }) {
       setError(requestError.message);
     }
   };
-  return <div className="page-content"><PageHeader eyebrow="AUDIT TRAIL" title="审计" description="记录历史访问、导出、权限策略和 Agent 上下线事件。" meta={agentApiEnabled ? `${logs.length} 条真实事件` : demoMode ? `${logs.length} 条演示事件` : "未连接服务端"} action={<button className="outline-button" onClick={() => void exportLogs()}><DownloadSimple size={17} />导出日志</button>} />{error && <div className="error-box">审计日志读取失败：{error}</div>}<Tabs tabs={["访问日志", "权限变更", "导出记录", "归档与删除", "Agent 事件"]} active={tab} onChange={setTab} /><SectionCard title={tab} description="所有操作均带有操作者、对象、时间和结果"><div className="audit-table"><div className="audit-row audit-head"><span>时间</span><span>操作者</span><span>动作</span><span>对象</span><span>结果</span><span /></div>{logs.length ? logs.map((item) => <div className="audit-row" key={item.id || `${item.time}-${item.actor}-${item.target}`}><span>{item.time}</span><span className="audit-actor">{item.actor}</span><span>{item.action}</span><span title={item.detail}>{item.target}</span><StatusPill status={item.result === "成功" || item.result === "允许" || item.result === "完成" || item.result === "已生效" ? "online" : item.result === "需关注" ? "attention" : "idle"} /><button className="row-action" onClick={() => onToast(item.detail || `${item.action} 详情`)}><ArrowSquareOut size={15} /></button></div>) : <div className="empty-state"><Database size={24} /><strong>暂无真实审计事件</strong><span>服务端产生注册、策略、Agent 上下线和留存操作后会显示在这里。</span></div>}</div></SectionCard></div>;
+  return <div className="page-content"><PageHeader eyebrow="AUDIT TRAIL" title="审计" description="记录历史访问、导出、权限策略和 Agent 上下线事件。" meta={agentApiEnabled ? `${logs.length} 条真实事件` : demoMode ? `${logs.length} 条演示事件` : "未连接服务端"} action={<button className="outline-button" onClick={() => void exportLogs()}><DownloadSimple size={17} />导出日志</button>} />{error && <div className="error-box">审计日志读取失败：{error}</div>}{role === "admin" && <SectionCard title="日志完整性" description="审计日志采用追加式哈希链；历史升级前的旧记录会标记为未加密校验"><div className="deep-link-card"><ShieldCheck size={22} /><span><strong>{integrity ? integrity.valid ? "哈希链校验通过" : "发现完整性异常" : "正在校验…"}</strong><small>{integrity ? `受保护 ${integrity.protected_entries} 条 · 历史旧记录 ${integrity.legacy_entries} 条${integrity.broken_entry_id ? ` · 异常记录 ${integrity.broken_entry_id}` : ""}` : "仅老板可执行完整性校验"}</small></span></div></SectionCard>}<Tabs tabs={["访问日志", "权限变更", "导出记录", "归档与删除", "Agent 事件"]} active={tab} onChange={setTab} /><SectionCard title={tab} description="所有操作均带有操作者、对象、时间和结果"><div className="audit-table"><div className="audit-row audit-head"><span>时间</span><span>操作者</span><span>动作</span><span>对象</span><span>结果</span><span /></div>{logs.length ? logs.map((item) => <div className="audit-row" key={item.id || `${item.time}-${item.actor}-${item.target}`}><span>{item.time}</span><span className="audit-actor">{item.actor}</span><span>{item.action}</span><span title={item.detail}>{item.target}</span><StatusPill status={item.result === "成功" || item.result === "允许" || item.result === "完成" || item.result === "已生效" ? "online" : item.result === "需关注" ? "attention" : "idle"} /><button className="row-action" onClick={() => onToast(item.detail || `${item.action} 详情`)}><ArrowSquareOut size={15} /></button></div>) : <div className="empty-state"><Database size={24} /><strong>暂无真实审计事件</strong><span>服务端产生注册、策略、Agent 上下线和留存操作后会显示在这里。</span></div>}</div></SectionCard></div>;
 }
 
 function SettingsPage({ role, onToast }) {

@@ -8,7 +8,7 @@ import { createAiService } from "./ai.mjs";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const defaultDbPath = resolve(moduleDir, "../data/agent.sqlite");
-const CURRENT_SCHEMA_VERSION = 6;
+const CURRENT_SCHEMA_VERSION = 7;
 const DEFAULT_ORGANIZATION_ID = /^[a-z0-9][a-z0-9_-]{2,63}$/.test(String(process.env.DEFAULT_ORGANIZATION_ID || "org_default"))
   ? String(process.env.DEFAULT_ORGANIZATION_ID || "org_default")
   : "org_default";
@@ -422,7 +422,9 @@ function createSchema(db) {
       target TEXT NOT NULL,
       detail TEXT,
       organization_id TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id),
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      previous_hash TEXT NOT NULL DEFAULT '',
+      entry_hash TEXT NOT NULL DEFAULT ''
     );
 
     CREATE TABLE IF NOT EXISTS privacy_acknowledgements (
@@ -626,6 +628,8 @@ function createSchema(db) {
   ensureColumn(db, "user_accounts", "mfa_enabled", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "user_accounts", "mfa_secret_enc", "TEXT");
   ensureColumn(db, "user_accounts", "mfa_recovery_codes_json", "TEXT NOT NULL DEFAULT '[]'");
+  ensureColumn(db, "audit_logs", "previous_hash", "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, "audit_logs", "entry_hash", "TEXT NOT NULL DEFAULT ''");
   ensureColumn(db, "memory_summaries", "rollup_scope", "TEXT NOT NULL DEFAULT 'window'");
   ensureColumn(db, "memory_summaries", "source_record_ids_json", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "memory_summaries", "title", "TEXT NOT NULL DEFAULT ''");
@@ -749,6 +753,9 @@ function applySchemaMigrations(db, organizationDefault, now = isoNow()) {
   }
   if (!applied.has(6)) {
     insert.run(6, "ai-usage-metrics-and-quotas", hash("schema:ai-usage-metrics-and-quotas:v6"), now);
+  }
+  if (!applied.has(7)) {
+    insert.run(7, "audit-log-integrity-chain", hash("schema:audit-log-integrity-chain:v7"), now);
   }
 }
 
@@ -1408,10 +1415,61 @@ function organizationForAuditTarget(db, target) {
   return row?.organization_id || DEFAULT_ORGANIZATION_ID;
 }
 
+function auditEntryHash({ id, action, actor, target, detail, organization_id: organizationId, created_at: createdAt, previous_hash: previousHash }) {
+  return hash([id, action, actor, target, detail || "", organizationId, createdAt, previousHash || ""].join("\n"));
+}
+
 function recordAudit(db, action, actor, target, detail = "", organizationId = null) {
+  const id = newId("audit");
+  const scopedOrganizationId = organizationId || organizationForAuditTarget(db, target);
+  const previousHash = db.prepare("SELECT entry_hash FROM audit_logs WHERE organization_id = ? ORDER BY rowid DESC LIMIT 1").get(scopedOrganizationId)?.entry_hash || "";
+  const createdAt = isoNow();
+  const entryHash = auditEntryHash({
+    id,
+    action,
+    actor,
+    target,
+    detail,
+    organization_id: scopedOrganizationId,
+    created_at: createdAt,
+    previous_hash: previousHash,
+  });
   db.prepare(
-    "INSERT INTO audit_logs (id, action, actor, target, detail, organization_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-  ).run(newId("audit"), action, actor, target, detail, organizationId || organizationForAuditTarget(db, target), isoNow());
+    "INSERT INTO audit_logs (id, action, actor, target, detail, organization_id, created_at, previous_hash, entry_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+  ).run(id, action, actor, target, detail, scopedOrganizationId, createdAt, previousHash, entryHash);
+}
+
+function verifyAuditChain(db, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const rows = db.prepare("SELECT rowid, id, action, actor, target, detail, organization_id, created_at, previous_hash, entry_hash FROM audit_logs WHERE organization_id = ? ORDER BY rowid ASC").all(organizationId);
+  let previousHash = "";
+  let legacyEntries = 0;
+  let protectedEntries = 0;
+  let valid = true;
+  let brokenEntryId = null;
+  for (const row of rows) {
+    if (!row.entry_hash) {
+      legacyEntries += 1;
+      previousHash = "";
+      continue;
+    }
+    const expected = auditEntryHash(row);
+    if (row.previous_hash !== previousHash || row.entry_hash !== expected) {
+      valid = false;
+      brokenEntryId = row.id;
+      break;
+    }
+    protectedEntries += 1;
+    previousHash = row.entry_hash;
+  }
+  return {
+    valid,
+    organization_id: organizationId,
+    total_entries: rows.length,
+    protected_entries: protectedEntries,
+    legacy_entries: legacyEntries,
+    broken_entry_id: brokenEntryId,
+    verified_at: isoNow(),
+  };
 }
 
 function recordAiUsage(db, usage = {}) {
@@ -4036,6 +4094,13 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         }
         const logs = db.prepare(query).all(...params);
         return sendJson(response, 200, { logs });
+      }
+
+      if (method === "GET" && url.pathname === "/api/admin/audit/verify") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
+        if (principal.role !== "admin") return sendError(response, 403, "audit integrity verification requires owner permission", "forbidden");
+        return sendJson(response, 200, verifyAuditChain(db, principal.organization_id || DEFAULT_ORGANIZATION_ID));
       }
 
       if (method === "GET" && url.pathname === "/api/admin/audit/export") {
