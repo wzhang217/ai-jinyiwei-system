@@ -7,9 +7,12 @@ use aes_gcm::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Timelike, Utc};
 use reqwest::blocking::Client;
+use reqwest::Proxy;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,7 +22,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
-const AGENT_VERSION: &str = "0.1.14";
+const AGENT_VERSION: &str = "0.1.15";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const LOCAL_QUEUE_KEY_ACCOUNT: &str = "__local-queue-key";
 const MAX_PENDING_EVENTS: i64 = 10_000;
@@ -308,12 +311,16 @@ impl Core {
             status.state = "offline".into();
         }
 
+        let mut http_builder = Client::builder().timeout(Duration::from_secs(8));
+        if let Ok(proxy_url) = env::var("AGENT_PROXY_URL") {
+            if !proxy_url.trim().is_empty() {
+                http_builder = http_builder
+                    .proxy(Proxy::all(proxy_url.trim()).map_err(|error| error.to_string())?);
+            }
+        }
         let mut core = Self {
             db,
-            http: Client::builder()
-                .timeout(Duration::from_secs(8))
-                .build()
-                .map_err(|error| error.to_string())?,
+            http: http_builder.build().map_err(|error| error.to_string())?,
             status,
             token,
             local_queue_key,
@@ -1989,10 +1996,16 @@ fn clear_registration(state: State<'_, AgentState>) -> Result<AgentStatus, Strin
 
 fn start_worker(app: AppHandle, core: Arc<Mutex<Core>>) {
     thread::spawn(move || loop {
-        if let Ok(mut runtime) = core.lock() {
-            runtime.tick();
-            let _ = app.emit("agent-status", runtime.status.clone());
+        let mut runtime = match core.lock() {
+            Ok(runtime) => runtime,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let tick_result = catch_unwind(AssertUnwindSafe(|| runtime.tick()));
+        if tick_result.is_err() {
+            runtime.status.state = "error".into();
+            runtime.status.last_error = Some("Agent 采集线程发生异常，已自动恢复并继续运行".into());
         }
+        let _ = app.emit("agent-status", runtime.status.clone());
         thread::sleep(Duration::from_secs(1));
     });
 }

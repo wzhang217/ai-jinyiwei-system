@@ -2,6 +2,7 @@
 Description=AI锦衣卫 Agent Server readiness check
 After=ai-jinyiwei-agent-server.service
 Wants=ai-jinyiwei-agent-server.service
+OnFailure=ai-jinyiwei-agent-health-alert.service
 
 [Service]
 Type=oneshot

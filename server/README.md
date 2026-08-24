@@ -17,6 +17,8 @@ npm start
 
 `npm start` 和 `npm run dev` 会自动读取 `server/.env`。默认监听 `0.0.0.0:8787`。首次启动时，如果 `ADMIN_PASSWORD` 已设置，服务端会创建一个管理员账号；之后管理后台使用用户名和密码登录，服务端签发短期 HS256 JWT。生产环境默认拒绝 `x-admin-token`，不能把管理员 Token 放入 `app/.env` 或前端构建产物；只有设置 `AGENT_ALLOW_BOOTSTRAP_TOKEN=true` 才会临时开放维护入口。正式试点请设置随机的 `AGENT_SESSION_SECRET`、明确的 `AGENT_CORS_ORIGIN`，并在反向代理后使用 HTTPS。
 
+Linux 客户服务器可使用 `server/deploy/install-systemd.sh` 安装服务、备份和健康检查定时器；该脚本不会覆盖已有环境文件。正式部署前先执行 `--init-env` 生成环境模板，填好账号、JWT 密钥、数据库和 AI 配置后再安装。健康检查失败会记录到 systemd journal，并可通过 `HEALTH_ALERT_WEBHOOK_URL` 发出通用 JSON 告警。
+
 ### 管理后台登录
 
 在 `server/.env` 设置以下值后重启服务端：

@@ -5,7 +5,7 @@
 ## 1. 发布前检查
 
 1. 在 `agent/package.json`、`agent/package-lock.json`、`agent/src-tauri/Cargo.toml`、`agent/src-tauri/tauri.conf.json` 和 `agent/src-tauri/src/main.rs` 中保持同一个版本号。
-2. 创建版本提交和标签，例如 `v0.1.14`。GitHub Actions 会拒绝标签版本与 Agent 版本不一致的构建。
+2. 创建版本提交和标签，例如 `v0.1.15`。GitHub Actions 会拒绝标签版本与 Agent 版本不一致的构建。
 3. 正式标签构建必须配置 `WINDOWS_SIGNING_PFX_BASE64` 和 `WINDOWS_SIGNING_PFX_PASSWORD`。工作流会验证 MSI 的 Authenticode 签名，并上传 `release-manifest.json`。
 4. 从 Release 同时下载 MSI 和 manifest；不要只下载没有 SHA-256 记录的安装包。
 
@@ -14,7 +14,7 @@
 在 PowerShell 中执行，替换文件名：
 
 ```powershell
-$msi = .\ai-jinyiwei-agent_0.1.14_x64_en-US.msi
+$msi = .\ai-jinyiwei-agent_0.1.15_x64_en-US.msi
 $manifest = Get-Content .\release-manifest.json | ConvertFrom-Json
 Get-FileHash $msi -Algorithm SHA256
 (Get-AuthenticodeSignature $msi).Status
@@ -41,7 +41,7 @@ Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @('/i', $msi, '/norest
 升级前保留当前 MSI、manifest 和当前版本的诊断记录。直接安装新 MSI，不要删除 `agent.sqlite` 或 Windows 凭据存储中的设备密钥：
 
 ```powershell
-Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @('/i', .\ai-jinyiwei-agent_0.1.14_x64_en-US.msi, '/norestart')
+Start-Process msiexec.exe -Verb RunAs -Wait -ArgumentList @('/i', .\ai-jinyiwei-agent_0.1.15_x64_en-US.msi, '/norestart')
 ```
 
 升级后检查 Agent 版本、设备 Token、离线队列、最近心跳和开机启动项。正常升级应保留注册信息和未上传队列。

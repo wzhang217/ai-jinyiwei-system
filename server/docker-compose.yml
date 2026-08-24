@@ -6,7 +6,8 @@ services:
     env_file:
       - .env
     ports:
-      - "8787:8787"
+      # Keep the app port private; terminate HTTPS in Caddy/Nginx on the host.
+      - "127.0.0.1:8787:8787"
     volumes:
       - ./data:/app/data
     restart: unless-stopped

@@ -1,0 +1,16 @@
+[Unit]
+Description=AI锦衣卫 Agent Server health failure alert
+
+[Service]
+Type=oneshot
+User=jinyiwei
+Group=jinyiwei
+WorkingDirectory=/opt/ai-jinyiwei/server
+EnvironmentFile=/etc/ai-jinyiwei/server.env
+ExecStart=/usr/bin/node --env-file-if-exists=.env scripts/health-alert.mjs
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ai-jinyiwei/server/data
+SyslogIdentifier=ai-jinyiwei-agent-health-alert

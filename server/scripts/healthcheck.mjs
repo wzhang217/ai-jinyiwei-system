@@ -1,7 +1,7 @@
 import { statfsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
-const host = process.env.HOST || "127.0.0.1";
+const host = process.env.HEALTHCHECK_HOST || "127.0.0.1";
 const port = Number(process.env.PORT) || 8787;
 const response = await fetch(`http://${host}:${port}/health/ready`);
 if (!response.ok) throw new Error(`health endpoint returned ${response.status}`);

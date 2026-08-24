@@ -166,8 +166,12 @@ function LoginView({ error, onLogin }) {
   </form></div>;
 }
 
+function ApiConfigurationView() {
+  return <div className="auth-screen"><div className="auth-card"><div className="organization-mark"><Buildings size={23} weight="fill" /></div><h1>管理后台未连接服务端</h1><p>生产构建不会在服务端未配置时显示演示账号或虚构数据。请设置 <code>VITE_AGENT_API_BASE_URL</code> 后重新启动前端。</p><div className="error-box">当前未配置 Agent API 地址</div></div></div>;
+}
+
 function App() {
-  const [principal, setPrincipal] = useState(() => agentApiEnabled ? getStoredAdminPrincipal() : { role: "admin", actor: "演示管理员", team: null });
+  const [principal, setPrincipal] = useState(() => agentApiEnabled ? getStoredAdminPrincipal() : demoMode ? { role: "admin", actor: "演示管理员", team: null } : null);
   const [authChecking, setAuthChecking] = useState(agentApiEnabled);
   const [authError, setAuthError] = useState("");
   const [activeNav, setActiveNav] = useState("overview");
@@ -269,6 +273,7 @@ function App() {
 
   const activeLabel = visibleNavGroups.flatMap((group) => group.items).find((item) => item.id === activeNav)?.label || "工作区";
 
+  if (!agentApiEnabled && !demoMode) return <ApiConfigurationView />;
   if (agentApiEnabled && authChecking) return <AuthLoadingView />;
   if (agentApiEnabled && !principal) return <LoginView error={authError} onLogin={async (username, password) => {
     setAuthError("");

@@ -12,7 +12,7 @@ const fallbackStatus = {
   last_error: null,
   last_browser_capture_at: null,
   last_browser_capture_source: null,
-  agent_version: "0.1.14",
+  agent_version: "0.1.15",
   privacy_policy: null,
   privacy_acknowledged: false,
   policy: {
@@ -30,8 +30,8 @@ const isTauri = () => Boolean(window.__TAURI_INTERNALS__ || window.__TAURI_METAD
 async function call(command, args) {
   if (!isTauri()) {
     if (command === "get_agent_status") return fallbackStatus;
-    if (command === "enroll_agent") return { ...fallbackStatus, state: "online", employee_name: "演示员工", employee_team: "研发与产品中心", device_id: "demo-device" };
-    if (command === "acknowledge_privacy") return { ...fallbackStatus, state: "online", privacy_acknowledged: true };
+    if (command === "enroll_agent") throw new Error("当前不是已安装的 Windows Agent，无法注册设备");
+    if (command === "acknowledge_privacy") throw new Error("当前不是已安装的 Windows Agent，无法确认隐私策略");
     return { ok: true };
   }
   return invoke(command, args);
