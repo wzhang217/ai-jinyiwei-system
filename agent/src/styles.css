@@ -45,6 +45,9 @@ input:focus { border-color: #79a18c; box-shadow: 0 0 0 3px rgba(121,161,140,.14)
 .policy-item small { color: #94a097; font-size: 10px; }
 .shield { display: grid; place-items: center; flex: 0 0 auto; width: 30px; height: 30px; border-radius: 9px; background: #e2f0e7; color: #3d8a5e; font-weight: 700; }
 .privacy-card h2 { margin-top: 0; }
+.privacy-confirmation { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; margin-top: 13px; padding-top: 12px; border-top: 1px solid #edf0ed; }
+.privacy-confirmation strong, .privacy-confirmation small { color: #65756b; font-size: 10px; line-height: 1.5; }
+.privacy-confirmation .primary-button { margin-top: 0; }
 .error-box { margin-top: 12px; padding: 9px; border-radius: 8px; background: #fff1f0; color: #a14f4f; font-size: 10px; line-height: 1.5; }
 .pairing-help { margin: 10px 0 14px; color: #78847d; font-size: 11px; line-height: 1.7; }
 .secondary-button { margin-top: 0; padding: 8px 10px; border: 1px solid #cbdacf; border-radius: 8px; background: #edf3ee; color: #31523f; font-size: 10px; font-weight: 700; }

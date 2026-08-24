@@ -14,7 +14,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
-const AGENT_VERSION: &str = "0.1.11";
+const AGENT_VERSION: &str = "0.1.12";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const MAX_PENDING_EVENTS: i64 = 10_000;
 // A resumed/sleeping Windows session must not create a full-day idle span
@@ -87,6 +87,8 @@ struct AgentStatus {
     last_browser_capture_source: Option<String>,
     agent_version: String,
     policy: Policy,
+    privacy_policy: Option<PrivacyPolicy>,
+    privacy_acknowledged: bool,
 }
 
 impl Default for AgentStatus {
@@ -104,8 +106,18 @@ impl Default for AgentStatus {
             last_browser_capture_source: None,
             agent_version: AGENT_VERSION.into(),
             policy: Policy::default(),
+            privacy_policy: None,
+            privacy_acknowledged: false,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PrivacyPolicy {
+    version: String,
+    title: String,
+    notice: String,
+    policy_hash: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -188,6 +200,7 @@ struct EnrollResponse {
     device_token: String,
     employee: Employee,
     policy: Policy,
+    privacy_policy: PrivacyPolicy,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -200,6 +213,8 @@ struct Employee {
 #[derive(Serialize)]
 struct EventsRequest {
     events: Vec<AgentEventPayload>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    privacy_policy_version: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -228,6 +243,15 @@ struct HeartbeatRequest {
 #[derive(Deserialize)]
 struct HeartbeatResponse {
     policy: Policy,
+    privacy_policy: PrivacyPolicy,
+    #[serde(default)]
+    privacy_acknowledged: bool,
+}
+
+#[derive(Serialize)]
+struct PrivacyAcknowledgementRequest {
+    policy_version: String,
+    policy_hash: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -403,6 +427,11 @@ impl Core {
             .bearer_auth(token)
             .json(&EventsRequest {
                 events: events.clone(),
+                privacy_policy_version: self
+                    .status
+                    .privacy_policy
+                    .as_ref()
+                    .map(|policy| policy.version.clone()),
             })
             .send()
             .map_err(|error| error.to_string())?;
@@ -445,10 +474,48 @@ impl Core {
         }
         let body: HeartbeatResponse = response.json().map_err(|error| error.to_string())?;
         self.status.policy = body.policy;
+        self.status.privacy_policy = Some(body.privacy_policy);
+        self.status.privacy_acknowledged = body.privacy_acknowledged;
         self.status.last_sync_at = Some(Utc::now().to_rfc3339());
         self.status.last_error = None;
-        self.status.state = "online".into();
+        self.status.state = if self.status.privacy_acknowledged {
+            "online".into()
+        } else {
+            "awaiting_consent".into()
+        };
         self.last_heartbeat = Instant::now();
+        Ok(())
+    }
+
+    fn acknowledge_privacy(&mut self) -> Result<(), String> {
+        let token = self
+            .token
+            .clone()
+            .ok_or_else(|| "设备尚未注册".to_string())?;
+        let policy = self
+            .status
+            .privacy_policy
+            .clone()
+            .ok_or_else(|| "尚未取得当前隐私策略，请等待心跳同步".to_string())?;
+        let response = self
+            .http
+            .post(self.api_url("/api/agent/privacy-acknowledgement")?)
+            .bearer_auth(token)
+            .json(&PrivacyAcknowledgementRequest {
+                policy_version: policy.version.clone(),
+                policy_hash: policy.policy_hash,
+            })
+            .send()
+            .map_err(|error| error.to_string())?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            return Err(format!("隐私策略确认失败：HTTP {}：{}", status, body));
+        }
+        self.save_config("privacy_acknowledged_version", &policy.version)?;
+        self.status.privacy_acknowledged = true;
+        self.status.state = "online".into();
+        self.status.last_error = None;
         Ok(())
     }
 
@@ -642,7 +709,9 @@ impl Core {
         self.status.employee_name = Some(enrolled.employee.name);
         self.status.employee_team = Some(enrolled.employee.team);
         self.status.policy = enrolled.policy;
-        self.status.state = "online".into();
+        self.status.privacy_policy = Some(enrolled.privacy_policy);
+        self.status.privacy_acknowledged = false;
+        self.status.state = "awaiting_consent".into();
         self.status.last_error = None;
         self.status.last_sync_at = Some(Utc::now().to_rfc3339());
         self.pending_registration_code = None;
@@ -676,6 +745,18 @@ impl Core {
         }
 
         let now = Instant::now();
+        if !self.status.privacy_acknowledged {
+            if now.duration_since(self.last_heartbeat).as_secs()
+                >= self.status.policy.heartbeat_interval_seconds
+            {
+                if let Err(error) = self.send_heartbeat() {
+                    self.status.state = "offline".into();
+                    self.status.last_error = Some(error);
+                }
+            }
+            self.status.queued_events = pending_count(&self.db);
+            return;
+        }
         let checkpoint_seconds = self.activity_checkpoint_seconds();
         if !within_work_hours(&self.status.policy) {
             let _ = self.finish_session(now);
@@ -1642,6 +1723,13 @@ fn create_browser_pairing_code(
 }
 
 #[tauri::command]
+fn acknowledge_privacy(state: State<'_, AgentState>) -> Result<AgentStatus, String> {
+    let mut core = state.core.lock().map_err(|error| error.to_string())?;
+    core.acknowledge_privacy()?;
+    Ok(core.status.clone())
+}
+
+#[tauri::command]
 fn clear_registration(state: State<'_, AgentState>) -> Result<AgentStatus, String> {
     let mut core = state.core.lock().map_err(|error| error.to_string())?;
     if let Some(device_id) = core.status.device_id.clone() {
@@ -1711,6 +1799,7 @@ pub fn run() {
             get_agent_status,
             enroll_agent,
             create_browser_pairing_code,
+            acknowledge_privacy,
             clear_registration
         ])
         .on_window_event(|window, event| {

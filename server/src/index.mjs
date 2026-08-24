@@ -8,7 +8,7 @@ import { createAiService } from "./ai.mjs";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const defaultDbPath = resolve(moduleDir, "../data/agent.sqlite");
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
 const DEFAULT_ORGANIZATION_ID = /^[a-z0-9][a-z0-9_-]{2,63}$/.test(String(process.env.DEFAULT_ORGANIZATION_ID || "org_default"))
   ? String(process.env.DEFAULT_ORGANIZATION_ID || "org_default")
   : "org_default";
@@ -52,7 +52,13 @@ const defaultOrganizationSettings = {
   ai_model: "qwen3.7-plus",
   ai_summary_interval_seconds: "600",
   ai_budget_per_minute: "30",
+  privacy_policy_version: "2026-08-24.v1",
+  privacy_policy_title: "AI锦衣卫员工活动数据采集说明",
+  privacy_policy_notice: "本系统仅采集前台应用活动、空闲状态、有限的脱敏工作标识和网站域名，用于生成个人与团队工作上下文。系统不采集键盘内容、剪贴板、屏幕、聊天正文、文件正文、原始窗口标题或完整网页内容。数据断网时保存在本机队列，恢复网络后按策略同步。",
 };
+
+const DEFAULT_PRIVACY_POLICY_TITLE = defaultOrganizationSettings.privacy_policy_title;
+const DEFAULT_PRIVACY_POLICY_NOTICE = defaultOrganizationSettings.privacy_policy_notice;
 
 const defaultNotificationSettings = [
   ["agent_offline", "Agent 离线超过 30 分钟", 1],
@@ -118,6 +124,22 @@ const newToken = () => randomBytes(32).toString("base64url");
 const newRegistrationCode = () => `JY-${randomBytes(5).toString("hex").toUpperCase()}`;
 const newBrowserPairingCode = () => `BP-${randomBytes(5).toString("hex").toUpperCase()}`;
 const normalizeUsername = (value) => String(value || "").trim().toLowerCase();
+
+function loginProtectionConfig() {
+  return {
+    maxFailures: Math.min(Math.max(Number(process.env.AUTH_MAX_LOGIN_FAILURES) || 5, 3), 20),
+    lockoutSeconds: Math.min(Math.max(Number(process.env.AUTH_LOCKOUT_SECONDS) || 900, 60), 86_400),
+  };
+}
+
+function isWeakSecret(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return !normalized || normalized.length < 32 || [
+    "change-me",
+    "change-me-to-a-long-random-value",
+    "replace-with-a-12-character-password",
+  ].includes(normalized);
+}
 
 function hashPassword(password) {
   const salt = randomBytes(16).toString("base64url");
@@ -195,7 +217,9 @@ function createSchema(db) {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
       last_login_at TEXT,
-      disabled_at TEXT
+      disabled_at TEXT,
+      failed_login_count INTEGER NOT NULL DEFAULT 0,
+      locked_until TEXT
     );
 
     CREATE TABLE IF NOT EXISTS admin_sessions (
@@ -279,6 +303,23 @@ function createSchema(db) {
       organization_id TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id),
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS privacy_acknowledgements (
+      id TEXT PRIMARY KEY,
+      organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      employee_id TEXT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+      device_id TEXT REFERENCES devices(id) ON DELETE SET NULL,
+      policy_version TEXT NOT NULL,
+      policy_hash TEXT NOT NULL,
+      acknowledged_at TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'agent',
+      created_at TEXT NOT NULL,
+      UNIQUE (employee_id, policy_version)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_privacy_acknowledgements_org_version
+      ON privacy_acknowledgements (organization_id, policy_version, acknowledged_at DESC);
 
     CREATE TRIGGER IF NOT EXISTS audit_logs_no_update
       BEFORE UPDATE ON audit_logs
@@ -435,6 +476,8 @@ function createSchema(db) {
   ensureColumn(db, "events", "context_label", "TEXT");
   ensureColumn(db, "events", "web_domain", "TEXT");
   ensureColumn(db, "events", "source_kind", "TEXT NOT NULL DEFAULT 'desktop_app'");
+  ensureColumn(db, "user_accounts", "failed_login_count", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "user_accounts", "locked_until", "TEXT");
   ensureColumn(db, "memory_summaries", "rollup_scope", "TEXT NOT NULL DEFAULT 'window'");
   ensureColumn(db, "memory_summaries", "source_record_ids_json", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "memory_summaries", "title", "TEXT NOT NULL DEFAULT ''");
@@ -549,6 +592,9 @@ function applySchemaMigrations(db, organizationDefault, now = isoNow()) {
   }
   if (!applied.has(3)) {
     insert.run(3, "organization-scoped-configuration", hash("schema:organization-scoped-configuration:v3"), now);
+  }
+  if (!applied.has(4)) {
+    insert.run(4, "privacy-acknowledgements-and-login-protection", hash("schema:privacy-acknowledgements-and-login-protection:v4"), now);
   }
 }
 
@@ -672,6 +718,38 @@ function getOrganizationSettings(db, organizationId = DEFAULT_ORGANIZATION_ID) {
   const scopedOrganizationId = organizationIdOrDefault(organizationId);
   return db.prepare("SELECT key, value FROM scoped_organization_settings WHERE organization_id = ? ORDER BY key").all(scopedOrganizationId)
     .reduce((settings, row) => ({ ...settings, [row.key]: row.value }), {});
+}
+
+function getPrivacyPolicy(db, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const settings = getOrganizationSettings(db, organizationId);
+  const version = String(settings.privacy_policy_version || defaultOrganizationSettings.privacy_policy_version).trim();
+  const title = String(settings.privacy_policy_title || DEFAULT_PRIVACY_POLICY_TITLE).trim();
+  const notice = String(settings.privacy_policy_notice || DEFAULT_PRIVACY_POLICY_NOTICE).trim();
+  return {
+    version,
+    title,
+    notice,
+    policy_hash: hash(`${version}\n${title}\n${notice}`),
+  };
+}
+
+function getPrivacyAcknowledgements(db, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  const policy = getPrivacyPolicy(db, scopedOrganizationId);
+  return db.prepare(`
+    SELECT e.id AS employee_id, e.name AS employee_name, e.team,
+      CASE WHEN pa.id IS NULL THEN 0 ELSE 1 END AS acknowledged,
+      pa.policy_version, pa.policy_hash, pa.acknowledged_at, pa.actor, pa.source, pa.device_id
+    FROM employees e
+    LEFT JOIN privacy_acknowledgements pa
+      ON pa.employee_id = e.id AND pa.policy_version = ?
+    WHERE e.organization_id = ?
+    ORDER BY e.team, e.name
+  `).all(policy.version, scopedOrganizationId).map((row) => ({
+    ...row,
+    acknowledged: Boolean(row.acknowledged),
+    current_policy_version: policy.version,
+  }));
 }
 
 function getNotificationSettings(db, organizationId = DEFAULT_ORGANIZATION_ID) {
@@ -2667,15 +2745,34 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const username = normalizeUsername(body.username);
         const password = typeof body.password === "string" ? body.password : "";
         const account = db.prepare(`
-          SELECT id, username, display_name, role, employee_id, team, organization_id, password_hash
+          SELECT id, username, display_name, role, employee_id, team, organization_id, password_hash,
+            failed_login_count, locked_until
           FROM user_accounts
           WHERE username = ? AND disabled_at IS NULL
         `).get(username);
+        const protection = loginProtectionConfig();
+        const lockedUntil = account?.locked_until ? Date.parse(account.locked_until) : NaN;
+        if (account && Number.isFinite(lockedUntil) && lockedUntil > Date.now()) {
+          const retryAfter = Math.max(1, Math.ceil((lockedUntil - Date.now()) / 1000));
+          response.setHeader?.("retry-after", String(retryAfter));
+          return sendError(response, 429, "登录失败次数过多，请稍后重试", "account_locked");
+        }
         if (!account || !verifyPassword(password, account.password_hash)) {
+          if (account) {
+            const failedCount = Number(account.failed_login_count || 0) + 1;
+            const nextLock = failedCount >= protection.maxFailures
+              ? new Date(Date.now() + protection.lockoutSeconds * 1000).toISOString()
+              : null;
+            const now = isoNow();
+            db.prepare("UPDATE user_accounts SET failed_login_count = ?, locked_until = ?, updated_at = ? WHERE id = ?")
+              .run(failedCount, nextLock, now, account.id);
+            recordAudit(db, "login_failed", "system", account.id, `failed_attempt=${failedCount}`);
+            if (nextLock) recordAudit(db, "account_locked", "system", account.id, `until=${nextLock}`);
+          }
           return sendError(response, 401, "用户名或密码错误", "invalid_credentials");
         }
         const now = isoNow();
-        db.prepare("UPDATE user_accounts SET last_login_at = ?, updated_at = ? WHERE id = ?").run(now, now, account.id);
+        db.prepare("UPDATE user_accounts SET failed_login_count = 0, locked_until = NULL, last_login_at = ?, updated_at = ? WHERE id = ?").run(now, now, account.id);
         const session = createDatabaseSession(db, account);
         recordAudit(db, "login_succeeded", account.display_name, account.id, "password login");
         return sendJson(response, 200, session);
@@ -3132,6 +3229,50 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         return sendJson(response, 200, { roles: result.roles });
       }
 
+      if (method === "GET" && url.pathname === "/api/admin/privacy/policy") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        ensureOrganizationConfiguration(db, organizationId);
+        return sendJson(response, 200, {
+          policy: getPrivacyPolicy(db, organizationId),
+          acknowledgements: getPrivacyAcknowledgements(db, organizationId),
+        });
+      }
+
+      if (method === "PUT" && url.pathname === "/api/admin/privacy/policy") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        ensureOrganizationConfiguration(db, organizationId);
+        const body = await readJson(request);
+        const current = getPrivacyPolicy(db, organizationId);
+        const version = typeof body.version === "string" ? body.version.trim() : current.version;
+        const title = typeof body.title === "string" ? body.title.trim() : current.title;
+        const notice = typeof body.notice === "string" ? body.notice.trim() : current.notice;
+        if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version)) return sendError(response, 400, "privacy policy version is invalid", "invalid_privacy_policy");
+        if (!title || title.length > 160 || !notice || notice.length > 4000) return sendError(response, 400, "privacy policy title or notice is invalid", "invalid_privacy_policy");
+        const now = isoNow();
+        const update = db.prepare(`
+          INSERT INTO scoped_organization_settings (organization_id, key, value, updated_at)
+          VALUES (?, ?, ?, ?)
+          ON CONFLICT(organization_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        `);
+        for (const [key, value] of [["privacy_policy_version", version], ["privacy_policy_title", title], ["privacy_policy_notice", notice]]) update.run(organizationId, key, value, now);
+        const next = getPrivacyPolicy(db, organizationId);
+        if (next.policy_hash !== current.policy_hash) {
+          recordAudit(db, "privacy_policy_changed", principal.actor || "admin", "privacy_policy", `version=${version}`, organizationId);
+        }
+        return sendJson(response, 200, { policy: next, acknowledgements: getPrivacyAcknowledgements(db, organizationId) });
+      }
+
+      if (method === "GET" && url.pathname === "/api/admin/privacy/acknowledgements") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        return sendJson(response, 200, { policy: getPrivacyPolicy(db, organizationId), acknowledgements: getPrivacyAcknowledgements(db, organizationId) });
+      }
+
       if (method === "GET" && url.pathname === "/api/admin/events") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
@@ -3419,6 +3560,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           device_token: token,
           employee: { id: registration.employee_id, name: registration.employee_name, team: registration.employee_team },
           policy: getPolicy(db, registration.organization_id),
+          privacy_policy: getPrivacyPolicy(db, registration.organization_id),
           server_time: now,
         });
       }
@@ -3481,7 +3623,43 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
       if (method === "GET" && url.pathname === "/api/agent/policy") {
         const device = deviceFromRequest(db, request);
         if (!device || device.auth_kind !== "device") return sendError(response, 401, "valid device token required", "unauthorized");
-        return sendJson(response, 200, { policy: getPolicy(db, device.organization_id) });
+        return sendJson(response, 200, { policy: getPolicy(db, device.organization_id), privacy_policy: getPrivacyPolicy(db, device.organization_id) });
+      }
+
+      if (method === "GET" && url.pathname === "/api/agent/privacy-policy") {
+        const device = deviceFromRequest(db, request);
+        if (!device || device.auth_kind !== "device") return sendError(response, 401, "valid device token required", "unauthorized");
+        const policy = getPrivacyPolicy(db, device.organization_id);
+        const acknowledgement = db.prepare(`
+          SELECT acknowledged_at, policy_hash, source
+          FROM privacy_acknowledgements
+          WHERE employee_id = ? AND policy_version = ?
+        `).get(device.employee_id, policy.version);
+        return sendJson(response, 200, { policy, acknowledged: Boolean(acknowledgement), acknowledgement: acknowledgement || null });
+      }
+
+      if (method === "POST" && url.pathname === "/api/agent/privacy-acknowledgement") {
+        const device = deviceFromRequest(db, request);
+        if (!device || device.auth_kind !== "device") return sendError(response, 401, "valid device token required", "unauthorized");
+        const body = await readJson(request);
+        const policy = getPrivacyPolicy(db, device.organization_id);
+        if (body.policy_version !== policy.version || body.policy_hash !== policy.policy_hash) return sendError(response, 409, "隐私策略已更新，请重新确认当前版本", "privacy_policy_outdated");
+        const now = isoNow();
+        const existing = db.prepare("SELECT id FROM privacy_acknowledgements WHERE employee_id = ? AND policy_version = ?").get(device.employee_id, policy.version);
+        db.prepare(`
+          INSERT INTO privacy_acknowledgements
+            (id, organization_id, employee_id, device_id, policy_version, policy_hash, acknowledged_at, actor, source, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'agent', ?)
+          ON CONFLICT(employee_id, policy_version) DO UPDATE SET
+            organization_id = excluded.organization_id,
+            device_id = excluded.device_id,
+            policy_hash = excluded.policy_hash,
+            acknowledged_at = excluded.acknowledged_at,
+            actor = excluded.actor,
+            source = excluded.source
+        `).run(newId("privacy_ack"), device.organization_id, device.employee_id, device.id, policy.version, policy.policy_hash, now, device.employee_name, now);
+        if (!existing) recordAudit(db, "privacy_acknowledged", device.employee_name, device.employee_id, `version=${policy.version}; source=agent`, device.organization_id);
+        return sendJson(response, 200, { ok: true, policy, acknowledged_at: now });
       }
 
       if (method === "POST" && url.pathname === "/api/agent/events") {
@@ -3492,6 +3670,12 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const validationError = validateEvents(body);
         if (validationError) return sendError(response, 400, validationError);
         const policy = getPolicy(db, device.organization_id);
+        if (device.auth_kind === "device" && body.privacy_policy_version) {
+          const privacyPolicy = getPrivacyPolicy(db, device.organization_id);
+          if (body.privacy_policy_version !== privacyPolicy.version) return sendError(response, 409, "隐私策略已更新，请先同步并确认当前版本", "privacy_policy_outdated");
+          const acknowledged = db.prepare("SELECT 1 FROM privacy_acknowledgements WHERE employee_id = ? AND policy_version = ?").get(device.employee_id, privacyPolicy.version);
+          if (!acknowledged) return sendError(response, 428, "请先确认当前隐私策略", "privacy_acknowledgement_required");
+        }
         const acceptedEvents = body.events.filter((event) => !eventExcludedByPolicy(event, policy));
         const insert = db.prepare(`
           INSERT INTO events
@@ -3535,7 +3719,9 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           device.id,
         );
         if (wasOffline) recordAudit(db, "agent_online", "system", device.id, "heartbeat resumed");
-        return sendJson(response, 200, { ok: true, server_time: now, policy: getPolicy(db, device.organization_id) });
+        const policy = getPrivacyPolicy(db, device.organization_id);
+        const acknowledged = Boolean(db.prepare("SELECT 1 FROM privacy_acknowledgements WHERE employee_id = ? AND policy_version = ?").get(device.employee_id, policy.version));
+        return sendJson(response, 200, { ok: true, server_time: now, policy: getPolicy(db, device.organization_id), privacy_policy: policy, privacy_acknowledged: acknowledged });
       }
 
       return sendError(response, 404, "route not found", "not_found");
@@ -3550,6 +3736,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
 export function createAgentServer({ dbPath = process.env.AGENT_DB_PATH || defaultDbPath, adminToken = process.env.AGENT_ADMIN_TOKEN || `admin_${randomBytes(18).toString("base64url")}`, sessionSecret = process.env.AGENT_SESSION_SECRET || adminToken, logger = console, ai = createAiService({ logger }) } = {}) {
   if (process.env.NODE_ENV === "production") {
     if (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 12) throw new Error("production requires ADMIN_PASSWORD with at least 12 characters");
+    if (isWeakSecret(process.env.AGENT_ADMIN_TOKEN)) throw new Error("production requires a random AGENT_ADMIN_TOKEN with at least 32 characters");
     if (!process.env.AGENT_SESSION_SECRET || process.env.AGENT_SESSION_SECRET.length < 32) throw new Error("production requires a random AGENT_SESSION_SECRET with at least 32 characters");
     if (!process.env.AGENT_CORS_ORIGIN || process.env.AGENT_CORS_ORIGIN === "*") throw new Error("production requires an explicit AGENT_CORS_ORIGIN");
   }

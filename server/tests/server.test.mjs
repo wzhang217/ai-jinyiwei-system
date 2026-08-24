@@ -1174,6 +1174,92 @@ test("supports database-backed account login, revocation, and admin account cont
   });
 });
 
+test("requires current privacy acknowledgement for new Agent event payloads and keeps an admin ledger", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const codeResult = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: codeResult.body.code, hostname: "WIN-PRIVACY", os_version: "Windows 11", agent_version: "0.1.12" }),
+    });
+    assert.equal(enrolled.response.status, 201);
+    assert.match(enrolled.body.privacy_policy.version, /^2026-08-24/);
+    const deviceHeaders = { authorization: `Bearer ${enrolled.body.device_token}` };
+    const privacy = await jsonFetch(`${base}/api/agent/privacy-policy`, { headers: deviceHeaders });
+    assert.equal(privacy.response.status, 200);
+    assert.equal(privacy.body.acknowledged, false);
+    const payload = {
+      privacy_policy_version: privacy.body.policy.version,
+      events: [{ event_id: "privacy-gated-event", occurred_at: new Date().toISOString(), type: "app_session", app_name: "WPS", process_name: "wps.exe", duration_seconds: 15 }],
+    };
+    const blocked = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers: deviceHeaders, body: JSON.stringify(payload) });
+    assert.equal(blocked.response.status, 428);
+    assert.equal(blocked.body.error.code, "privacy_acknowledgement_required");
+
+    const acknowledged = await jsonFetch(`${base}/api/agent/privacy-acknowledgement`, {
+      method: "POST",
+      headers: deviceHeaders,
+      body: JSON.stringify({ policy_version: privacy.body.policy.version, policy_hash: privacy.body.policy.policy_hash }),
+    });
+    assert.equal(acknowledged.response.status, 200);
+    const uploaded = await jsonFetch(`${base}/api/agent/events`, { method: "POST", headers: deviceHeaders, body: JSON.stringify(payload) });
+    assert.equal(uploaded.response.status, 202);
+
+    const ledger = await jsonFetch(`${base}/api/admin/privacy/acknowledgements`, { headers: adminHeaders });
+    assert.equal(ledger.response.status, 200);
+    const wei = ledger.body.acknowledgements.find((item) => item.employee_id === "employee-wei");
+    assert.equal(wei.acknowledged, true);
+    assert.equal(wei.policy_version, ledger.body.policy.version);
+    assert.ok(ledger.body.acknowledgements.some((item) => item.employee_id === "employee-lin" && !item.acknowledged));
+  });
+});
+
+test("locks an account after repeated login failures and resets protection after success", async () => {
+  await withServer(async ({ base, app }) => {
+    const created = await jsonFetch(`${base}/api/admin/accounts`, {
+      method: "POST",
+      headers: { "x-admin-token": "test-admin" },
+      body: JSON.stringify({ username: "lockout-test", password: "a-secure-test-password", display_name: "锁定测试", role: "admin" }),
+    });
+    assert.equal(created.response.status, 201);
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const wrong = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "lockout-test", password: "wrong-password" }) });
+      assert.equal(wrong.response.status, 401);
+    }
+    const locked = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "lockout-test", password: "a-secure-test-password" }) });
+    assert.equal(locked.response.status, 429);
+    assert.equal(locked.body.error.code, "account_locked");
+    app.db.prepare("UPDATE user_accounts SET failed_login_count = 0, locked_until = NULL WHERE username = ?").run("lockout-test");
+    const login = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "lockout-test", password: "a-secure-test-password" }) });
+    assert.equal(login.response.status, 200);
+    const account = app.db.prepare("SELECT failed_login_count, locked_until FROM user_accounts WHERE username = ?").get("lockout-test");
+    assert.equal(account.failed_login_count, 0);
+    assert.equal(account.locked_until, null);
+  });
+});
+
+test("rejects weak production secrets before opening the service", () => {
+  const names = ["NODE_ENV", "ADMIN_PASSWORD", "AGENT_ADMIN_TOKEN", "AGENT_SESSION_SECRET", "AGENT_CORS_ORIGIN"];
+  const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+  try {
+    process.env.NODE_ENV = "production";
+    process.env.ADMIN_PASSWORD = "a-production-password-long-enough";
+    delete process.env.AGENT_ADMIN_TOKEN;
+    process.env.AGENT_SESSION_SECRET = "a-production-session-secret-that-is-long-enough-123456";
+    process.env.AGENT_CORS_ORIGIN = "https://history.example.com";
+    assert.throws(() => createAgentServer({ dbPath: "/tmp/ai-jinyiwei-production-config-test.sqlite" }), /AGENT_ADMIN_TOKEN/);
+  } finally {
+    for (const name of names) {
+      if (previous[name] === undefined) delete process.env[name];
+      else process.env[name] = previous[name];
+    }
+  }
+});
+
 test("keeps employee directory and account binding inside the active organization", async () => {
   await withServer(async ({ base, app }) => {
     const created = await jsonFetch(`${base}/api/admin/employees`, {

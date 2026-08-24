@@ -26,13 +26,17 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=请替换为至少12位密码
 ADMIN_DISPLAY_NAME=企业管理员
 AUTH_SESSION_TTL_SECONDS=28800
+AUTH_MAX_LOGIN_FAILURES=5
+AUTH_LOCKOUT_SECONDS=900
 ```
 
 前端只需要设置 `VITE_AGENT_API_BASE_URL=http://localhost:8787`，不再设置 `VITE_AGENT_ADMIN_TOKEN`。登录成功后的会话存放在浏览器会话存储中，退出登录、账号停用或会话过期后立即失效。
 
+登录连续失败达到阈值后账号会暂时锁定，成功登录会清零失败计数。员工 Agent 注册后必须确认当前隐私策略版本，服务端会记录组织、员工、设备、策略哈希和确认时间；策略版本更新后需要重新确认。相关接口为 `/api/agent/privacy-policy`、`/api/agent/privacy-acknowledgement` 和 `/api/admin/privacy/acknowledgements`。
+
 ### 数据库迁移、备份与恢复
 
-服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 3，包含组织归属字段以及按组织隔离的采集策略、企业设置、通知、活动分类、集成和角色策略；旧版 SQLite 会在启动时补列并建立组织配置，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
+服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 4，包含组织归属字段、按组织隔离的采集策略和企业设置、隐私策略确认记录以及账号登录失败保护；旧版 SQLite 会在启动时补列并建立组织配置，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
 
 ```bash
 npm run backup

@@ -12,7 +12,9 @@ const fallbackStatus = {
   last_error: null,
   last_browser_capture_at: null,
   last_browser_capture_source: null,
-  agent_version: "0.1.10",
+  agent_version: "0.1.12",
+  privacy_policy: null,
+  privacy_acknowledged: false,
   policy: {
     idle_threshold_seconds: 300,
     activity_checkpoint_seconds: 15,
@@ -29,6 +31,7 @@ async function call(command, args) {
   if (!isTauri()) {
     if (command === "get_agent_status") return fallbackStatus;
     if (command === "enroll_agent") return { ...fallbackStatus, state: "online", employee_name: "演示员工", employee_team: "研发与产品中心", device_id: "demo-device" };
+    if (command === "acknowledge_privacy") return { ...fallbackStatus, state: "online", privacy_acknowledged: true };
     return { ok: true };
   }
   return invoke(command, args);
@@ -38,6 +41,7 @@ function statusLabel(status) {
   return {
     unregistered: "未注册",
     online: "在线同步",
+    awaiting_consent: "等待隐私确认",
     syncing: "同步中",
     offline: "离线缓存",
     error: "需要处理",
@@ -115,6 +119,23 @@ export function App() {
     }
   };
 
+  const acknowledgePrivacy = async () => {
+    if (!isTauri()) {
+      notify("浏览器预览不能提交真实隐私确认，请在 Windows Agent 中操作");
+      return;
+    }
+    setBusy(true);
+    try {
+      const next = await call("acknowledge_privacy");
+      setStatus(next);
+      notify("已确认当前隐私策略，Agent 将开始记录允许的活动元数据");
+    } catch (error) {
+      notify(`隐私确认失败：${error}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const copyBrowserPairingCode = async () => {
     if (!browserPairing?.code) return;
     try {
@@ -168,7 +189,7 @@ export function App() {
             <div className="section-heading"><div><div className="card-kicker">采集策略</div><h2>当前会记录什么</h2></div><span className="policy-version">策略 v{status.policy.version}</span></div>
             <div className="policy-list"><PolicyItem title="应用活动" detail={`前台应用名称和使用时长，每 ${status.policy.activity_checkpoint_seconds || 15} 秒更新活动区间`} enabled /><PolicyItem title="脱敏工作标识" detail="仅保留开发工具项目标识，不保存原始窗口标题" enabled /><PolicyItem title="网站来源" detail="Windows 原生读取域名；扩展仅作为兼容兜底" enabled /><PolicyItem title="空闲状态" detail={`超过 ${Math.round(status.policy.idle_threshold_seconds / 60)} 分钟进入空闲`} enabled /><PolicyItem title="同步心跳" detail={`每 ${status.policy.heartbeat_interval_seconds} 秒更新设备状态`} enabled /><PolicyItem title="屏幕、键盘和聊天正文" detail="系统级禁止采集" /></div>
           </section>
-          <section className="card privacy-card"><div className="shield">✓</div><div><h2>隐私边界</h2><p>Agent 不读取键盘、剪贴板、屏幕、聊天正文、文件正文、原始窗口标题或完整网页内容；只保留有限的项目标识和网站域名。断网时数据只保存在本机队列，恢复后自动补传。</p></div></section>
+          <section className="card privacy-card"><div className="shield">✓</div><div><h2>{status.privacy_policy?.title || "隐私边界"}</h2><p>{status.privacy_policy?.notice || "Agent 不读取键盘、剪贴板、屏幕、聊天正文、文件正文、原始窗口标题或完整网页内容；只保留有限的项目标识和网站域名。断网时数据只保存在本机队列，恢复后自动补传。"}</p>{status.privacy_policy && <div className="privacy-confirmation">{status.privacy_acknowledged ? <small>已确认策略版本 {status.privacy_policy.version}，确认时间由服务端留痕。</small> : <><strong>请先确认当前采集说明</strong><button className="primary-button" onClick={acknowledgePrivacy} disabled={busy}>{busy ? "提交中…" : "我已阅读并确认"}</button></>}</div>}</div></section>
         </>
       )}
 
