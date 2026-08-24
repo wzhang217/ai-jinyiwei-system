@@ -8,7 +8,7 @@ import { createAiService } from "./ai.mjs";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const defaultDbPath = resolve(moduleDir, "../data/agent.sqlite");
-const CURRENT_SCHEMA_VERSION = 8;
+export const CURRENT_SCHEMA_VERSION = 8;
 const DEFAULT_ORGANIZATION_ID = /^[a-z0-9][a-z0-9_-]{2,63}$/.test(String(process.env.DEFAULT_ORGANIZATION_ID || "org_default"))
   ? String(process.env.DEFAULT_ORGANIZATION_ID || "org_default")
   : "org_default";

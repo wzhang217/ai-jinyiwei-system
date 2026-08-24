@@ -11,16 +11,18 @@
 
 ## 2. 在 Windows 上验证交付包
 
-在 PowerShell 中执行，替换文件名：
+在 PowerShell 中执行仓库内的统一校验脚本，替换文件名和版本号：
 
 ```powershell
-$msi = .\ai-jinyiwei-agent_0.1.15_x64_en-US.msi
-$manifest = Get-Content .\release-manifest.json | ConvertFrom-Json
-Get-FileHash $msi -Algorithm SHA256
-(Get-AuthenticodeSignature $msi).Status
+Set-Location C:\path\to\ai-jinyiwei-system
+.\agent\scripts\Verify-Release.ps1 `
+  -MsiPath .\ai-jinyiwei-agent_0.1.15_x64_en-US.msi `
+  -ManifestPath .\release-manifest.json `
+  -ExpectedVersion 0.1.15 `
+  -RequireSignature
 ```
 
-结果必须满足：SHA-256 与 manifest 中对应文件一致，签名状态为 `Valid`。签名无效或 manifest 不匹配时停止交付。
+脚本会校验产品名、版本、manifest 对应产物、SHA-256、Authenticode 状态和签名主体。正式 `stable` 发布即使不写 `-RequireSignature` 也会强制要求签名；分支 `build` 产物可用于测试，但不能交付客户。脚本输出 `ok=true` 后才继续安装。
 
 ## 3. 首次安装
 

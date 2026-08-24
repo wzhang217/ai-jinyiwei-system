@@ -16,6 +16,7 @@
 - [ ] `agent/package.json`、`package-lock.json`、`src-tauri/Cargo.toml` 和 `tauri.conf.json` 版本一致。
 - [ ] `vX.Y.Z` tag 与 Agent 版本一致，Windows MSI 构建成功并使用代码签名证书。
 - [ ] Release 中的 `release-manifest.json` 与 MSI SHA-256 一致，签名状态为 `Valid`。
+- [ ] 在 Windows 管理员 PowerShell 中执行 `agent/scripts/Verify-Release.ps1 -MsiPath ... -ManifestPath ... -ExpectedVersion ... -RequireSignature`，输出 `ok=true`。
 - [ ] 在干净 Windows 10/11 安装、注册、开机启动、卸载和升级成功。
 - [ ] 升级保留设备凭据和未上传队列；回滚使用上一份签名 MSI，且未手工删除 SQLite。
 - [ ] 卸载前通过 Agent 的“清除本机数据”完成显式清理，清理结果和服务端设备停用均有记录。

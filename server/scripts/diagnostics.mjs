@@ -1,6 +1,7 @@
 import { mkdirSync, statfsSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { CURRENT_SCHEMA_VERSION } from "../src/index.mjs";
 
 const dbPath = resolve(process.env.AGENT_DB_PATH || "./data/agent.sqlite");
 const storagePath = dirname(dbPath);
@@ -35,7 +36,7 @@ try {
   };
   const integrity = text("PRAGMA quick_check") || "unknown";
   const schemaVersion = scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations");
-  const expectedSchemaVersion = 7;
+  const expectedSchemaVersion = CURRENT_SCHEMA_VERSION;
   let storage = { path: storagePath, free_bytes: null, total_bytes: null, minimum_free_bytes: minimumFreeBytes, ready: false };
   try {
     const filesystem = statfsSync(storagePath);
