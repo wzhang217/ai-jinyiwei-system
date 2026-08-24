@@ -346,22 +346,52 @@ impl Core {
         Ok(())
     }
 
-    fn clear_config(&self) -> Result<(), String> {
-        self.db
-            .execute("DELETE FROM config", [])
-            .map_err(|error| error.to_string())?;
+    fn clear_local_data(&mut self) -> Result<(), String> {
+        if let Err(error) = self
+            .db
+            .execute_batch("DELETE FROM events; DELETE FROM config;")
+        {
+            self.status.state = "error".into();
+            self.status.last_error = Some(format!("本地数据清理失败：{error}"));
+            return Err(error.to_string());
+        }
+        self.active_session = None;
+        self.idle_session = None;
+        self.pending_registration_code = None;
+        self.status.queued_events = 0;
         Ok(())
     }
 
+    fn report_storage_error(&mut self, action: &str, error: rusqlite::Error) -> String {
+        let message = format!("本地缓存{action}失败：{error}");
+        self.status.state = "error".into();
+        self.status.last_error = Some(message.clone());
+        message
+    }
+
+    fn invalidate_token(&mut self) -> String {
+        self.token = None;
+        self.status.privacy_acknowledged = false;
+        self.status.state = "error".into();
+        let message = "设备 Token 已失效，请重新注册".to_string();
+        self.status.last_error = Some(message.clone());
+        message
+    }
+
     fn queue_event(&mut self, event: AgentEvent) -> Result<(), String> {
-        self.db.execute(
+        if let Err(error) = self.db.execute(
             "INSERT INTO events (event_id, occurred_at, event_type, app_name, process_name, source_kind, context_label, web_domain, duration_seconds) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT(event_id) DO UPDATE SET source_kind = excluded.source_kind, context_label = excluded.context_label, web_domain = excluded.web_domain, duration_seconds = MAX(events.duration_seconds, excluded.duration_seconds)",
             params![event.event_id, event.occurred_at, event.event_type, event.app_name, event.process_name, event.source_kind, event.context_label, event.web_domain, event.duration_seconds],
-        ).map_err(|error| error.to_string())?;
-        let removed = self.db.execute(
+        ) {
+            return Err(self.report_storage_error("写入", error));
+        }
+        let removed = match self.db.execute(
             "DELETE FROM events WHERE uploaded = 0 AND event_id IN (SELECT event_id FROM events WHERE uploaded = 0 ORDER BY occurred_at ASC LIMIT -1 OFFSET ?1)",
             params![MAX_PENDING_EVENTS],
-        ).map_err(|error| error.to_string())?;
+        ) {
+            Ok(removed) => removed,
+            Err(error) => return Err(self.report_storage_error("整理", error)),
+        };
         if removed > 0 {
             self.status.last_error = Some("本地缓存已达到上限，最早活动记录已被丢弃".into());
         }
@@ -438,6 +468,11 @@ impl Core {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(self.invalidate_token());
+            }
             return Err(format!("事件上传失败：HTTP {status}：{body}"));
         }
         self.mark_uploaded(
@@ -470,6 +505,11 @@ impl Core {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().unwrap_or_default();
+            if status == reqwest::StatusCode::UNAUTHORIZED
+                || status == reqwest::StatusCode::FORBIDDEN
+            {
+                return Err(self.invalidate_token());
+            }
             return Err(format!("心跳同步失败：HTTP {status}：{body}"));
         }
         let body: HeartbeatResponse = response.json().map_err(|error| error.to_string())?;
@@ -869,7 +909,11 @@ impl Core {
         }
 
         if let Some(error) = sync_error {
-            self.status.state = "offline".into();
+            if error == "设备 Token 已失效，请重新注册" {
+                self.status.state = "error".into();
+            } else {
+                self.status.state = "offline".into();
+            }
             self.status.last_error = Some(error);
         } else if event_flush_due {
             self.status.state = "online".into();
@@ -1732,10 +1776,11 @@ fn acknowledge_privacy(state: State<'_, AgentState>) -> Result<AgentStatus, Stri
 #[tauri::command]
 fn clear_registration(state: State<'_, AgentState>) -> Result<AgentStatus, String> {
     let mut core = state.core.lock().map_err(|error| error.to_string())?;
-    if let Some(device_id) = core.status.device_id.clone() {
+    let device_id = core.status.device_id.clone();
+    core.clear_local_data()?;
+    if let Some(device_id) = device_id {
         remove_secret(&device_id);
     }
-    core.clear_config()?;
     core.token = None;
     core.status = AgentStatus::default();
     Ok(core.status.clone())
