@@ -95,6 +95,7 @@ export async function getLiveDevices() {
     id: device.id,
     name: device.hostname,
     user: device.employee_name,
+    team: device.employee_team,
     os: device.os_version,
     agent: device.agent_version,
     status: device.status === "online" ? "online" : "offline",
@@ -136,13 +137,8 @@ export async function createRegistrationCode({ employeeId, expiresInSeconds = 36
 
 export async function getLiveTeams() {
   const body = await request("/api/admin/teams");
-  const knownTeamIds = {
-    "研发与产品中心": "team-product-dev",
-    "客户与销售团队": "team-sales",
-    "运营与支持团队": "team-operations",
-  };
   return (body.teams || []).map((team) => ({
-    id: knownTeamIds[team.name] || team.id,
+    id: team.id,
     name: team.name,
     lead: team.lead_name || "—",
     members: Number(team.member_count || 0),
@@ -153,6 +149,11 @@ export async function getLiveTeams() {
     apps: [],
     deviceCount: Number(team.device_count || 0),
   }));
+}
+
+export async function getLiveOrganization() {
+  const body = await request("/api/admin/organizations");
+  return body.organization || null;
 }
 
 export async function getLivePolicy() {

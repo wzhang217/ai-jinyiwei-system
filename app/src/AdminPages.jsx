@@ -39,21 +39,21 @@ import {
 } from "@phosphor-icons/react";
 import { historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, downloadRecordsMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, exportLiveAudit, getAdminAccounts, getLiveAdminSettings, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLivePolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setAdminAccountStatus, setLiveDeviceStatus, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateNotificationSettings, updateOrganizationSettings } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, exportLiveAudit, getAdminAccounts, getLiveAdminSettings, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveOrganization, getLivePolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setAdminAccountStatus, setLiveDeviceStatus, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateNotificationSettings, updateOrganizationSettings } from "./services/agentApi.js";
 import { auditData, deviceData, employeeData, permissionRoles, settingsData, teamData } from "./adminData.js";
 import { SHANGHAI_TIME_ZONE, formatShanghaiTime, shanghaiDateAtStart, shanghaiDateInput, shanghaiDayKey, shanghaiWeekKey } from "./time.js";
 
 const roleLabel = { admin: "老板", manager: "高管", employee: "员工" };
 
-export function AdminPage({ page, role, query, target, liveRecords, onNavigate, onToast }) {
+export function AdminPage({ page, role, principal, query, target, liveRecords, onNavigate, onToast }) {
   switch (page) {
-    case "overview": return <OverviewPage role={role} liveRecords={liveRecords} onNavigate={onNavigate} onToast={onToast} />;
-    case "teams": return <TeamsPage role={role} target={target} liveRecords={liveRecords} onNavigate={onNavigate} onToast={onToast} />;
-    case "employees": return <EmployeesPage role={role} query={query} target={target} liveRecords={liveRecords} onNavigate={onNavigate} onToast={onToast} />;
+    case "overview": return <OverviewPage role={role} principal={principal} liveRecords={liveRecords} onNavigate={onNavigate} onToast={onToast} />;
+    case "teams": return <TeamsPage role={role} principal={principal} target={target} liveRecords={liveRecords} onNavigate={onNavigate} onToast={onToast} />;
+    case "employees": return <EmployeesPage role={role} principal={principal} query={query} target={target} liveRecords={liveRecords} onNavigate={onNavigate} onToast={onToast} />;
     case "memory": return <MemoryPage role={role} query={query} target={target} liveRecords={liveRecords} onNavigate={onNavigate} onToast={onToast} />;
     case "skill": return <SkillPage role={role} records={liveRecords ?? (demoMode ? historyRecords : [])} onNavigate={onNavigate} />;
-    case "devices": return <DevicesPage role={role} query={query} target={target} onNavigate={onNavigate} onToast={onToast} />;
-    case "permissions": return <PermissionsPage role={role} target={target} onToast={onToast} />;
+    case "devices": return <DevicesPage role={role} principal={principal} query={query} target={target} onNavigate={onNavigate} onToast={onToast} />;
+    case "permissions": return <PermissionsPage role={role} principal={principal} target={target} onToast={onToast} />;
     case "audit": return <AuditPage role={role} query={query} onToast={onToast} />;
     case "settings": return <SettingsPage role={role} onToast={onToast} />;
     default: return null;
@@ -90,17 +90,21 @@ function workThemeLabel(record, fallback = "暂无实时主题") {
   return value.length > 88 ? `${value.slice(0, 86)}…` : value;
 }
 
-function OverviewPage({ role, liveRecords, onNavigate, onToast }) {
+function OverviewPage({ role, principal, liveRecords, onNavigate, onToast }) {
   const [tab, setTab] = useState("今日态势");
   const [liveDevices, setLiveDevices] = useState(null);
   const [liveJobs, setLiveJobs] = useState(null);
   const [liveTeams, setLiveTeams] = useState(null);
   const canSeeManagement = role !== "employee";
   const sourceRecords = liveRecords ?? (demoMode ? historyRecords : []);
+  const employeeId = principal?.employee_id;
+  const managerTeam = principal?.team;
   const scopedRecords = role === "employee"
-    ? sourceRecords.filter((record) => record.userId === "employee-wei" || record.user_id === "employee-wei" || record.employee_name === "Wei")
+    ? sourceRecords.filter((record) => employeeId
+      ? record.userId === employeeId || record.user_id === employeeId
+      : demoMode && (record.userId === "employee-wei" || record.user_id === "employee-wei" || record.employee_name === "Wei"))
     : role === "manager"
-      ? sourceRecords.filter((record) => record.employee_team === "研发与产品中心")
+      ? sourceRecords.filter((record) => managerTeam ? record.employee_team === managerTeam || record.employeeTeam === managerTeam : false)
       : sourceRecords;
   const rollups = scopedRecords.filter((record) => record.recordType === "rollup");
   const leafRecords = scopedRecords.filter((record) => record.recordType === "leaf");
@@ -273,22 +277,28 @@ function HealthRow({ title, value, detail, status }) {
   return <div className="health-row"><span className="health-icon"><CheckCircle size={18} weight="fill" /></span><span><strong>{title}</strong><small>{detail}</small></span><b>{value}</b><StatusPill status={status} /></div>;
 }
 
-function TeamsPage({ role, target, liveRecords, onNavigate, onToast }) {
+function TeamsPage({ role, principal, target, liveRecords, onNavigate, onToast }) {
   const [tab, setTab] = useState("团队列表");
   const [liveTeams, setLiveTeams] = useState(null);
+  const [liveEmployees, setLiveEmployees] = useState(null);
   const [directoryError, setDirectoryError] = useState("");
   useEffect(() => {
     if (!agentApiEnabled) return undefined;
     let cancelled = false;
-    getLiveTeams().then((teams) => {
-      if (!cancelled) setLiveTeams(teams);
+    Promise.all([getLiveTeams(), getLiveEmployees()]).then(([teams, employees]) => {
+      if (cancelled) return;
+      setLiveTeams(teams);
+      setLiveEmployees(employees);
     }).catch((error) => {
       if (!cancelled) setDirectoryError(error.message);
     });
     return () => { cancelled = true; };
   }, [role]);
   const directoryTeams = liveTeams ?? (demoMode ? teamData : []);
-  const visibleTeams = role === "manager" ? directoryTeams.filter((team) => team.name === "研发与产品中心") : directoryTeams;
+  const directoryEmployees = liveEmployees ?? (demoMode ? employeeData : []);
+  const visibleTeams = role === "manager"
+    ? directoryTeams.filter((team) => principal?.team ? team.name === principal.team : demoMode && team.name === "研发与产品中心")
+    : directoryTeams;
   const sourceRecords = liveRecords ?? (demoMode ? historyRecords : []);
   const teamCards = visibleTeams.map((team) => {
     const records = sourceRecords.filter((record) => (record.employee_team || record.employeeTeam) === team.name);
@@ -332,20 +342,20 @@ function TeamsPage({ role, target, liveRecords, onNavigate, onToast }) {
       onToast(`History Skill 查询失败：${error.message}`);
     }
   };
-  return <div className="page-content"><PageHeader eyebrow="TEAM WORKSPACE" title="团队" description="以团队为单位查看工作主题、活动覆盖和 Memory Summary。" meta={`${teamCards.length} 个团队`} action={<button className="outline-button" onClick={() => onToast("创建团队需要连接组织目录 API")}><Plus size={17} />新建团队</button>} />{directoryError && <div className="error-box">组织目录读取失败：{directoryError}</div>}<Tabs tabs={tabs} active={tab} onChange={setTab} />{tab === "团队列表" && <SectionCard title="团队列表" description="点击团队进入成员、趋势和工作主题详情"><div className="team-grid">{teamCards.map((team) => <button className="team-card" key={team.id} onClick={() => openTeam(team)}><div className="team-card-top"><span className="team-avatar">{team.name.slice(0, 1)}</span><span className="team-card-arrow"><ArrowSquareOut size={16} /></span></div><h3>{team.name}</h3><p>{team.focus}</p><div className="team-card-meta"><span><UsersThree size={14} />{team.members} 人</span><span><Pulse size={14} />{team.coverage}% 覆盖</span></div><div className="team-card-progress"><span style={{ width: `${team.coverage}%` }} /></div><small>负责人：{team.lead}{agentApiEnabled && liveRecords !== null ? ` · ${team.liveRecordCount} 条实时记录` : ""}</small></button>)}</div></SectionCard>}{tab === "团队详情" && selectedTeam && <TeamDetail team={selectedTeam} employees={directoryEmployees} liveRecords={teamRecords} onNavigate={onNavigate} onToast={onToast} />}{tab === "团队趋势" && selectedTeam && <><KpiGrid items={[{ label: "可见记录", value: `${teamRecords.length}`, detail: "当前权限范围", icon: <Pulse size={20} />, good: true }, { label: "连续工作窗口", value: `${teamRollups.length}`, detail: "团队周汇总", icon: <Clock size={20} />, tone: "blue" }, { label: "应用上下文", value: `${new Set(teamRecords.flatMap((record) => record.applicationNames || [])).size}`, detail: "去重后应用数", icon: <UsersThree size={20} />, tone: "green" }, { label: "切换次数", value: `${teamRecords.reduce((sum, record) => sum + Number(record.contextSwitches || 0), 0)}`, detail: "只表示上下文变化", icon: <Lightning size={20} />, tone: "gold" }]} /><SectionCard title={`${selectedTeam.name} 活动趋势`} description="当前已接入的实时 Memory Summary"><MiniBars values={[teamRecords.length, teamRollups.length, topicRecords.length, 0, 0, 0, 0]} labels={["记录", "周汇总", "主题", "待补", "待补", "待补", "今天"]} /></SectionCard></>}{tab === "工作主题" && selectedTeam && <SectionCard title="连续工作主题" description="由团队周汇总和实时活动记录聚合"><div className="topic-list">{topicRecords.length ? topicRecords.map((record, index) => <TopicRow key={record.id} rank={String(index + 1).padStart(2, "0")} title={record.title} detail={`${record.duration} · ${record.recordType === "rollup" ? "团队 Rollup" : "Leaf 活动"}`} value={`${Math.max(12, 42 - index * 8)}%`} />) : <EmptyState title="暂无团队主题" />}</div></SectionCard>}{tab === "团队 Skill" && selectedTeam && <SectionCard title="团队 History Skill" description={`当前查询范围：${selectedTeam.name}`}><form className="team-skill-form" onSubmit={runTeamQuestion}><ChatCircleDots size={20} /><input value={skillQuestion} onChange={(event) => setSkillQuestion(event.target.value)} placeholder="询问这个团队最近的工作主题..." /><button className="primary-button" type="submit"><PaperPlaneTilt size={16} />提问</button></form>{skillAnswer ? <SkillAnswer result={skillAnswer} onOpen={() => onNavigate("history")} /> : <div className="question-grid"><button onClick={() => setSkillQuestion("这个团队本周主要在做什么？")}>这个团队本周主要在做什么？</button><button onClick={() => setSkillQuestion("团队是否存在频繁任务切换？")}>团队是否存在频繁任务切换？</button></div>}</SectionCard>}</div>;
+  return <div className="page-content"><PageHeader eyebrow="TEAM WORKSPACE" title="团队" description="以团队为单位查看工作主题、活动覆盖和 Memory Summary。" meta={`${teamCards.length} 个团队`} />{directoryError && <div className="error-box">组织目录读取失败：{directoryError}</div>}<Tabs tabs={tabs} active={tab} onChange={setTab} />{tab === "团队列表" && <SectionCard title="团队列表" description="点击团队进入成员、趋势和工作主题详情"><div className="team-grid">{teamCards.map((team) => <button className="team-card" key={team.id} onClick={() => openTeam(team)}><div className="team-card-top"><span className="team-avatar">{team.name.slice(0, 1)}</span><span className="team-card-arrow"><ArrowSquareOut size={16} /></span></div><h3>{team.name}</h3><p>{team.focus}</p><div className="team-card-meta"><span><UsersThree size={14} />{team.members} 人</span><span><Pulse size={14} />{team.coverage}% 覆盖</span></div><div className="team-card-progress"><span style={{ width: `${team.coverage}%` }} /></div><small>负责人：{team.lead}{agentApiEnabled && liveRecords !== null ? ` · ${team.liveRecordCount} 条实时记录` : ""}</small></button>)}</div></SectionCard>}{tab === "团队详情" && selectedTeam && <TeamDetail team={selectedTeam} employees={directoryEmployees} liveRecords={teamRecords} onNavigate={onNavigate} onToast={onToast} />}{tab === "团队趋势" && selectedTeam && <><KpiGrid items={[{ label: "可见记录", value: `${teamRecords.length}`, detail: "当前权限范围", icon: <Pulse size={20} />, good: true }, { label: "连续工作窗口", value: `${teamRollups.length}`, detail: "团队周汇总", icon: <Clock size={20} />, tone: "blue" }, { label: "应用上下文", value: `${new Set(teamRecords.flatMap((record) => record.applicationNames || [])).size}`, detail: "去重后应用数", icon: <UsersThree size={20} />, tone: "green" }, { label: "切换次数", value: `${teamRecords.reduce((sum, record) => sum + Number(record.contextSwitches || 0), 0)}`, detail: "只表示上下文变化", icon: <Lightning size={20} />, tone: "gold" }]} /><SectionCard title={`${selectedTeam.name} 活动趋势`} description="当前已接入的实时 Memory Summary"><MiniBars values={[teamRecords.length, teamRollups.length, topicRecords.length, 0, 0, 0, 0]} labels={["记录", "周汇总", "主题", "待补", "待补", "待补", "今天"]} /></SectionCard></>}{tab === "工作主题" && selectedTeam && <SectionCard title="连续工作主题" description="由团队周汇总和实时活动记录聚合"><div className="topic-list">{topicRecords.length ? topicRecords.map((record, index) => <TopicRow key={record.id} rank={String(index + 1).padStart(2, "0")} title={record.title} detail={`${record.duration} · ${record.recordType === "rollup" ? "团队 Rollup" : "Leaf 活动"}`} value={`${Math.max(12, 42 - index * 8)}%`} />) : <EmptyState title="暂无团队主题" />}</div></SectionCard>}{tab === "团队 Skill" && selectedTeam && <SectionCard title="团队 History Skill" description={`当前查询范围：${selectedTeam.name}`}><form className="team-skill-form" onSubmit={runTeamQuestion}><ChatCircleDots size={20} /><input value={skillQuestion} onChange={(event) => setSkillQuestion(event.target.value)} placeholder="询问这个团队最近的工作主题..." /><button className="primary-button" type="submit"><PaperPlaneTilt size={16} />提问</button></form>{skillAnswer ? <SkillAnswer result={skillAnswer} onOpen={() => onNavigate("history")} /> : <div className="question-grid"><button onClick={() => setSkillQuestion("这个团队本周主要在做什么？")}>这个团队本周主要在做什么？</button><button onClick={() => setSkillQuestion("团队是否存在频繁任务切换？")}>团队是否存在频繁任务切换？</button></div>}</SectionCard>}</div>;
 }
 
 function TeamDetail({ team, employees = employeeData, liveRecords = [], onNavigate, onToast }) {
-  const members = employees.filter((employee) => employee.team.includes(team.name.replace("中心", "")) || employee.team === team.name);
+  const members = employees.filter((employee) => employee.team === team.name);
   const teamRollups = liveRecords.filter((record) => record.rollupScope === "team_weekly");
-  return <><SectionCard title={team.name} description={`${team.focus} · 负责人 ${team.lead}`} action={<button className="outline-button" onClick={() => onToast("团队设置将在组织目录接入后开放")}><GearSix size={16} />团队设置</button>}><div className="detail-summary-grid"><div><span>成员</span><strong>{team.members}</strong><small>活跃 {team.activeMembers} 人</small></div><div><span>实时记录</span><strong>{liveRecords.length}</strong><small>当前权限范围</small></div><div><span>主要工具</span><strong>{new Set(liveRecords.flatMap((record) => record.applicationNames || [])).size}</strong><small>{[...new Set(liveRecords.flatMap((record) => record.applicationNames || []))].slice(0, 2).join("、") || "暂无"}</small></div><div><span>团队周汇总</span><strong>{teamRollups.length}</strong><small>可回溯到 Leaf</small></div></div></SectionCard><div className="two-column-grid"><SectionCard title="团队成员" description="点击成员查看个人活动"><div className="compact-list">{members.length ? members.map((employee) => <button className="compact-row" key={employee.id} onClick={() => onNavigate("employees", employee.id)}><span className="person-avatar">{employee.name.slice(0, 1)}</span><span><strong>{employee.name}</strong><small>{employee.title} · {employee.focus}</small></span><StatusPill status={employee.status} /><ArrowSquareOut size={15} /></button>) : <EmptyState title="暂无成员数据" />}</div></SectionCard><SectionCard title="团队 Memory Summary" description="最近生成的团队级记录"><div className="summary-list">{teamRollups.length ? teamRollups.slice(0, 3).map((record) => <button className="summary-row" key={record.id} onClick={() => onNavigate("memory", record.id)}><span className="summary-icon"><Sparkle size={17} weight="fill" /></span><span><strong>{record.title}</strong><small>{record.duration} · {record.source_record_ids?.length || record.timeline?.length || 0} 个下层记录</small></span><ArrowSquareOut size={15} /></button>) : <EmptyState title="暂无团队周汇总" />}</div></SectionCard></div></>;
+  return <><SectionCard title={team.name} description={`${team.focus} · 负责人 ${team.lead}`}><div className="detail-summary-grid"><div><span>成员</span><strong>{team.members}</strong><small>活跃 {team.activeMembers} 人</small></div><div><span>实时记录</span><strong>{liveRecords.length}</strong><small>当前权限范围</small></div><div><span>主要工具</span><strong>{new Set(liveRecords.flatMap((record) => record.applicationNames || [])).size}</strong><small>{[...new Set(liveRecords.flatMap((record) => record.applicationNames || []))].slice(0, 2).join("、") || "暂无"}</small></div><div><span>团队周汇总</span><strong>{teamRollups.length}</strong><small>可回溯到 Leaf</small></div></div></SectionCard><div className="two-column-grid"><SectionCard title="团队成员" description="点击成员查看个人活动"><div className="compact-list">{members.length ? members.map((employee) => <button className="compact-row" key={employee.id} onClick={() => onNavigate("employees", employee.id)}><span className="person-avatar">{employee.name.slice(0, 1)}</span><span><strong>{employee.name}</strong><small>{employee.title} · {employee.focus}</small></span><StatusPill status={employee.status} /><ArrowSquareOut size={15} /></button>) : <EmptyState title="暂无成员数据" />}</div></SectionCard><SectionCard title="团队 Memory Summary" description="最近生成的团队级记录"><div className="summary-list">{teamRollups.length ? teamRollups.slice(0, 3).map((record) => <button className="summary-row" key={record.id} onClick={() => onNavigate("memory", record.id)}><span className="summary-icon"><Sparkle size={17} weight="fill" /></span><span><strong>{record.title}</strong><small>{record.duration} · {record.source_record_ids?.length || record.timeline?.length || 0} 个下层记录</small></span><ArrowSquareOut size={15} /></button>) : <EmptyState title="暂无团队周汇总" />}</div></SectionCard></div></>;
 }
 
 function TopicRow({ rank, title, detail, value }) {
   return <div className="topic-row"><span className="topic-rank">{rank}</span><span><strong>{title}</strong><small>{detail}</small></span><span className="topic-track"><span style={{ width: value }} /></span><b>{value}</b></div>;
 }
 
-function EmployeesPage({ role, query, target, liveRecords, onNavigate, onToast }) {
+function EmployeesPage({ role, principal, query, target, liveRecords, onNavigate, onToast }) {
   const [tab, setTab] = useState("员工目录");
   const [liveEmployees, setLiveEmployees] = useState(null);
   const [liveDevices, setLiveDevices] = useState(null);
@@ -371,7 +381,13 @@ function EmployeesPage({ role, query, target, liveRecords, onNavigate, onToast }
     return () => { cancelled = true; };
   }, [role]);
   const directoryEmployees = liveEmployees ?? (demoMode ? employeeData : []);
-  const visibleEmployees = role === "manager" ? directoryEmployees.filter((employee) => employee.team === "研发与产品中心") : directoryEmployees;
+  const visibleEmployees = role === "employee"
+    ? directoryEmployees.filter((employee) => principal?.employee_id
+      ? employee.id === principal.employee_id
+      : demoMode && employee.id === "employee-wei")
+    : role === "manager"
+      ? directoryEmployees.filter((employee) => principal?.team ? employee.team === principal.team : demoMode && employee.team === "研发与产品中心")
+      : directoryEmployees;
   const [selected, setSelected] = useState(() => visibleEmployees.find((employee) => employee.id === target) || visibleEmployees[0]);
   const search = query.trim().toLowerCase();
   const sourceRecords = liveRecords ?? (demoMode ? historyRecords : []);
@@ -555,7 +571,7 @@ function SkillAnswer({ result, onOpen }) {
   return <div className="skill-answer"><p>{result.answer}</p><div className="skill-answer-meta"><span><CheckCircle size={15} weight="fill" />已关联 {result.evidence?.length || 0} 条证据</span><span><Fingerprint size={15} />权限范围内</span><span><Clock size={15} />{timeRange}</span>{result.retrieval?.mode ? <span title="基于脱敏活动元数据和语义同义词检索"><Sparkle size={15} />语义检索</span> : null}{applications.length ? <span><Monitor size={15} />应用：{applications.join("、")}</span> : null}{contextLabels.length ? <span><Tag size={15} />工作标识：{contextLabels.join("、")}</span> : null}{webDomains.length ? <span><Browser size={15} />网站：{webDomains.join("、")}</span> : null}{result.citations?.length ? <span><FileText size={15} />来源引用：{result.citations.slice(0, 3).map((citation) => citation.label).join("、")}</span> : null}</div><div className="evidence-list"><span className="evidence-label">证据记录</span>{(result.evidence || []).map((record) => <button key={record.id} onClick={onOpen}><Sparkle size={16} weight="fill" /><span><strong>{record.title}</strong><small>{record.duration} · 置信度 {Math.round(record.confidence * 100)}%</small></span><ArrowSquareOut size={15} /></button>)}</div><div className="caveat-box"><WarningCircle size={16} /><span>{result.caveats?.[0] || "答案只基于活动元数据和 Memory Summary。"}</span></div>{result.uncertainty && <div className="caveat-box"><Info size={16} /><span>不确定性：{result.uncertainty}</span></div>}</div>;
 }
 
-function DevicesPage({ role, query, target, onNavigate, onToast }) {
+function DevicesPage({ role, principal, query, target, onNavigate, onToast }) {
   const [tab, setTab] = useState("设备列表");
   const [selected, setSelected] = useState(null);
   const [registrationOpen, setRegistrationOpen] = useState(false);
@@ -589,7 +605,13 @@ function DevicesPage({ role, query, target, onNavigate, onToast }) {
     return () => { cancelled = true; };
   }, []);
   const sourceDevices = liveDevices ?? (demoMode ? deviceData : []);
-  const scopedDevices = role === "employee" ? sourceDevices.filter((device) => device.user === "Wei") : sourceDevices;
+  const scopedDevices = role === "employee"
+    ? sourceDevices.filter((device) => principal?.employee_id
+      ? device.employeeId === principal.employee_id
+      : demoMode && device.user === "Wei")
+    : role === "manager" && principal?.team
+      ? sourceDevices.filter((device) => device.team === principal.team)
+      : sourceDevices;
   const devices = scopedDevices.filter((device) => !query.trim() || `${device.name} ${device.user} ${device.status} ${device.error}`.toLowerCase().includes(query.toLowerCase()));
   const onlineCount = scopedDevices.filter((device) => device.status === "online").length;
   const queuedCount = scopedDevices.reduce((sum, device) => sum + Number(device.cache || 0), 0);
@@ -727,7 +749,7 @@ function DeviceDrawer({ device, role, onClose, onToast }) {
   return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}><aside className="memory-drawer device-drawer"><div className="drawer-header"><span className="page-eyebrow">DEVICE DETAIL</span><button className="drawer-close" onClick={onClose}>×</button><h2>{current.hostname || current.name}</h2><p>{current.employee_name || current.user} · {current.os_version || current.os} · Agent {current.agent_version || current.agent}</p></div><div className="drawer-content"><div className="device-status-banner"><StatusPill status={disabled ? "locked" : current.status} /><span>最近心跳 {current.last_heartbeat_at ? formatShanghaiTime(current.last_heartbeat_at) : current.heartbeat}</span></div>{error && <div className="error-box">设备操作失败：{error}</div>}<DrawerSection title="工作会话"><div className="detail-definition"><span>当前状态</span><strong>{disabled ? "已停用" : current.session || (current.status === "online" ? "active" : "offline")}</strong><span>离线缓存</span><strong>{current.queued_events ?? current.cache ?? 0} 条</strong><span>最近错误</span><strong>{(current.queued_events ?? current.cache ?? 0) > 0 ? `${current.queued_events ?? current.cache} 条待上传` : "无"}</strong><span>最近事件</span><strong>{detail?.events?.length ?? "读取中…"}</strong></div></DrawerSection><DrawerSection title="设备操作"><div className="drawer-button-list"><button onClick={() => onToast("重新注册需在 Agent 托盘中输入新的注册码")}><Fingerprint size={17} />重新注册 Agent</button><button onClick={() => onToast("已打开采集策略，请在权限页面修改")}><SlidersHorizontal size={17} />查看采集策略</button><button disabled={busy} onClick={() => void changeStatus(disabled)}>{disabled ? <CheckCircle size={17} /> : <LockKey size={17} />}{busy ? "处理中…" : disabled ? "启用设备" : "停用设备"}</button></div></DrawerSection></div></aside></div>;
 }
 
-function PermissionsPage({ role, target, onToast }) {
+function PermissionsPage({ role, principal, target, onToast }) {
   const canEdit = role === "admin";
   const [tab, setTab] = useState(target === "policy" ? "采集策略" : "角色");
   const [liveRoles, setLiveRoles] = useState(null);
@@ -739,7 +761,7 @@ function PermissionsPage({ role, target, onToast }) {
   }, []);
   const roleItems = liveRoles?.length ? liveRoles.map((item) => ({ ...item, role: item.label, users: "—" })) : permissionRoles;
   const tabs = canEdit ? ["账号", "角色", "组织关系", "数据范围", "采集策略", "应用/网站排除", "保留策略"] : ["角色", "组织关系", "数据范围", "采集策略", "应用/网站排除", "保留策略"];
-  return <div className="page-content"><PageHeader eyebrow="ACCESS CONTROL" title="权限" description="管理老板、高管、员工三种角色、数据范围和采集策略。" meta="RBAC 已启用" action={<button className="outline-button" onClick={() => onToast(canEdit ? "系统角色固定为老板、高管和员工" : "当前角色只能查看权限配置")}><Key size={17} />固定三种角色</button>} />{error && <div className="error-box">权限配置读取失败：{error}</div>}<Tabs tabs={tabs} active={tab} onChange={setTab} />{tab === "账号" && canEdit && <AccountManagement onToast={onToast} />}{tab === "角色" && <SectionCard title="角色权限" description="系统只保留老板、高管、员工三种角色，权限由服务端强制执行"><div className="role-list">{roleItems.map((item) => <div className="role-row" key={item.role}><span className="role-icon"><Key size={18} /></span><span><strong>{item.role}</strong><small>{item.scope} · {item.users || "—"} 人 · {item.description || item.detail}</small></span><button className="outline-button" onClick={() => onToast(`${item.role}：${item.scope}，${item.description || item.detail}`)}>查看</button></div>)}</div></SectionCard>}{tab === "组织关系" && <OrgTree onToast={onToast} />}{tab === "数据范围" && <ScopePolicy role={role} onToast={onToast} />}{tab === "采集策略" && <PolicyEditor role={role} onToast={onToast} />}{tab === "应用/网站排除" && <ExclusionPolicy role={role} onToast={onToast} />}{tab === "保留策略" && <RetentionPolicy role={role} onToast={onToast} />}</div>;
+  return <div className="page-content"><PageHeader eyebrow="ACCESS CONTROL" title="权限" description="管理老板、高管、员工三种角色、数据范围和采集策略。" meta="RBAC 已启用" action={<button className="outline-button" onClick={() => onToast(canEdit ? "系统角色固定为老板、高管和员工" : "当前角色只能查看权限配置")}><Key size={17} />固定三种角色</button>} />{error && <div className="error-box">权限配置读取失败：{error.message || error}</div>}<Tabs tabs={tabs} active={tab} onChange={setTab} />{tab === "账号" && canEdit && <AccountManagement onToast={onToast} />}{tab === "角色" && <SectionCard title="角色权限" description="系统只保留老板、高管、员工三种角色，权限由服务端强制执行"><div className="role-list">{roleItems.map((item) => <div className="role-row" key={item.role}><span className="role-icon"><Key size={18} /></span><span><strong>{item.role}</strong><small>{item.scope} · {item.users || "—"} 人 · {item.description || item.detail}</small></span><button className="outline-button" onClick={() => onToast(`${item.role}：${item.scope}，${item.description || item.detail}`)}>查看</button></div>)}</div></SectionCard>}{tab === "组织关系" && <OrgTree principal={principal} onToast={onToast} />}{tab === "数据范围" && <ScopePolicy role={role} onToast={onToast} />}{tab === "采集策略" && <PolicyEditor role={role} onToast={onToast} />}{tab === "应用/网站排除" && <ExclusionPolicy role={role} onToast={onToast} />}{tab === "保留策略" && <RetentionPolicy role={role} onToast={onToast} />}</div>;
 }
 
 function AccountManagement({ onToast }) {
@@ -793,7 +815,26 @@ function AccountManagement({ onToast }) {
     <form className="account-create-form" onSubmit={save}><strong>创建账号</strong><div className="settings-grid"><label className="setting-field"><span>用户名</span><input required value={draft.username} onChange={(event) => setDraft((current) => ({ ...current, username: event.target.value }))} /></label><label className="setting-field"><span>显示名称</span><input required value={draft.display_name} onChange={(event) => setDraft((current) => ({ ...current, display_name: event.target.value }))} /></label><label className="setting-field"><span>初始密码（至少12位）</span><input required type="password" minLength="12" value={draft.password} onChange={(event) => setDraft((current) => ({ ...current, password: event.target.value }))} /></label><label className="setting-field"><span>角色</span><select value={draft.role} onChange={(event) => setDraft((current) => ({ ...current, role: event.target.value }))}><option value="admin">老板</option><option value="manager">高管</option><option value="employee">员工</option></select></label>{draft.role === "employee" && <label className="setting-field"><span>绑定员工</span><select required value={draft.employee_id} onChange={(event) => setDraft((current) => ({ ...current, employee_id: event.target.value }))}>{employees.map((employee) => <option key={employee.id} value={employee.id}>{employee.name} · {employee.team}</option>)}</select></label>}{draft.role === "manager" && <label className="setting-field"><span>管理团队</span><input required value={draft.team} onChange={(event) => setDraft((current) => ({ ...current, team: event.target.value }))} /></label>}</div>{error && <div className="error-box">账号操作失败：{error}</div>}<button className="primary-button" disabled={saving}>{saving ? "创建中…" : "创建账号"}</button></form>
   </SectionCard>;
 }
-function OrgTree({ onToast }) { return <SectionCard title="组织关系" description="直属管理关系决定团队和个人历史的默认可见范围"><div className="org-tree"><div className="org-node root"><Buildings size={18} /><span><strong>锦衣卫科技</strong><small>管理员 Wei</small></span></div><div className="org-branch"><div className="org-node"><UsersThree size={18} /><span><strong>研发与产品中心</strong><small>负责人 Wei · 12 人</small></span><button className="text-button" onClick={() => onToast("已打开团队权限")}>管理</button></div><div className="org-node"><UsersThree size={18} /><span><strong>客户与销售团队</strong><small>负责人 Lin · 8 人</small></span><button className="text-button" onClick={() => onToast("已打开团队权限")}>管理</button></div><div className="org-node"><UsersThree size={18} /><span><strong>运营与支持团队</strong><small>负责人 Ming · 6 人</small></span><button className="text-button" onClick={() => onToast("已打开团队权限")}>管理</button></div></div></div></SectionCard>; }
+function OrgTree({ principal, onToast }) {
+  const [organization, setOrganization] = useState(null);
+  const [teams, setTeams] = useState(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (!agentApiEnabled) return undefined;
+    let cancelled = false;
+    Promise.all([getLiveOrganization(), getLiveTeams()]).then(([nextOrganization, nextTeams]) => {
+      if (cancelled) return;
+      setOrganization(nextOrganization);
+      setTeams(nextTeams);
+    }).catch((requestError) => {
+      if (!cancelled) setError(requestError.message);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  const visibleTeams = teams ?? (demoMode ? teamData : []);
+  const organizationName = organization?.name || (demoMode ? settingsData.company_name : "当前组织");
+  return <SectionCard title="组织关系" description="直属管理关系决定团队和个人历史的默认可见范围">{error && <div className="error-box">组织目录读取失败：{error}</div>}<div className="org-tree"><div className="org-node root"><Buildings size={18} /><span><strong>{organizationName}</strong><small>{principal?.actor ? `当前账号：${principal.actor}` : "当前账号"}</small></span></div><div className="org-branch">{visibleTeams.length ? visibleTeams.map((team) => <div className="org-node" key={team.id}><UsersThree size={18} /><span><strong>{team.name}</strong><small>负责人 {team.lead || "待配置"} · {team.members} 人</small></span></div>) : <EmptyState title="暂无团队组织数据" />}</div></div></SectionCard>;
+}
 function ScopePolicy({ role = "admin", onToast }) {
   const fallback = permissionRoles.map((item, index) => ({ role: ["admin", "manager", "employee"][index], label: item.role, scope: item.scope, detail: item.description }));
   const [roles, setRoles] = useState(fallback);
