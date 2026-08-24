@@ -264,6 +264,12 @@ function hashPassword(password) {
   return `scrypt$${salt}$${digest}`;
 }
 
+export function hashAccountPassword(password) {
+  const value = String(password || "");
+  if (value.length < 12 || value.length > 200) throw new Error("account password must be 12-200 characters");
+  return hashPassword(value);
+}
+
 function verifyPassword(password, encoded) {
   const [algorithm, salt, expectedValue] = String(encoded || "").split("$");
   if (algorithm !== "scrypt" || !salt || !expectedValue) return false;
@@ -1424,7 +1430,7 @@ function auditEntryHash({ id, action, actor, target, detail, organization_id: or
   return hash([id, action, actor, target, detail || "", organizationId, createdAt, previousHash || ""].join("\n"));
 }
 
-function recordAudit(db, action, actor, target, detail = "", organizationId = null) {
+export function recordAudit(db, action, actor, target, detail = "", organizationId = null) {
   const id = newId("audit");
   const scopedOrganizationId = organizationId || organizationForAuditTarget(db, target);
   const previousHash = db.prepare("SELECT entry_hash FROM audit_logs WHERE organization_id = ? ORDER BY rowid DESC LIMIT 1").get(scopedOrganizationId)?.entry_hash || "";

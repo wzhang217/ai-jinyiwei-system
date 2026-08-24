@@ -1,0 +1,18 @@
+[Unit]
+Description=AI锦衣卫 Agent Server readiness check
+After=ai-jinyiwei-agent-server.service
+Wants=ai-jinyiwei-agent-server.service
+
+[Service]
+Type=oneshot
+User=jinyiwei
+Group=jinyiwei
+WorkingDirectory=/opt/ai-jinyiwei/server
+EnvironmentFile=/etc/ai-jinyiwei/server.env
+ExecStart=/usr/bin/node --env-file-if-exists=.env scripts/healthcheck.mjs
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ai-jinyiwei/server/data
+SyslogIdentifier=ai-jinyiwei-agent-health

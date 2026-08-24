@@ -34,6 +34,23 @@ AUTH_LOCKOUT_SECONDS=900
 
 登录连续失败达到阈值后账号会暂时锁定，成功登录会清零失败计数。员工 Agent 注册后必须确认当前隐私策略版本，服务端会记录组织、员工、设备、策略哈希和确认时间；策略版本更新后需要重新确认。相关接口为 `/api/agent/privacy-policy`、`/api/agent/privacy-acknowledgement` 和 `/api/admin/privacy/acknowledgements`。后台的“员工数据权利”支持 `POST /api/admin/privacy/subject-export` 导出员工活动元数据，以及 `POST /api/admin/privacy/subject-delete` 先预览再执行删除；两者均按老板/高管/员工服务端范围过滤并写入审计。导出不会包含密码、Token 或原始正文；删除会清理活动事件、Memory Summary、生成队列和浏览器临时凭据，但保留员工/设备身份、审计日志和隐私确认记录。
 
+### 新客户组织初始化
+
+正式交付每个客户前，使用服务端 CLI 创建独立组织和第一个老板账号。命令会复制当前默认策略、隐私说明、通知、活动分类、集成和三角色权限模板；密码只从环境变量读取，不会写入命令行参数、日志、前端或 MSI：
+
+```bash
+export PROVISION_ORGANIZATION_NAME="示例客户"
+export PROVISION_ORGANIZATION_SLUG="example-customer"
+export PROVISION_ADMIN_USERNAME="owner"
+export PROVISION_ADMIN_DISPLAY_NAME="客户老板"
+export PROVISION_ADMIN_PASSWORD="请从密码管理器临时注入至少12位密码"
+npm run provision:organization -- \
+  --organization-id org_example_customer
+unset PROVISION_ADMIN_PASSWORD
+```
+
+也可以将 `PROVISION_*` 值改为同名命令参数；管理员密码仍必须使用 `PROVISION_ADMIN_PASSWORD`，避免出现在 shell history。命令是幂等保护式的：组织 ID、slug 或用户名已存在时直接失败，不覆盖已有客户数据。初始化后由老板登录后台创建员工、账号和设备注册码，员工账号只使用 `employee` 角色，高管账号只使用 `manager` 角色，不创建审计员角色。
+
 ### 数据库迁移、备份与恢复
 
 服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 7，包含组织归属字段、按组织隔离的采集策略和企业设置、隐私策略确认记录、账号登录失败保护、账号 MFA 密钥字段、AI 用量统计和审计日志哈希链；旧版 SQLite 会在启动时补列并建立组织配置，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
@@ -58,6 +75,21 @@ sudo cp deploy/ai-jinyiwei-agent-backup.service deploy/ai-jinyiwei-agent-backup.
 sudo systemctl daemon-reload
 sudo systemctl enable --now ai-jinyiwei-agent-backup.timer
 sudo systemctl list-timers ai-jinyiwei-agent-backup.timer
+```
+
+客户支持排障时可以生成脱敏诊断报告。报告只包含服务版本、数据库完整性/迁移状态、设备和队列计数、最近同步时间及脱敏的摘要任务错误，不包含活动名称、窗口标题、URL、文件内容、Token、密码或 API Key：
+
+```bash
+npm run diagnostics -- --output ./data/diagnostics/diagnostic-$(date +%Y%m%d%H%M%S).json
+```
+
+systemd 部署还可以启用仓库内的 `deploy/ai-jinyiwei-agent-health.service` 和 `deploy/ai-jinyiwei-agent-health.timer`，每 5 分钟执行 `/health/ready`；失败记录会进入 journald，接入企业监控时应对该 unit 的失败状态告警：
+
+```bash
+sudo cp deploy/ai-jinyiwei-agent-health.service deploy/ai-jinyiwei-agent-health.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ai-jinyiwei-agent-health.timer
+sudo systemctl list-timers ai-jinyiwei-agent-health.timer
 ```
 
 ## AI 摘要与 History Skill

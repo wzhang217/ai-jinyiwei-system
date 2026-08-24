@@ -9,6 +9,8 @@
     "backup": "node --env-file-if-exists=.env --experimental-sqlite scripts/backup.mjs",
     "backup:rotate": "node --env-file-if-exists=.env --experimental-sqlite scripts/backup-rotate.mjs",
     "restore-check": "node --env-file-if-exists=.env --experimental-sqlite scripts/restore-check.mjs",
+    "provision:organization": "node --env-file-if-exists=.env --experimental-sqlite scripts/provision-organization.mjs",
+    "diagnostics": "node --env-file-if-exists=.env --experimental-sqlite scripts/diagnostics.mjs",
     "healthcheck": "node --env-file-if-exists=.env scripts/healthcheck.mjs",
     "test": "node --test --experimental-sqlite tests/server.test.mjs"
   }
