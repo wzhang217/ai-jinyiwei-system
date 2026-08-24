@@ -59,11 +59,10 @@ const navGroups = [
 const roleNavigation = {
   admin: new Set(navGroups.flatMap((group) => group.items.map((item) => item.id))),
   manager: new Set(["overview", "teams", "employees", "history", "memory", "skill", "devices", "audit", "settings"]),
-  employee: new Set(["overview", "history", "memory", "skill", "devices", "settings"]),
-  auditor: new Set(["overview", "history", "memory", "skill", "audit"]),
+  employee: new Set(["overview", "history", "memory", "skill"]),
 };
 
-const roleDefaults = { admin: "overview", manager: "teams", employee: "history", auditor: "audit" };
+const roleDefaults = { admin: "overview", manager: "teams", employee: "history" };
 
 async function exportRecordWithAudit(record, notify) {
   try {

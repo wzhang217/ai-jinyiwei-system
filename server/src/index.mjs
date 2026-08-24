@@ -29,6 +29,10 @@ const defaultPolicy = {
   idle_threshold_seconds: 300,
   activity_checkpoint_seconds: 15,
   heartbeat_interval_seconds: 60,
+  collect_app_activity: true,
+  collect_idle_status: true,
+  collect_web_domains: true,
+  collect_file_metadata: true,
   work_hours_start: "09:00",
   work_hours_end: "18:00",
   excluded_processes: [],
@@ -303,7 +307,9 @@ function getPolicy(db) {
     }
     policy[row.key] = ["idle_threshold_seconds", "activity_checkpoint_seconds", "heartbeat_interval_seconds", "version"].includes(row.key)
       ? Number(row.value)
-      : row.value;
+      : ["collect_app_activity", "collect_idle_status", "collect_web_domains", "collect_file_metadata"].includes(row.key)
+        ? row.value === "true"
+        : row.value;
     return policy;
   }, {});
 }
@@ -392,14 +398,14 @@ function canMutateAdmin(principal) {
 }
 
 function scopePredicate(principal, { deviceAlias = "d", employeeAlias = "e" } = {}) {
-  if (!principal || principal.role === "admin" || principal.role === "auditor") return { sql: "1 = 1", params: [] };
+  if (!principal || principal.role === "admin") return { sql: "1 = 1", params: [] };
   if (principal.role === "employee") return { sql: `${deviceAlias}.employee_id = ?`, params: [principal.employee_id] };
   if (principal.role === "manager") return { sql: `${employeeAlias}.team = ?`, params: [principal.team] };
   return { sql: "1 = 0", params: [] };
 }
 
 function principalScope(principal) {
-  if (!principal || principal.role === "admin" || principal.role === "auditor") return {};
+  if (!principal || principal.role === "admin") return {};
   return principal.role === "employee" ? { employeeId: principal.employee_id } : { team: principal.team };
 }
 
@@ -514,6 +520,9 @@ function validatePolicyUpdate(body) {
   if (!Number.isInteger(body.activity_checkpoint_seconds) || body.activity_checkpoint_seconds < 10 || body.activity_checkpoint_seconds > 300) {
     return "activity_checkpoint_seconds must be an integer between 10 and 300";
   }
+  for (const key of ["collect_app_activity", "collect_idle_status", "collect_web_domains", "collect_file_metadata"]) {
+    if (typeof body[key] !== "boolean") return `${key} must be boolean`;
+  }
   if (!isValidPolicyList(body.excluded_processes, { kind: "process" })) return "excluded_processes is invalid";
   if (!isValidPolicyList(body.excluded_domains, { kind: "domain" })) return "excluded_domains is invalid";
   return null;
@@ -538,9 +547,21 @@ function policyDomainMatches(domain, excludedDomains = []) {
 }
 
 function eventExcludedByPolicy(event, policy) {
+  if (event.type === "app_session" && policy.collect_app_activity === false) return true;
+  if (event.type === "idle" && policy.collect_idle_status === false) return true;
   const processName = String(event.process_name || "").trim().toLowerCase();
   const excludedProcesses = (policy.excluded_processes || []).map((item) => String(item).trim().toLowerCase());
   return excludedProcesses.includes(processName) || policyDomainMatches(event.web_domain, policy.excluded_domains);
+}
+
+function eventPayloadByPolicy(event, policy) {
+  if (policy.collect_web_domains !== false) return event;
+  const sourceKind = sourceKindForEvent(event);
+  return {
+    ...event,
+    source_kind: sourceKind === "browser_native" || sourceKind === "browser_extension" ? "desktop_app" : sourceKind,
+    web_domain: null,
+  };
 }
 
 function isSafeWebDomain(value) {
@@ -2055,8 +2076,8 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
       if (method === "POST" && url.pathname === "/api/admin/sessions") {
         if (request.headers["x-admin-token"] !== adminToken) return sendError(response, 401, "bootstrap admin authentication required", "unauthorized");
         const body = await readJson(request);
-        const role = ["admin", "manager", "employee", "auditor"].includes(body.role) ? body.role : null;
-        if (!role) return sendError(response, 400, "role must be admin, manager, employee, or auditor", "invalid_role");
+        const role = ["admin", "manager", "employee"].includes(body.role) ? body.role : null;
+        if (!role) return sendError(response, 400, "role must be admin, manager, or employee", "invalid_role");
         let employeeId = null;
         let team = null;
         let actor = "admin";
@@ -2069,8 +2090,6 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         } else if (role === "manager") {
           team = typeof body.team === "string" && body.team.trim() ? body.team.trim().slice(0, 120) : "研发与产品中心";
           actor = `manager:${team}`;
-        } else if (role === "auditor") {
-          actor = "auditor";
         }
         const ttl = Math.min(Math.max(Number(body.expires_in_seconds) || 8 * 3600, 300), 24 * 3600);
         const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
@@ -2166,6 +2185,10 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           work_hours_start: body?.work_hours_start,
           work_hours_end: body?.work_hours_end,
           activity_checkpoint_seconds: body?.activity_checkpoint_seconds ?? current.activity_checkpoint_seconds ?? 15,
+          collect_app_activity: body?.collect_app_activity ?? current.collect_app_activity ?? true,
+          collect_idle_status: body?.collect_idle_status ?? current.collect_idle_status ?? true,
+          collect_web_domains: body?.collect_web_domains ?? current.collect_web_domains ?? true,
+          collect_file_metadata: body?.collect_file_metadata ?? current.collect_file_metadata ?? true,
           excluded_processes: body?.excluded_processes ?? current.excluded_processes ?? [],
           excluded_domains: body?.excluded_domains ?? current.excluded_domains ?? [],
         };
@@ -2175,6 +2198,10 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           ["work_hours_start", nextPolicy.work_hours_start],
           ["work_hours_end", nextPolicy.work_hours_end],
           ["activity_checkpoint_seconds", String(nextPolicy.activity_checkpoint_seconds)],
+          ["collect_app_activity", String(nextPolicy.collect_app_activity)],
+          ["collect_idle_status", String(nextPolicy.collect_idle_status)],
+          ["collect_web_domains", String(nextPolicy.collect_web_domains)],
+          ["collect_file_metadata", String(nextPolicy.collect_file_metadata)],
           ["excluded_processes", JSON.stringify(nextPolicy.excluded_processes.map((item) => item.trim().toLowerCase()))],
           ["excluded_domains", JSON.stringify(nextPolicy.excluded_domains.map((item) => item.trim().toLowerCase()))],
         ].filter(([key, value]) => {
@@ -2546,7 +2573,8 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
             received_at = excluded.received_at
         `);
         for (const event of acceptedEvents) {
-          insert.run(event.event_id, device.id, event.occurred_at, event.type, event.app_name, event.process_name, sourceKindForEvent(event), event.context_label || event.title_hint || null, event.web_domain ? event.web_domain.trim().toLowerCase() : null, event.duration_seconds, isoNow());
+          const normalizedEvent = eventPayloadByPolicy(event, policy);
+          insert.run(normalizedEvent.event_id, device.id, normalizedEvent.occurred_at, normalizedEvent.type, normalizedEvent.app_name, normalizedEvent.process_name, sourceKindForEvent(normalizedEvent), normalizedEvent.context_label || normalizedEvent.title_hint || null, normalizedEvent.web_domain ? normalizedEvent.web_domain.trim().toLowerCase() : null, normalizedEvent.duration_seconds, isoNow());
         }
         if (device.auth_kind === "device") {
           db.prepare("UPDATE devices SET status = 'online', last_heartbeat_at = ?, updated_at = ? WHERE id = ?").run(isoNow(), isoNow(), device.id);

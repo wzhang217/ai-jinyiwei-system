@@ -60,10 +60,9 @@ export const auditData = [
 ];
 
 export const permissionRoles = [
-  { role: "企业管理员", scope: "整个企业", users: 2, description: "管理组织、设备、策略、审计和授权范围内的历史记录。" },
-  { role: "直属管理者", scope: "直属团队", users: 5, description: "查看直属团队的趋势、历史记录和 Memory Summary。" },
+  { role: "老板", scope: "整个企业", users: 1, description: "管理组织、设备、策略、审计和全企业历史记录。" },
+  { role: "高管", scope: "直属团队", users: 5, description: "查看直属团队的趋势、历史记录和 Memory Summary。" },
   { role: "员工", scope: "本人", users: 26, description: "查看自己的活动历史、Memory Summary 和隐私说明。" },
-  { role: "审计员", scope: "授权记录", users: 1, description: "只读查看访问、导出、权限和 Agent 事件。" },
 ];
 
 export const settingsData = {

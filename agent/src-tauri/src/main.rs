@@ -14,7 +14,7 @@ use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use uuid::Uuid;
 
-const AGENT_VERSION: &str = "0.1.9";
+const AGENT_VERSION: &str = "0.1.10";
 const KEYRING_SERVICE: &str = "ai-jinyiwei-agent";
 const MAX_PENDING_EVENTS: i64 = 10_000;
 // A resumed/sleeping Windows session must not create a full-day idle span
@@ -27,12 +27,24 @@ fn default_activity_checkpoint_seconds() -> u64 {
     DEFAULT_ACTIVITY_CHECKPOINT_SECONDS
 }
 
+fn default_collect_policy_flag() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Policy {
     idle_threshold_seconds: u64,
     #[serde(default = "default_activity_checkpoint_seconds")]
     activity_checkpoint_seconds: u64,
     heartbeat_interval_seconds: u64,
+    #[serde(default = "default_collect_policy_flag")]
+    collect_app_activity: bool,
+    #[serde(default = "default_collect_policy_flag")]
+    collect_idle_status: bool,
+    #[serde(default = "default_collect_policy_flag")]
+    collect_web_domains: bool,
+    #[serde(default = "default_collect_policy_flag")]
+    collect_file_metadata: bool,
     work_hours_start: String,
     work_hours_end: String,
     #[serde(default)]
@@ -48,6 +60,10 @@ impl Default for Policy {
             idle_threshold_seconds: 300,
             activity_checkpoint_seconds: DEFAULT_ACTIVITY_CHECKPOINT_SECONDS,
             heartbeat_interval_seconds: 60,
+            collect_app_activity: true,
+            collect_idle_status: true,
+            collect_web_domains: true,
+            collect_file_metadata: true,
             work_hours_start: "09:00".into(),
             work_hours_end: "18:00".into(),
             excluded_processes: Vec::new(),
@@ -667,7 +683,7 @@ impl Core {
         } else {
             let idle_seconds = system_idle_seconds();
             let idle_limit = self.status.policy.idle_threshold_seconds;
-            if idle_seconds >= idle_limit {
+            if self.status.policy.collect_idle_status && idle_seconds >= idle_limit {
                 if self.idle_session.is_none() {
                     let bounded_idle_seconds = idle_seconds.min(MAX_EVENT_DURATION_SECONDS as u64);
                     let idle_started = now - Duration::from_secs(bounded_idle_seconds);
@@ -695,42 +711,59 @@ impl Core {
                     });
                 }
                 let _ = self.checkpoint_idle_session(now);
-            } else if let Some(activity) = foreground_application() {
-                if activity.web_domain.is_some() {
-                    self.status.last_browser_capture_at = Some(Utc::now().to_rfc3339());
-                    self.status.last_browser_capture_source = Some(activity.source_kind.clone());
-                }
+            } else {
                 let _ = self.finish_idle_session(now);
-                if activity_excluded(&activity, &self.status.policy) {
-                    let _ = self.finish_session(now);
-                } else {
-                    let changed = self
-                        .active_session
-                        .as_ref()
-                        .map(|session| {
-                            session.process_name != activity.process_name
-                                || session.context_label != activity.context_label
-                                || session.web_domain != activity.web_domain
-                                || session.source_kind != activity.source_kind
-                        })
-                        .unwrap_or(true);
-                    if changed {
+                if self.status.policy.collect_app_activity {
+                    if let Some(mut activity) = foreground_application() {
+                        if !self.status.policy.collect_web_domains {
+                            activity.web_domain = None;
+                            if activity.source_kind == "browser_native"
+                                || activity.source_kind == "browser_extension"
+                            {
+                                activity.source_kind = "desktop_app".into();
+                            }
+                        }
+                        if activity.web_domain.is_some() {
+                            self.status.last_browser_capture_at = Some(Utc::now().to_rfc3339());
+                            self.status.last_browser_capture_source =
+                                Some(activity.source_kind.clone());
+                        }
+                        if activity_excluded(&activity, &self.status.policy) {
+                            let _ = self.finish_session(now);
+                        } else {
+                            let changed = self
+                                .active_session
+                                .as_ref()
+                                .map(|session| {
+                                    session.process_name != activity.process_name
+                                        || session.context_label != activity.context_label
+                                        || session.web_domain != activity.web_domain
+                                        || session.source_kind != activity.source_kind
+                                })
+                                .unwrap_or(true);
+                            if changed {
+                                let _ = self.finish_session(now);
+                                self.active_session = Some(ActiveSession {
+                                    event_id: Uuid::new_v4().to_string(),
+                                    app_name: activity.app_name,
+                                    process_name: activity.process_name,
+                                    source_kind: activity.source_kind,
+                                    context_label: activity.context_label,
+                                    web_domain: activity.web_domain,
+                                    started_at: now,
+                                    occurred_at: Utc::now().to_rfc3339(),
+                                    last_emitted_duration: 0,
+                                });
+                            }
+                        }
+                    } else {
                         let _ = self.finish_session(now);
-                        self.active_session = Some(ActiveSession {
-                            event_id: Uuid::new_v4().to_string(),
-                            app_name: activity.app_name,
-                            process_name: activity.process_name,
-                            source_kind: activity.source_kind,
-                            context_label: activity.context_label,
-                            web_domain: activity.web_domain,
-                            started_at: now,
-                            occurred_at: Utc::now().to_rfc3339(),
-                            last_emitted_duration: 0,
-                        });
                     }
+                    let _ = self.checkpoint_session(now);
+                } else {
+                    let _ = self.finish_session(now);
                 }
             }
-            let _ = self.checkpoint_session(now);
         }
 
         let mut sync_error = None;
