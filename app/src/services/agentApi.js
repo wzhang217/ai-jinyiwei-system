@@ -25,6 +25,7 @@ if (typeof window !== "undefined") {
 }
 
 export const agentApiEnabled = Boolean(configuredBaseUrl);
+const AUTH_EXPIRED_EVENT = "jinyiwei-auth-expired";
 
 export function setAdminSession(token) {
   adminJwt = typeof token === "string" ? token : "";
@@ -52,6 +53,10 @@ export function clearAdminSession() {
   setAdminPrincipal(null);
 }
 
+function notifyAuthExpired() {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(AUTH_EXPIRED_EVENT));
+}
+
 async function request(path, options = {}, { publicEndpoint = false } = {}) {
   if (!agentApiEnabled) throw new Error("Agent API is not configured");
   if (!publicEndpoint && !adminJwt) throw new Error("请先登录管理后台");
@@ -66,6 +71,10 @@ async function request(path, options = {}, { publicEndpoint = false } = {}) {
   });
   const body = await response.json().catch(() => ({}));
   if (!response.ok) {
+    if (response.status === 401 && !publicEndpoint) {
+      clearAdminSession();
+      notifyAuthExpired();
+    }
     const error = new Error(body.error?.message || `Agent API HTTP ${response.status}`);
     error.code = body.error?.code || "request_failed";
     error.status = response.status;

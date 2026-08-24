@@ -95,6 +95,7 @@ function OverviewPage({ role, principal, liveRecords, onNavigate, onToast }) {
   const [liveDevices, setLiveDevices] = useState(null);
   const [liveJobs, setLiveJobs] = useState(null);
   const [liveTeams, setLiveTeams] = useState(null);
+  const [liveError, setLiveError] = useState("");
   const canSeeManagement = role !== "employee";
   const sourceRecords = liveRecords ?? (demoMode ? historyRecords : []);
   const employeeId = principal?.employee_id;
@@ -154,15 +155,14 @@ function OverviewPage({ role, principal, liveRecords, onNavigate, onToast }) {
   useEffect(() => {
     if (!agentApiEnabled) return undefined;
     let cancelled = false;
-    Promise.all([
-      getLiveDevices().catch(() => []),
-      getMemoryJobs().catch(() => ({ jobs: [] })),
-      getLiveTeams().catch(() => []),
-    ]).then(([devices, jobs, teams]) => {
+    setLiveError("");
+    Promise.allSettled([getLiveDevices(), getMemoryJobs(), getLiveTeams()]).then((results) => {
       if (cancelled) return;
-      setLiveDevices(devices);
-      setLiveJobs(jobs.jobs || []);
-      setLiveTeams(teams);
+      const [devices, jobs, teams] = results;
+      if (devices.status === "fulfilled") setLiveDevices(devices.value);
+      if (jobs.status === "fulfilled") setLiveJobs(jobs.value.jobs || []);
+      if (teams.status === "fulfilled") setLiveTeams(teams.value);
+      setLiveError(results.filter((result) => result.status === "rejected").map((result) => result.reason?.message || "未知服务错误").join("；"));
     });
     return () => { cancelled = true; };
   }, [liveRecords]);
@@ -172,10 +172,11 @@ function OverviewPage({ role, principal, liveRecords, onNavigate, onToast }) {
         eyebrow="ORGANIZATION PULSE"
         title={role === "employee" ? "我的工作状态" : "企业总览"}
         description={role === "employee" ? "查看自己的活动覆盖、Memory Summary 和需要补充说明的上下文。" : "从组织层面查看工作活动、Memory Summary 生成状态和需要关注的协作问题。"}
-        meta="数据同步正常"
+        meta={liveError ? "部分数据读取失败" : liveDevices ? "数据同步正常" : "正在读取数据"}
         action={<button className="primary-button" onClick={() => onNavigate("skill")}><ChatCircleDots size={17} />询问历史</button>}
       />
       <Tabs tabs={["今日态势", "趋势分析", "需要关注", "数据健康"]} active={tab} onChange={setTab} />
+      {liveError && <div className="error-box">总览数据读取失败：{liveError}。请稍后重试或重新登录。</div>}
       {tab === "今日态势" && (
         <>
           <KpiGrid items={[

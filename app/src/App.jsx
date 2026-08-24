@@ -234,6 +234,18 @@ function App() {
     return undefined;
   }, []);
 
+  useEffect(() => {
+    if (!agentApiEnabled) return undefined;
+    const handleAuthExpired = () => {
+      setPrincipal(null);
+      setLiveRecords(null);
+      setLiveError("");
+      setAuthError("登录已失效或账号已停用，请重新登录");
+    };
+    window.addEventListener("jinyiwei-auth-expired", handleAuthExpired);
+    return () => window.removeEventListener("jinyiwei-auth-expired", handleAuthExpired);
+  }, []);
+
   const visibleNavGroups = useMemo(() => navGroups.map((group) => ({ ...group, items: group.items.filter((item) => roleNavigation[role].has(item.id)) })).filter((group) => group.items.length), [role]);
 
   useEffect(() => {
