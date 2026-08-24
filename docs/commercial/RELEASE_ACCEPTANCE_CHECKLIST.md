@@ -4,6 +4,7 @@
 
 - [ ] 新客户通过 `npm run provision:organization` 创建独立组织和老板账号。
 - [ ] `NODE_ENV=production`、强 `ADMIN_PASSWORD`、强 `AGENT_SESSION_SECRET`、明确 `AGENT_CORS_ORIGIN`。
+- [ ] `npm run preflight:production` 通过，且数据库和备份目录位于持久化绝对路径。
 - [ ] `AGENT_ALLOW_BOOTSTRAP_TOKEN=false`，生产请求只使用账号会话。
 - [ ] HTTPS、DNS、防火墙、反向代理和只开放 443 已验收。
 - [ ] `npm run backup:rotate` 成功，`npm run restore-check` 成功，恢复演练有记录。

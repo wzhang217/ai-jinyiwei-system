@@ -123,6 +123,16 @@ AGENT_ADMIN_TOKEN=dev-admin-token
 
 ## 生产部署
 
+### 生产环境预检
+
+在首次启动或修改生产 `.env` 后，先执行预检；它不会启动服务，也不会打印密钥：
+
+```bash
+npm run preflight:production
+```
+
+预检会拒绝模板密钥、弱管理员密码、非 HTTPS CORS、bootstrap Token、相对数据库/备份路径、过短备份保留期、过低磁盘阈值和缺失的 AI Key。预检通过后再启动 Docker 或 systemd；`HOST=0.0.0.0` 只会提示警告，仍必须由防火墙和反向代理限制 8787 的访问范围。
+
 ### Docker Compose
 
 适合局域网服务器或云主机的第一种部署方式：
