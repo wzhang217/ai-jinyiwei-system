@@ -32,7 +32,7 @@ AUTH_SESSION_TTL_SECONDS=28800
 
 ### 数据库迁移、备份与恢复
 
-服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 2，包含组织归属字段；旧版 SQLite 会在启动时补列，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
+服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 3，包含组织归属字段以及按组织隔离的采集策略、企业设置、通知、活动分类、集成和角色策略；旧版 SQLite 会在启动时补列并建立组织配置，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
 
 ```bash
 npm run backup

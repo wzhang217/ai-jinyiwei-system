@@ -2,8 +2,9 @@ import { statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { resolve } from "node:path";
 
-const candidate = resolve(process.env.AGENT_RESTORE_PATH || process.argv[2] || "");
-if (!candidate || candidate === resolve(".")) throw new Error("provide a backup path via AGENT_RESTORE_PATH or the first argument");
+const inputPath = process.env.AGENT_RESTORE_PATH || process.argv[2];
+if (!inputPath) throw new Error("provide a backup path via AGENT_RESTORE_PATH or the first argument");
+const candidate = resolve(inputPath);
 if (!statSync(candidate, { throwIfNoEntry: false })) throw new Error(`backup not found: ${candidate}`);
 
 const db = new DatabaseSync(candidate);

@@ -8,7 +8,7 @@ import { createAiService } from "./ai.mjs";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const defaultDbPath = resolve(moduleDir, "../data/agent.sqlite");
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 const DEFAULT_ORGANIZATION_ID = /^[a-z0-9][a-z0-9_-]{2,63}$/.test(String(process.env.DEFAULT_ORGANIZATION_ID || "org_default"))
   ? String(process.env.DEFAULT_ORGANIZATION_ID || "org_default")
   : "org_default";
@@ -280,6 +280,18 @@ function createSchema(db) {
       created_at TEXT NOT NULL
     );
 
+    CREATE TRIGGER IF NOT EXISTS audit_logs_no_update
+      BEFORE UPDATE ON audit_logs
+      BEGIN
+        SELECT RAISE(ABORT, 'audit_logs_are_append_only');
+      END;
+
+    CREATE TRIGGER IF NOT EXISTS audit_logs_no_delete
+      BEFORE DELETE ON audit_logs
+      BEGIN
+        SELECT RAISE(ABORT, 'audit_logs_are_append_only');
+      END;
+
     CREATE TABLE IF NOT EXISTS policies (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -360,6 +372,62 @@ function createSchema(db) {
       scope TEXT NOT NULL,
       detail TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS organization_policies (
+      organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      PRIMARY KEY (organization_id, key)
+    );
+
+    CREATE TABLE IF NOT EXISTS scoped_organization_settings (
+      organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      key TEXT NOT NULL,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (organization_id, key)
+    );
+
+    CREATE TABLE IF NOT EXISTS scoped_notification_settings (
+      organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (organization_id, key)
+    );
+
+    CREATE TABLE IF NOT EXISTS scoped_activity_categories (
+      organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      id TEXT NOT NULL,
+      color TEXT NOT NULL,
+      label TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (organization_id, id)
+    );
+
+    CREATE TABLE IF NOT EXISTS scoped_integration_settings (
+      organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      key TEXT NOT NULL,
+      title TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      status TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (organization_id, key)
+    );
+
+    CREATE TABLE IF NOT EXISTS scoped_role_policies (
+      organization_id TEXT NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+      role TEXT NOT NULL,
+      label TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (organization_id, role)
     );
 
   `);
@@ -462,6 +530,8 @@ function createSchema(db) {
 
   const roleInsert = db.prepare("INSERT OR IGNORE INTO role_policies (role, label, scope, detail, updated_at) VALUES (?, ?, ?, ?, ?)");
   for (const [role, label, scope, detail] of defaultRolePolicies) roleInsert.run(role, label, scope, detail, createdAt);
+
+  ensureOrganizationConfiguration(db, DEFAULT_ORGANIZATION_ID, createdAt);
 }
 
 function applySchemaMigrations(db, organizationDefault, now = isoNow()) {
@@ -476,6 +546,9 @@ function applySchemaMigrations(db, organizationDefault, now = isoNow()) {
     ensureColumn(db, "admin_sessions", "organization_id", `TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id)`);
     ensureColumn(db, "audit_logs", "organization_id", `TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id)`);
     insert.run(2, "organization-ownership", hash("schema:organization-ownership:v2"), now);
+  }
+  if (!applied.has(3)) {
+    insert.run(3, "organization-scoped-configuration", hash("schema:organization-scoped-configuration:v3"), now);
   }
 }
 
@@ -518,8 +591,58 @@ function ensureColumn(db, table, column, definition) {
   db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 
-function getPolicy(db) {
-  const rows = db.prepare("SELECT key, value FROM policies").all();
+function organizationIdOrDefault(organizationId) {
+  return organizationId || DEFAULT_ORGANIZATION_ID;
+}
+
+export function ensureOrganizationConfiguration(db, organizationId, now = isoNow()) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  if (!db.prepare("SELECT 1 FROM organizations WHERE id = ?").get(scopedOrganizationId)) return;
+
+  const policyRows = db.prepare("SELECT key, value FROM policies").all();
+  const policyInsert = db.prepare("INSERT OR IGNORE INTO organization_policies (organization_id, key, value) VALUES (?, ?, ?)");
+  const policies = policyRows.length
+    ? policyRows
+    : Object.entries(defaultPolicy).map(([key, value]) => ({ key, value: Array.isArray(value) ? JSON.stringify(value) : String(value) }));
+  for (const row of policies) policyInsert.run(scopedOrganizationId, row.key, row.value);
+
+  const organizationRows = db.prepare("SELECT key, value, updated_at FROM organization_settings").all();
+  const organizationInsert = db.prepare("INSERT OR IGNORE INTO scoped_organization_settings (organization_id, key, value, updated_at) VALUES (?, ?, ?, ?)");
+  const organizationSettings = organizationRows.length
+    ? organizationRows
+    : Object.entries(defaultOrganizationSettings).map(([key, value]) => ({ key, value, updated_at: now }));
+  for (const row of organizationSettings) organizationInsert.run(scopedOrganizationId, row.key, row.value, row.updated_at || now);
+
+  const notificationRows = db.prepare("SELECT key, label, enabled, updated_at FROM notification_settings").all();
+  const notificationInsert = db.prepare("INSERT OR IGNORE INTO scoped_notification_settings (organization_id, key, label, enabled, updated_at) VALUES (?, ?, ?, ?, ?)");
+  const notifications = notificationRows.length
+    ? notificationRows
+    : defaultNotificationSettings.map(([key, label, enabled]) => ({ key, label, enabled, updated_at: now }));
+  for (const row of notifications) notificationInsert.run(scopedOrganizationId, row.key, row.label, row.enabled ? 1 : 0, row.updated_at || now);
+
+  const categoryRows = db.prepare("SELECT id, color, label, detail, enabled, updated_at FROM activity_categories").all();
+  const categoryInsert = db.prepare("INSERT OR IGNORE INTO scoped_activity_categories (organization_id, id, color, label, detail, enabled, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+  const categories = categoryRows.length
+    ? categoryRows
+    : defaultActivityCategories.map(([id, color, label, detail]) => ({ id, color, label, detail, enabled: 1, updated_at: now }));
+  for (const row of categories) categoryInsert.run(scopedOrganizationId, row.id, row.color, row.label, row.detail, row.enabled ? 1 : 0, row.updated_at || now);
+
+  const integrationRows = db.prepare("SELECT key, title, detail, status, enabled, updated_at FROM integration_settings").all();
+  const integrationInsert = db.prepare("INSERT OR IGNORE INTO scoped_integration_settings (organization_id, key, title, detail, status, enabled, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)");
+  const integrations = integrationRows.length
+    ? integrationRows
+    : defaultIntegrationSettings.map(([key, title, detail, status, enabled]) => ({ key, title, detail, status, enabled, updated_at: now }));
+  for (const row of integrations) integrationInsert.run(scopedOrganizationId, row.key, row.title, row.detail, row.status, row.enabled ? 1 : 0, row.updated_at || now);
+
+  const roleRows = db.prepare("SELECT role, label, scope, detail, updated_at FROM role_policies").all();
+  const roleInsert = db.prepare("INSERT OR IGNORE INTO scoped_role_policies (organization_id, role, label, scope, detail, updated_at) VALUES (?, ?, ?, ?, ?, ?)");
+  const roles = roleRows.length
+    ? roleRows
+    : defaultRolePolicies.map(([role, label, scope, detail]) => ({ role, label, scope, detail, updated_at: now }));
+  for (const row of roles) roleInsert.run(scopedOrganizationId, row.role, row.label, row.scope, row.detail, row.updated_at || now);
+}
+
+function parsePolicyRows(rows) {
   return rows.reduce((policy, row) => {
     if (["excluded_processes", "excluded_domains"].includes(row.key)) {
       try {
@@ -539,44 +662,56 @@ function getPolicy(db) {
   }, {});
 }
 
-function getOrganizationSettings(db) {
-  return db.prepare("SELECT key, value FROM organization_settings ORDER BY key").all()
+export function getPolicy(db, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  const rows = db.prepare("SELECT key, value FROM organization_policies WHERE organization_id = ?").all(scopedOrganizationId);
+  return parsePolicyRows(rows.length ? rows : Object.entries(defaultPolicy).map(([key, value]) => ({ key, value: Array.isArray(value) ? JSON.stringify(value) : String(value) })));
+}
+
+function getOrganizationSettings(db, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  return db.prepare("SELECT key, value FROM scoped_organization_settings WHERE organization_id = ? ORDER BY key").all(scopedOrganizationId)
     .reduce((settings, row) => ({ ...settings, [row.key]: row.value }), {});
 }
 
-function getNotificationSettings(db) {
-  return db.prepare("SELECT key, label, enabled, updated_at FROM notification_settings ORDER BY rowid").all()
+function getNotificationSettings(db, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  return db.prepare("SELECT key, label, enabled, updated_at FROM scoped_notification_settings WHERE organization_id = ? ORDER BY rowid").all(scopedOrganizationId)
     .map((row) => ({ ...row, enabled: Boolean(row.enabled) }));
 }
 
-function getActivityCategories(db) {
-  return db.prepare("SELECT id, color, label, detail, enabled, updated_at FROM activity_categories ORDER BY rowid").all()
+function getActivityCategories(db, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  return db.prepare("SELECT id, color, label, detail, enabled, updated_at FROM scoped_activity_categories WHERE organization_id = ? ORDER BY rowid").all(scopedOrganizationId)
     .map((row) => ({ ...row, enabled: Boolean(row.enabled) }));
 }
 
-function getIntegrationSettings(db) {
-  return db.prepare("SELECT key, title, detail, status, enabled, updated_at FROM integration_settings ORDER BY rowid").all()
+function getIntegrationSettings(db, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  return db.prepare("SELECT key, title, detail, status, enabled, updated_at FROM scoped_integration_settings WHERE organization_id = ? ORDER BY rowid").all(scopedOrganizationId)
     .map((row) => ({ ...row, enabled: Boolean(row.enabled) }));
 }
 
-function getRolePolicies(db) {
-  return db.prepare("SELECT role, label, scope, detail, updated_at FROM role_policies ORDER BY CASE role WHEN 'admin' THEN 1 WHEN 'manager' THEN 2 WHEN 'employee' THEN 3 ELSE 4 END").all();
+function getRolePolicies(db, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  return db.prepare("SELECT role, label, scope, detail, updated_at FROM scoped_role_policies WHERE organization_id = ? ORDER BY CASE role WHEN 'admin' THEN 1 WHEN 'manager' THEN 2 WHEN 'employee' THEN 3 ELSE 4 END").all(scopedOrganizationId);
 }
 
-function getAdminSettings(db) {
+export function getAdminSettings(db, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
   const timestamps = [
-    ...db.prepare("SELECT updated_at FROM organization_settings").all(),
-    ...db.prepare("SELECT updated_at FROM notification_settings").all(),
-    ...db.prepare("SELECT updated_at FROM activity_categories").all(),
-    ...db.prepare("SELECT updated_at FROM integration_settings").all(),
-    ...db.prepare("SELECT updated_at FROM role_policies").all(),
+    ...db.prepare("SELECT updated_at FROM scoped_organization_settings WHERE organization_id = ?").all(scopedOrganizationId),
+    ...db.prepare("SELECT updated_at FROM scoped_notification_settings WHERE organization_id = ?").all(scopedOrganizationId),
+    ...db.prepare("SELECT updated_at FROM scoped_activity_categories WHERE organization_id = ?").all(scopedOrganizationId),
+    ...db.prepare("SELECT updated_at FROM scoped_integration_settings WHERE organization_id = ?").all(scopedOrganizationId),
+    ...db.prepare("SELECT updated_at FROM scoped_role_policies WHERE organization_id = ?").all(scopedOrganizationId),
   ].map((row) => Date.parse(row.updated_at)).filter((value) => !Number.isNaN(value));
   return {
-    organization: getOrganizationSettings(db),
-    notifications: getNotificationSettings(db),
-    categories: getActivityCategories(db),
-    integrations: getIntegrationSettings(db),
-    roles: getRolePolicies(db),
+    organization: getOrganizationSettings(db, scopedOrganizationId),
+    notifications: getNotificationSettings(db, scopedOrganizationId),
+    categories: getActivityCategories(db, scopedOrganizationId),
+    integrations: getIntegrationSettings(db, scopedOrganizationId),
+    roles: getRolePolicies(db, scopedOrganizationId),
     updated_at: timestamps.length ? new Date(Math.max(...timestamps)).toISOString() : isoNow(),
   };
 }
@@ -594,32 +729,36 @@ function validateOrganizationSettings(body) {
   return null;
 }
 
-function updateOrganizationSettings(db, body) {
+function updateOrganizationSettings(db, body, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  ensureOrganizationConfiguration(db, scopedOrganizationId);
   const validationError = validateOrganizationSettings(body);
   if (validationError) return { error: validationError };
-  const current = getOrganizationSettings(db);
+  const current = getOrganizationSettings(db, scopedOrganizationId);
   const now = isoNow();
   for (const key of Object.keys(defaultOrganizationSettings)) {
     if (body[key] === undefined || String(body[key]) === String(current[key] ?? "")) continue;
-    db.prepare("INSERT INTO organization_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(key, String(body[key]).trim(), now);
+    db.prepare("INSERT INTO scoped_organization_settings (organization_id, key, value, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(organization_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(scopedOrganizationId, key, String(body[key]).trim(), now);
   }
-  return { settings: getOrganizationSettings(db), changed: Object.keys(defaultOrganizationSettings).some((key) => body[key] !== undefined && String(body[key]) !== String(current[key] ?? "")) };
+  return { settings: getOrganizationSettings(db, scopedOrganizationId), changed: Object.keys(defaultOrganizationSettings).some((key) => body[key] !== undefined && String(body[key]) !== String(current[key] ?? "")) };
 }
 
-function updateNotificationSettings(db, body) {
+function updateNotificationSettings(db, body, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  ensureOrganizationConfiguration(db, scopedOrganizationId);
   const entries = Array.isArray(body?.settings)
     ? body.settings
     : body?.settings && typeof body.settings === "object"
       ? Object.entries(body.settings).map(([key, enabled]) => ({ key, enabled }))
       : [];
   if (!entries.length || entries.length > 20) return { error: "settings must contain notification entries" };
-  const known = new Map(getNotificationSettings(db).map((row) => [row.key, row]));
+  const known = new Map(getNotificationSettings(db, scopedOrganizationId).map((row) => [row.key, row]));
   const now = isoNow();
   for (const entry of entries) {
     if (!known.has(entry?.key) || typeof entry.enabled !== "boolean") return { error: "notification setting is invalid" };
-    db.prepare("UPDATE notification_settings SET enabled = ?, updated_at = ? WHERE key = ?").run(entry.enabled ? 1 : 0, now, entry.key);
+    db.prepare("UPDATE scoped_notification_settings SET enabled = ?, updated_at = ? WHERE organization_id = ? AND key = ?").run(entry.enabled ? 1 : 0, now, scopedOrganizationId, entry.key);
   }
-  return { settings: getNotificationSettings(db) };
+  return { settings: getNotificationSettings(db, scopedOrganizationId) };
 }
 
 function validateCategories(categories) {
@@ -630,34 +769,40 @@ function validateCategories(categories) {
     : "activity category is invalid";
 }
 
-function updateActivityCategories(db, categories) {
+function updateActivityCategories(db, categories, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  ensureOrganizationConfiguration(db, scopedOrganizationId);
   const validationError = validateCategories(categories);
   if (validationError) return { error: validationError };
   const now = isoNow();
-  const update = db.prepare("UPDATE activity_categories SET label = ?, detail = ?, enabled = ?, updated_at = ? WHERE id = ?");
-  for (const item of categories) update.run(item.label.trim(), item.detail.trim(), item.enabled ? 1 : 0, now, item.id);
-  return { categories: getActivityCategories(db) };
+  const update = db.prepare("UPDATE scoped_activity_categories SET label = ?, detail = ?, enabled = ?, updated_at = ? WHERE organization_id = ? AND id = ?");
+  for (const item of categories) update.run(item.label.trim(), item.detail.trim(), item.enabled ? 1 : 0, now, scopedOrganizationId, item.id);
+  return { categories: getActivityCategories(db, scopedOrganizationId) };
 }
 
-function updateIntegrationSettings(db, integrations) {
+function updateIntegrationSettings(db, integrations, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  ensureOrganizationConfiguration(db, scopedOrganizationId);
   if (!Array.isArray(integrations) || integrations.length > 20) return { error: "integrations must be an array" };
-  const known = new Map(getIntegrationSettings(db).map((row) => [row.key, row]));
+  const known = new Map(getIntegrationSettings(db, scopedOrganizationId).map((row) => [row.key, row]));
   const now = isoNow();
   for (const item of integrations) {
     if (!known.has(item?.key) || typeof item.enabled !== "boolean") return { error: "integration setting is invalid" };
-    db.prepare("UPDATE integration_settings SET enabled = ?, updated_at = ? WHERE key = ?").run(item.enabled ? 1 : 0, now, item.key);
+    db.prepare("UPDATE scoped_integration_settings SET enabled = ?, updated_at = ? WHERE organization_id = ? AND key = ?").run(item.enabled ? 1 : 0, now, scopedOrganizationId, item.key);
   }
-  return { integrations: getIntegrationSettings(db) };
+  return { integrations: getIntegrationSettings(db, scopedOrganizationId) };
 }
 
-function updateRolePolicies(db, roles) {
+function updateRolePolicies(db, roles, organizationId = DEFAULT_ORGANIZATION_ID) {
+  const scopedOrganizationId = organizationIdOrDefault(organizationId);
+  ensureOrganizationConfiguration(db, scopedOrganizationId);
   if (!Array.isArray(roles) || roles.length !== defaultRolePolicies.length) return { error: "roles must contain老板、高管和员工" };
   const known = new Set(defaultRolePolicies.map(([role]) => role));
   if (!roles.every((item) => known.has(item?.role) && validSettingString(item.scope, 80) && validSettingString(item.detail, 240))) return { error: "role policy is invalid" };
   const now = isoNow();
-  const update = db.prepare("UPDATE role_policies SET scope = ?, detail = ?, updated_at = ? WHERE role = ?");
-  for (const item of roles) update.run(item.scope.trim(), item.detail.trim(), now, item.role);
-  return { roles: getRolePolicies(db) };
+  const update = db.prepare("UPDATE scoped_role_policies SET scope = ?, detail = ?, updated_at = ? WHERE organization_id = ? AND role = ?");
+  for (const item of roles) update.run(item.scope.trim(), item.detail.trim(), now, scopedOrganizationId, item.role);
+  return { roles: getRolePolicies(db, scopedOrganizationId) };
 }
 
 function sendJson(response, status, payload) {
@@ -829,13 +974,13 @@ function deviceFromRequest(db, request) {
   const token = bearerToken(request);
   if (!token) return null;
   const device = db.prepare(`
-    SELECT d.*, e.name AS employee_name, e.team AS employee_team
+    SELECT d.*, e.name AS employee_name, e.team AS employee_team, e.organization_id
     FROM devices d JOIN employees e ON e.id = d.employee_id
     WHERE d.token_hash = ? AND d.disabled_at IS NULL
   `).get(hash(token));
   if (device) return { ...device, auth_kind: "device" };
   const browser = db.prepare(`
-    SELECT d.*, e.name AS employee_name, e.team AS employee_team,
+    SELECT d.*, e.name AS employee_name, e.team AS employee_team, e.organization_id,
       bt.browser_name, bt.expires_at AS browser_token_expires_at
     FROM browser_tokens bt
     JOIN devices d ON d.id = bt.device_id
@@ -863,11 +1008,15 @@ function recordAudit(db, action, actor, target, detail = "", organizationId = nu
 }
 
 function refreshStaleDeviceStatuses(db) {
-  const heartbeatInterval = Number(getPolicy(db).heartbeat_interval_seconds) || 60;
-  const staleBefore = Date.now() - Math.max(heartbeatInterval * 3, 180) * 1000;
-  const devices = db.prepare("SELECT id, status, last_heartbeat_at FROM devices WHERE disabled_at IS NULL").all();
+  const devices = db.prepare(`
+    SELECT d.id, d.status, d.last_heartbeat_at, e.organization_id
+    FROM devices d JOIN employees e ON e.id = d.employee_id
+    WHERE d.disabled_at IS NULL
+  `).all();
   const update = db.prepare("UPDATE devices SET status = ?, updated_at = ? WHERE id = ?");
   for (const device of devices) {
+    const heartbeatInterval = Number(getPolicy(db, device.organization_id).heartbeat_interval_seconds) || 60;
+    const staleBefore = Date.now() - Math.max(heartbeatInterval * 3, 180) * 1000;
     const lastHeartbeat = Date.parse(device.last_heartbeat_at || "");
     const nextStatus = Number.isNaN(lastHeartbeat) || lastHeartbeat < staleBefore ? "offline" : "online";
     if (nextStatus === device.status) continue;
@@ -2856,15 +3005,20 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
       }
 
       if (method === "GET" && url.pathname === "/api/admin/policy") {
-        if (!requireAdmin(request, adminToken, sessionSecret)) return sendError(response, 401, "admin authentication required", "unauthorized");
-        return sendJson(response, 200, { policy: getPolicy(db) });
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        ensureOrganizationConfiguration(db, organizationId);
+        return sendJson(response, 200, { policy: getPolicy(db, organizationId) });
       }
 
       if (method === "PUT" && url.pathname === "/api/admin/policy") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        ensureOrganizationConfiguration(db, organizationId);
         const body = await readJson(request);
-        const current = getPolicy(db);
+        const current = getPolicy(db, organizationId);
         const nextPolicy = {
           work_hours_start: body?.work_hours_start,
           work_hours_end: body?.work_hours_end,
@@ -2896,73 +3050,85 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         });
         if (changed.length > 0) {
           for (const [key, value] of changed) {
-            db.prepare("UPDATE policies SET value = ? WHERE key = ?").run(value, key);
+            db.prepare("UPDATE organization_policies SET value = ? WHERE organization_id = ? AND key = ?").run(value, organizationId, key);
           }
           const version = Number(current.version || 0) + 1;
-          db.prepare("UPDATE policies SET value = ? WHERE key = ?").run(String(version), "version");
+          db.prepare("UPDATE organization_policies SET value = ? WHERE organization_id = ? AND key = ?").run(String(version), organizationId, "version");
           recordAudit(
             db,
             "policy_changed",
-            "admin",
+            principal.actor || "admin",
             "agent_policy",
             `work hours=${nextPolicy.work_hours_start}-${nextPolicy.work_hours_end}; activity checkpoint=${nextPolicy.activity_checkpoint_seconds}s; excluded processes=${nextPolicy.excluded_processes.length}; excluded domains=${nextPolicy.excluded_domains.length}`,
+            organizationId,
           );
         }
-        return sendJson(response, 200, { policy: getPolicy(db) });
+        return sendJson(response, 200, { policy: getPolicy(db, organizationId) });
       }
 
       if (method === "GET" && url.pathname === "/api/admin/settings") {
-        if (!requireAdmin(request, adminToken, sessionSecret)) return sendError(response, 401, "admin authentication required", "unauthorized");
-        return sendJson(response, 200, getAdminSettings(db));
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        ensureOrganizationConfiguration(db, organizationId);
+        return sendJson(response, 200, getAdminSettings(db, organizationId));
       }
 
       if (method === "PUT" && url.pathname === "/api/admin/settings/organization") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
-        const result = updateOrganizationSettings(db, await readJson(request));
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        const result = updateOrganizationSettings(db, await readJson(request), organizationId);
         if (result.error) return sendError(response, 400, result.error, "invalid_settings");
-        if (result.changed) recordAudit(db, "organization_settings_changed", principal.actor || "admin", "organization_settings", "organization profile updated");
+        if (result.changed) recordAudit(db, "organization_settings_changed", principal.actor || "admin", "organization_settings", "organization profile updated", organizationId);
         return sendJson(response, 200, { organization: result.settings });
       }
 
       if (method === "PUT" && url.pathname === "/api/admin/settings/notifications") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
-        const result = updateNotificationSettings(db, await readJson(request));
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        const result = updateNotificationSettings(db, await readJson(request), organizationId);
         if (result.error) return sendError(response, 400, result.error, "invalid_settings");
-        recordAudit(db, "notification_settings_changed", principal.actor || "admin", "notification_settings", "notification rules updated");
+        recordAudit(db, "notification_settings_changed", principal.actor || "admin", "notification_settings", "notification rules updated", organizationId);
         return sendJson(response, 200, { notifications: result.settings });
       }
 
       if (method === "PUT" && url.pathname === "/api/admin/settings/categories") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
-        const result = updateActivityCategories(db, (await readJson(request)).categories);
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        const result = updateActivityCategories(db, (await readJson(request)).categories, organizationId);
         if (result.error) return sendError(response, 400, result.error, "invalid_settings");
-        recordAudit(db, "activity_categories_changed", principal.actor || "admin", "activity_categories", "activity categories updated");
+        recordAudit(db, "activity_categories_changed", principal.actor || "admin", "activity_categories", "activity categories updated", organizationId);
         return sendJson(response, 200, { categories: result.categories });
       }
 
       if (method === "PUT" && url.pathname === "/api/admin/settings/integrations") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
-        const result = updateIntegrationSettings(db, (await readJson(request)).integrations);
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        const result = updateIntegrationSettings(db, (await readJson(request)).integrations, organizationId);
         if (result.error) return sendError(response, 400, result.error, "invalid_settings");
-        recordAudit(db, "integration_settings_changed", principal.actor || "admin", "integration_settings", "integration settings updated");
+        recordAudit(db, "integration_settings_changed", principal.actor || "admin", "integration_settings", "integration settings updated", organizationId);
         return sendJson(response, 200, { integrations: result.integrations });
       }
 
       if (method === "GET" && url.pathname === "/api/admin/roles") {
-        if (!requireAdmin(request, adminToken, sessionSecret)) return sendError(response, 401, "admin authentication required", "unauthorized");
-        return sendJson(response, 200, { roles: getRolePolicies(db) });
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        ensureOrganizationConfiguration(db, organizationId);
+        return sendJson(response, 200, { roles: getRolePolicies(db, organizationId) });
       }
 
       if (method === "PUT" && url.pathname === "/api/admin/roles") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
-        const result = updateRolePolicies(db, (await readJson(request)).roles);
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        const result = updateRolePolicies(db, (await readJson(request)).roles, organizationId);
         if (result.error) return sendError(response, 400, result.error, "invalid_role_policy");
-        recordAudit(db, "role_policies_changed", principal.actor || "admin", "role_policies", "role data scopes updated");
+        recordAudit(db, "role_policies_changed", principal.actor || "admin", "role_policies", "role data scopes updated", organizationId);
         return sendJson(response, 200, { roles: result.roles });
       }
 
@@ -3224,7 +3390,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const validationError = validateEnrollment(body);
         if (validationError) return sendError(response, 400, validationError);
         const registration = db.prepare(`
-          SELECT rc.id, rc.employee_id, rc.expires_at, e.name AS employee_name, e.team AS employee_team
+          SELECT rc.id, rc.employee_id, rc.expires_at, e.name AS employee_name, e.team AS employee_team, e.organization_id
           FROM registration_codes rc JOIN employees e ON e.id = rc.employee_id
           WHERE rc.code_hash = ? AND rc.used_at IS NULL
         `).get(hash(body.registration_code.trim().toUpperCase()));
@@ -3252,7 +3418,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           device_id: deviceId,
           device_token: token,
           employee: { id: registration.employee_id, name: registration.employee_name, team: registration.employee_team },
-          policy: getPolicy(db),
+          policy: getPolicy(db, registration.organization_id),
           server_time: now,
         });
       }
@@ -3315,7 +3481,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
       if (method === "GET" && url.pathname === "/api/agent/policy") {
         const device = deviceFromRequest(db, request);
         if (!device || device.auth_kind !== "device") return sendError(response, 401, "valid device token required", "unauthorized");
-        return sendJson(response, 200, { policy: getPolicy(db) });
+        return sendJson(response, 200, { policy: getPolicy(db, device.organization_id) });
       }
 
       if (method === "POST" && url.pathname === "/api/agent/events") {
@@ -3325,7 +3491,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const body = await readJson(request);
         const validationError = validateEvents(body);
         if (validationError) return sendError(response, 400, validationError);
-        const policy = getPolicy(db);
+        const policy = getPolicy(db, device.organization_id);
         const acceptedEvents = body.events.filter((event) => !eventExcludedByPolicy(event, policy));
         const insert = db.prepare(`
           INSERT INTO events
@@ -3369,7 +3535,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           device.id,
         );
         if (wasOffline) recordAudit(db, "agent_online", "system", device.id, "heartbeat resumed");
-        return sendJson(response, 200, { ok: true, server_time: now, policy: getPolicy(db) });
+        return sendJson(response, 200, { ok: true, server_time: now, policy: getPolicy(db, device.organization_id) });
       }
 
       return sendError(response, 404, "route not found", "not_found");

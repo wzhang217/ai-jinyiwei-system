@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { createAgentServer, processMemoryGenerationJobs, rankHistoryRecords, searchHistoryRecords } from "../src/index.mjs";
+import { createAgentServer, ensureOrganizationConfiguration, getAdminSettings, getPolicy, processMemoryGenerationJobs, rankHistoryRecords, searchHistoryRecords } from "../src/index.mjs";
 import { createAiService } from "../src/ai.mjs";
 
 async function withServer(callback, options = {}) {
@@ -1815,6 +1815,35 @@ test("persists admin settings, role scopes, and notification rules with server R
     const audit = await jsonFetch(`${base}/api/admin/audit`, { headers: adminHeaders });
     assert.ok(audit.body.logs.some((item) => item.action === "organization_settings_changed"));
     assert.ok(audit.body.logs.some((item) => item.action === "activity_categories_changed"));
+  });
+});
+
+test("isolates organization configuration and keeps audit logs append-only", async () => {
+  await withServer(async ({ base, app }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const now = new Date().toISOString();
+    app.db.prepare("INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run("org_other", "另一企业", "other", now, now);
+    ensureOrganizationConfiguration(app.db, "org_other", now);
+
+    const defaultPolicy = await jsonFetch(`${base}/api/admin/policy`, { headers: adminHeaders });
+    assert.equal(defaultPolicy.body.policy.work_hours_start, "09:00");
+    app.db.prepare("UPDATE organization_policies SET value = ? WHERE organization_id = ? AND key = ?").run("00:00", "org_other", "work_hours_start");
+    app.db.prepare("UPDATE scoped_organization_settings SET value = ? WHERE organization_id = ? AND key = ?").run("另一企业", "org_other", "company_name");
+    assert.equal(getPolicy(app.db, "org_other").work_hours_start, "00:00");
+    assert.equal(getPolicy(app.db, "org_default").work_hours_start, "09:00");
+    assert.equal(getAdminSettings(app.db, "org_other").organization.company_name, "另一企业");
+    assert.notEqual(getAdminSettings(app.db, "org_default").organization.company_name, "另一企业");
+
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    assert.equal(code.response.status, 201);
+    const audit = app.db.prepare("SELECT id FROM audit_logs ORDER BY created_at DESC LIMIT 1").get();
+    assert.ok(audit?.id);
+    assert.throws(() => app.db.prepare("UPDATE audit_logs SET detail = ? WHERE id = ?").run("tampered", audit.id), /audit_logs_are_append_only/);
+    assert.throws(() => app.db.prepare("DELETE FROM audit_logs WHERE id = ?").run(audit.id), /audit_logs_are_append_only/);
   });
 });
 
