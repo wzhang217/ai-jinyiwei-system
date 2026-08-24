@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily AI锦衣卫 Agent Server database backup
+
+[Timer]
+OnCalendar=*-*-* 03:15:00
+Persistent=true
+RandomizedDelaySec=15m
+Unit=ai-jinyiwei-agent-backup.service
+
+[Install]
+WantedBy=timers.target

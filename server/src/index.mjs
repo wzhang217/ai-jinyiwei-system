@@ -1211,6 +1211,11 @@ function configuredCorsOrigins() {
     .filter(Boolean);
 }
 
+function bootstrapTokenAllowed() {
+  return process.env.AGENT_ALLOW_BOOTSTRAP_TOKEN === "true"
+    || (process.env.AGENT_ALLOW_BOOTSTRAP_TOKEN !== "false" && process.env.NODE_ENV !== "production");
+}
+
 function corsOriginAllowed(request) {
   const origin = String(request?.headers?.origin || "").trim();
   if (!origin) return true;
@@ -1228,7 +1233,7 @@ function corsHeaders(request) {
   return {
     "access-control-allow-origin": allowOrigin,
     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
-    "access-control-allow-headers": "content-type, authorization, x-admin-token, x-admin-session",
+    "access-control-allow-headers": `content-type, authorization, x-admin-session${bootstrapTokenAllowed() ? ", x-admin-token" : ""}`,
     "access-control-max-age": "600",
     "vary": "Origin",
     "x-content-type-options": "nosniff",
@@ -1346,11 +1351,11 @@ function revokeDatabaseSession(db, token) {
   return Number(result.changes || 0) > 0;
 }
 
-function resolveAdminPrincipal(request, adminToken, sessionSecret = adminToken, db = null) {
+function resolveAdminPrincipal(request, adminToken, sessionSecret = adminToken, db = null, { allowBootstrapToken = bootstrapTokenAllowed() } = {}) {
   const token = request.headers["x-admin-session"] || "";
   const databasePrincipal = db ? databaseSessionPrincipal(db, token) : null;
   if (databasePrincipal) return databasePrincipal;
-  if (request.headers["x-admin-token"] === adminToken) {
+  if (allowBootstrapToken && request.headers["x-admin-token"] === adminToken) {
     return { role: "admin", actor: "admin", employee_id: null, team: null, organization_id: DEFAULT_ORGANIZATION_ID, source: "bootstrap" };
   }
   const payload = verifyAdminSession(token, sessionSecret);
@@ -3132,8 +3137,11 @@ function readPersistedMemoryRecords(db, { deviceId = null, principal = null, tea
 
 function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, logger = console }) {
   // Keep the old x-admin-token path available for one-time migration and CLI
-  // operations, while all web sessions use revocable database-backed tokens.
-  const requireAdmin = (request) => resolveAdminPrincipal(request, adminToken, sessionSecret, db);
+  // operations in development or during an explicitly enabled maintenance
+  // window. Production web sessions always use revocable database-backed
+  // tokens; the bootstrap header is disabled unless explicitly opted in.
+  const allowBootstrapToken = bootstrapTokenAllowed();
+  const requireAdmin = (request) => resolveAdminPrincipal(request, adminToken, sessionSecret, db, { allowBootstrapToken });
   const requestBuckets = new Map();
   const requestsPerMinute = Math.max(60, Number(process.env.HTTP_RATE_LIMIT_PER_MINUTE) || 600);
   const withinRateLimit = (request) => {
@@ -3302,7 +3310,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
       }
 
       if (method === "POST" && url.pathname === "/api/admin/sessions") {
-        if (process.env.NODE_ENV === "production") {
+        if (!allowBootstrapToken) {
           return sendError(response, 410, "bootstrap identity sessions are disabled in production; use account login", "bootstrap_sessions_disabled");
         }
         if (request.headers["x-admin-token"] !== adminToken) return sendError(response, 401, "bootstrap admin authentication required", "unauthorized");
@@ -4396,7 +4404,8 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
 export function createAgentServer({ dbPath = process.env.AGENT_DB_PATH || defaultDbPath, adminToken = process.env.AGENT_ADMIN_TOKEN || `admin_${randomBytes(18).toString("base64url")}`, sessionSecret = process.env.AGENT_SESSION_SECRET || adminToken, logger = console, ai = createAiService({ logger }) } = {}) {
   if (process.env.NODE_ENV === "production") {
     if (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD.length < 12) throw new Error("production requires ADMIN_PASSWORD with at least 12 characters");
-    if (isWeakSecret(process.env.AGENT_ADMIN_TOKEN)) throw new Error("production requires a random AGENT_ADMIN_TOKEN with at least 32 characters");
+    const allowBootstrapToken = process.env.AGENT_ALLOW_BOOTSTRAP_TOKEN === "true";
+    if (allowBootstrapToken && isWeakSecret(process.env.AGENT_ADMIN_TOKEN)) throw new Error("production requires a random AGENT_ADMIN_TOKEN with at least 32 characters when bootstrap access is enabled");
     if (!process.env.AGENT_SESSION_SECRET || process.env.AGENT_SESSION_SECRET.length < 32) throw new Error("production requires a random AGENT_SESSION_SECRET with at least 32 characters");
     if (!process.env.AGENT_CORS_ORIGIN || process.env.AGENT_CORS_ORIGIN === "*") throw new Error("production requires an explicit AGENT_CORS_ORIGIN");
     const productionOrigins = configuredCorsOrigins();

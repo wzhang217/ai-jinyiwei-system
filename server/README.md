@@ -15,7 +15,7 @@ cp .env.example .env
 npm start
 ```
 
-`npm start` 和 `npm run dev` 会自动读取 `server/.env`。默认监听 `0.0.0.0:8787`。首次启动时，如果 `ADMIN_PASSWORD` 已设置，服务端会创建一个管理员账号；之后管理后台使用用户名和密码登录，服务端签发可撤销的数据库会话。`AGENT_ADMIN_TOKEN` 仅保留给迁移脚本和 CLI，不能放入 `app/.env` 或前端构建产物。正式试点请设置随机的 `AGENT_SESSION_SECRET`、明确的 `AGENT_CORS_ORIGIN`，并在反向代理后使用 HTTPS。
+`npm start` 和 `npm run dev` 会自动读取 `server/.env`。默认监听 `0.0.0.0:8787`。首次启动时，如果 `ADMIN_PASSWORD` 已设置，服务端会创建一个管理员账号；之后管理后台使用用户名和密码登录，服务端签发可撤销的数据库会话。生产环境默认拒绝 `x-admin-token`，不能把管理员 Token 放入 `app/.env` 或前端构建产物；只有设置 `AGENT_ALLOW_BOOTSTRAP_TOKEN=true` 才会临时开放维护入口。正式试点请设置随机的 `AGENT_SESSION_SECRET`、明确的 `AGENT_CORS_ORIGIN`，并在反向代理后使用 HTTPS。
 
 ### 管理后台登录
 
@@ -36,10 +36,12 @@ AUTH_LOCKOUT_SECONDS=900
 
 ### 数据库迁移、备份与恢复
 
-服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 5，包含组织归属字段、按组织隔离的采集策略和企业设置、隐私策略确认记录、账号登录失败保护以及账号 MFA 密钥字段；旧版 SQLite 会在启动时补列并建立组织配置，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
+服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 7，包含组织归属字段、按组织隔离的采集策略和企业设置、隐私策略确认记录、账号登录失败保护、账号 MFA 密钥字段、AI 用量统计和审计日志哈希链；旧版 SQLite 会在启动时补列并建立组织配置，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
 
 ```bash
 npm run backup
+# 创建已校验备份并删除超过保留天数的旧备份（默认 14 天）
+npm run backup:rotate
 # 或指定源库和备份文件
 AGENT_DB_PATH=./data/agent.sqlite AGENT_BACKUP_PATH=./data/backups/manual.sqlite npm run backup
 
@@ -48,6 +50,15 @@ AGENT_RESTORE_PATH=./data/backups/manual.sqlite npm run restore-check
 ```
 
 `npm run backup` 会先校验源库，再使用 SQLite `VACUUM INTO` 生成一致性备份，并重新打开备份校验 `integrity_check` 和 `foreign_key_check`；任一步失败都会返回非零退出码。恢复前先停止服务端，用 `npm run restore-check` 校验备份，再用经过校验的备份文件替换 `AGENT_DB_PATH`，然后启动服务并检查 `/health`、设备心跳、历史记录和审计日志。不要在服务运行时直接覆盖 SQLite 文件；备份文件应进入企业自己的加密存储和异地保留策略。
+
+Linux systemd 可用仓库内的 `deploy/ai-jinyiwei-agent-backup.service` 和 `deploy/ai-jinyiwei-agent-backup.timer` 每日生成并轮换备份：
+
+```bash
+sudo cp deploy/ai-jinyiwei-agent-backup.service deploy/ai-jinyiwei-agent-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now ai-jinyiwei-agent-backup.timer
+sudo systemctl list-timers ai-jinyiwei-agent-backup.timer
+```
 
 ## AI 摘要与 History Skill
 
@@ -133,7 +144,7 @@ AI 摘要和活动采集采用不同频率：Agent 仍按采集策略实时上�
 
 审计日志除 SQLite 的追加写入保护外，新写入记录还带有按企业隔离的 `previous_hash` / `entry_hash` 哈希链。老板可调用 `GET /api/admin/audit/verify` 或在后台“审计”页查看校验结果；从旧版本升级的历史记录会显示为“历史旧记录”，不会被伪装成已完成哈希校验。
 
-管理员可以先预览再执行数据留存删除，删除活动事件、Leaf/Rollup Summary，并写入审计日志：
+管理员可以先预览再执行数据留存删除，删除活动事件、Leaf/Rollup Summary，并写入审计日志。下面的 `x-admin-token` 示例仅用于开发环境或已明确开启 bootstrap 维护窗口的临时操作，生产管理后台应使用账号会话：
 
 ```bash
 curl -X POST http://localhost:8787/api/admin/retention \
@@ -148,7 +159,7 @@ curl -X POST http://localhost:8787/api/admin/retention \
   -d '{"before":"2026-05-01T00:00:00.000Z","apply":true}'
 ```
 
-迁移期间仍可以用启动 Token 换取有范围的旧版会话令牌：
+开发或迁移期间仍可以用启动 Token 换取有范围的旧版会话令牌；生产默认关闭此入口，临时开启后应在维护完成立即恢复 `AGENT_ALLOW_BOOTSTRAP_TOKEN=false` 并重启服务：
 
 ```bash
 curl -X POST http://localhost:8787/api/admin/sessions \
@@ -157,7 +168,7 @@ curl -X POST http://localhost:8787/api/admin/sessions \
   -d '{"role":"employee","employee_id":"employee-wei"}'
 ```
 
-之后用返回的 Token 放在 `x-admin-session` 中访问历史、设备、事件和问答接口。正式管理后台通过 `POST /api/auth/login` 创建数据库会话，并可通过 `POST /api/auth/logout` 撤销；旧版启动 Token 仅用于迁移脚本和 CLI。
+之后用返回的 Token 放在 `x-admin-session` 中访问历史、设备、事件和问答接口。正式管理后台通过 `POST /api/auth/login` 创建数据库会话，并可通过 `POST /api/auth/logout` 撤销；旧版启动 Token 不进入前端构建产物。
 
 浏览器来源扩展位于 `../agent/browser-extension/`，Chrome 和 Edge 共用同一套 MV3 文件，并继续调用 `/api/agent/events`。正式配对流程如下：
 

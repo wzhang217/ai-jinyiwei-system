@@ -1482,11 +1482,12 @@ test("locks an account after repeated login failures and resets protection after
 });
 
 test("rejects weak production secrets before opening the service", () => {
-  const names = ["NODE_ENV", "ADMIN_PASSWORD", "AGENT_ADMIN_TOKEN", "AGENT_SESSION_SECRET", "AGENT_CORS_ORIGIN"];
+  const names = ["NODE_ENV", "ADMIN_PASSWORD", "AGENT_ADMIN_TOKEN", "AGENT_ALLOW_BOOTSTRAP_TOKEN", "AGENT_SESSION_SECRET", "AGENT_CORS_ORIGIN"];
   const previous = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   try {
     process.env.NODE_ENV = "production";
     process.env.ADMIN_PASSWORD = "a-production-password-long-enough";
+    process.env.AGENT_ALLOW_BOOTSTRAP_TOKEN = "true";
     delete process.env.AGENT_ADMIN_TOKEN;
     process.env.AGENT_SESSION_SECRET = "a-production-session-secret-that-is-long-enough-123456";
     process.env.AGENT_CORS_ORIGIN = "https://history.example.com";
