@@ -211,7 +211,17 @@ npm run directory:import -- \
   --file ./customer-directory.csv
 ```
 
-JSON 可以是员工数组，也可以是 `{ "employees": [...] }`。脚本具备组织隔离、重复员工 ID 拒绝、事务回滚和审计记录；重复执行同一文件是幂等的。它不会自动停用缺失员工，停用应由管理员确认后在后台完成。
+JSON 可以是员工数组，也可以是 `{ "employees": [...] }`。脚本具备组织隔离、重复员工 ID 拒绝、事务回滚和审计记录；重复执行同一文件是幂等的。默认不会因为一次不完整的文件停用人员。确认文件是完整的客户目录后，才使用显式停用选项；它会停用目录中缺失员工关联的账号和设备，并保留员工、设备和审计记录：
+
+```bash
+AGENT_DB_PATH=./data/agent.sqlite \
+npm run directory:import -- \
+  --organization-id customer_acme \
+  --file ./customer-directory.csv \
+  --deactivate-missing
+```
+
+建议先加 `--dry-run` 检查 `missing_employees`、`disabled_accounts` 和 `disabled_devices` 数量，再执行正式导入。
 
 管理后台的“立即刷新”会重新读取 `GET /api/admin/history`，历史记录页的导出会调用 `POST /api/admin/history/export`，服务端返回当前权限范围内的记录并写入 `history_exported` 审计日志。设备列表读取真实心跳；超过策略心跳间隔的设备会被标记为离线，并写入 `agent_offline`，恢复心跳后写入 `agent_online`。
 

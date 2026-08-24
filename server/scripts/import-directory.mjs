@@ -16,6 +16,7 @@ const pick = (name, envName, fallback = "") => String(args.get(name) || process.
 const organizationId = pick("organization-id", "DIRECTORY_IMPORT_ORGANIZATION_ID");
 const fileName = pick("file", "DIRECTORY_IMPORT_FILE");
 const dryRun = args.has("dry-run") && String(args.get("dry-run")).toLowerCase() !== "false";
+const deactivateMissing = args.has("deactivate-missing") && String(args.get("deactivate-missing")).toLowerCase() !== "false";
 
 if (!organizationId) throw new Error("--organization-id or DIRECTORY_IMPORT_ORGANIZATION_ID is required");
 if (!fileName) throw new Error("--file or DIRECTORY_IMPORT_FILE is required");
@@ -101,9 +102,15 @@ try {
   const existing = db.prepare("SELECT id, organization_id FROM employees WHERE id = ?");
   const insert = db.prepare("INSERT INTO employees (id, name, team, organization_id, created_at) VALUES (?, ?, ?, ?, ?)");
   const update = db.prepare("UPDATE employees SET name = ?, team = ? WHERE id = ? AND organization_id = ?");
+  const currentEmployees = db.prepare("SELECT id FROM employees WHERE organization_id = ?").all(organizationId);
+  const missingEmployeeIds = currentEmployees.map((row) => row.id).filter((id) => !ids.has(id));
+  const disableAccounts = db.prepare("UPDATE user_accounts SET disabled_at = COALESCE(disabled_at, ?), updated_at = ? WHERE organization_id = ? AND employee_id = ? AND disabled_at IS NULL");
+  const disableDevices = db.prepare("UPDATE devices SET status = 'disabled', disabled_at = COALESCE(disabled_at, ?), updated_at = ? WHERE employee_id = ? AND disabled_at IS NULL");
   const now = new Date().toISOString();
   let created = 0;
   let updated = 0;
+  let disabledAccounts = 0;
+  let disabledDevices = 0;
 
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -120,10 +127,18 @@ try {
         created += 1;
       }
     }
+    if (deactivateMissing) {
+      for (const employeeId of missingEmployeeIds) {
+        const accountResult = disableAccounts.run(now, now, organizationId, employeeId);
+        const deviceResult = disableDevices.run(now, now, employeeId);
+        disabledAccounts += Number(accountResult.changes || 0);
+        disabledDevices += Number(deviceResult.changes || 0);
+      }
+    }
     if (dryRun) {
       db.exec("ROLLBACK");
     } else {
-      recordAudit(db, "directory_imported", "directory-import", organizationId, `rows=${rows.length};created=${created};updated=${updated}`, organizationId);
+      recordAudit(db, "directory_imported", "directory-import", organizationId, `rows=${rows.length};created=${created};updated=${updated};deactivate_missing=${deactivateMissing};disabled_accounts=${disabledAccounts};disabled_devices=${disabledDevices}`, organizationId);
       db.exec("COMMIT");
     }
   } catch (error) {
@@ -131,7 +146,7 @@ try {
     throw error;
   }
 
-  console.log(JSON.stringify({ ok: true, dry_run: dryRun, organization_id: organizationId, rows: rows.length, created, updated }));
+  console.log(JSON.stringify({ ok: true, dry_run: dryRun, deactivate_missing: deactivateMissing, organization_id: organizationId, rows: rows.length, created, updated, missing_employees: missingEmployeeIds.length, disabled_accounts: disabledAccounts, disabled_devices: disabledDevices }));
 } finally {
   await app.close();
 }

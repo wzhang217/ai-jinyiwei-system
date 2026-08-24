@@ -39,7 +39,7 @@ import {
 } from "@phosphor-icons/react";
 import { historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, downloadRecordsMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, deleteLivePrivacySubject, exportLiveAudit, exportLivePrivacySubject, getAdminAccounts, getLiveAdminSettings, getLiveAiUsage, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, resetAdminAccountPassword, runRetention, setAdminAccountStatus, setLiveDeviceStatus, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateNotificationSettings, updateOrganizationSettings, verifyLiveAuditIntegrity } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, deleteLivePrivacySubject, exportLiveAudit, exportLivePrivacySubject, getAdminAccounts, getLiveAdminSettings, getLiveAiUsage, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, resetAdminAccountPassword, runRetention, setAdminAccountStatus, setLiveDeviceStatus, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateLiveRolePolicies, updateNotificationSettings, updateOrganizationSettings, verifyLiveAuditIntegrity } from "./services/agentApi.js";
 import { auditData, deviceData, employeeData, permissionRoles, settingsData, teamData } from "./adminData.js";
 import { SHANGHAI_TIME_ZONE, formatShanghaiTime, shanghaiDateAtStart, shanghaiDateInput, shanghaiDayKey, shanghaiWeekKey } from "./time.js";
 
@@ -796,9 +796,33 @@ function PermissionsPage({ role, principal, target, onToast }) {
     getLiveRolePolicies().then(setLiveRoles).catch((requestError) => setError(requestError.message));
     return undefined;
   }, []);
-  const roleItems = liveRoles ? liveRoles.map((item) => ({ ...item, role: item.label, users: "—" })) : demoMode ? permissionRoles : [];
   const tabs = canEdit ? ["账号", "角色", "组织关系", "数据范围", "采集策略", "应用/网站排除", "保留策略"] : ["角色", "组织关系", "数据范围", "采集策略", "应用/网站排除", "保留策略"];
-  return <div className="page-content"><PageHeader eyebrow="ACCESS CONTROL" title="权限" description="管理老板、高管、员工三种角色、数据范围和采集策略。" meta="RBAC 已启用" action={<span className="scope-pill"><Key size={17} />固定三种角色</span>} />{error && <div className="error-box">权限配置读取失败：{error.message || error}</div>}<Tabs tabs={tabs} active={tab} onChange={setTab} />{tab === "账号" && canEdit && <AccountManagement onToast={onToast} />}{tab === "角色" && <SectionCard title="角色权限" description="系统只保留老板、高管、员工三种角色，权限由服务端强制执行">{roleItems.length ? <div className="role-list">{roleItems.map((item) => <div className="role-row" key={item.role}><span className="role-icon"><Key size={18} /></span><span><strong>{item.role}</strong><small>{item.scope} · {item.users || "—"} 人 · {item.description || item.detail}</small></span></div>)}</div> : <EmptyState title={agentApiEnabled ? "暂无真实角色策略" : "连接服务端后显示角色策略"} />}</SectionCard>}{tab === "组织关系" && <OrgTree principal={principal} onToast={onToast} />}{tab === "数据范围" && <ScopePolicy role={role} onToast={onToast} />}{tab === "采集策略" && <PolicyEditor role={role} onToast={onToast} />}{tab === "应用/网站排除" && <ExclusionPolicy role={role} onToast={onToast} />}{tab === "保留策略" && <RetentionPolicy role={role} onToast={onToast} />}</div>;
+  return <div className="page-content"><PageHeader eyebrow="ACCESS CONTROL" title="权限" description="管理老板、高管、员工三种角色、数据范围和采集策略。" meta="RBAC 已启用" action={<span className="scope-pill"><Key size={17} />固定三种角色</span>} />{error && <div className="error-box">权限配置读取失败：{error.message || error}</div>}<Tabs tabs={tabs} active={tab} onChange={setTab} />{tab === "账号" && canEdit && <AccountManagement onToast={onToast} />}{tab === "角色" && <RolePolicyEditor roles={liveRoles} canEdit={canEdit} onChanged={setLiveRoles} onToast={onToast} />}{tab === "组织关系" && <OrgTree principal={principal} onToast={onToast} />}{tab === "数据范围" && <ScopePolicy role={role} onToast={onToast} />}{tab === "采集策略" && <PolicyEditor role={role} onToast={onToast} />}{tab === "应用/网站排除" && <ExclusionPolicy role={role} onToast={onToast} />}{tab === "保留策略" && <RetentionPolicy role={role} onToast={onToast} />}</div>;
+}
+
+function RolePolicyEditor({ roles, canEdit, onChanged, onToast }) {
+  const fallback = permissionRoles.map((item, index) => ({ role: ["admin", "manager", "employee"][index], label: item.role, scope: item.scope, detail: item.description }));
+  const [draft, setDraft] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const source = roles || (demoMode ? fallback : []);
+  useEffect(() => {
+    setDraft(source.map((item) => ({ role: item.role, label: item.label || item.role, scope: item.scope || "", detail: item.detail || item.description || "" })));
+  }, [roles]);
+  const update = (roleName, key, value) => setDraft((current) => current.map((item) => item.role === roleName ? { ...item, [key]: value } : item));
+  const save = async () => {
+    if (!canEdit) return onToast("当前角色只能查看角色范围；请由老板编辑");
+    setSaving(true);
+    try {
+      const saved = agentApiEnabled ? await updateLiveRolePolicies(draft.map(({ role, scope, detail }) => ({ role, scope, detail }))) : draft;
+      onChanged(saved);
+      onToast("角色数据范围已保存并写入审计");
+    } catch (error) {
+      onToast(`角色范围保存失败：${error.message}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <SectionCard title="角色权限" description="系统只保留老板、高管、员工三种角色，权限由服务端强制执行；老板可以调整数据范围标签和说明">{draft.length ? <><div className="role-list">{draft.map((item) => <div className="role-row" key={item.role}><span className="role-icon"><Key size={18} /></span><span><strong>{item.label}</strong><input className="inline-setting-input detail" disabled={!canEdit} value={item.scope} onChange={(event) => update(item.role, "scope", event.target.value)} aria-label={`${item.label}数据范围`} /><small><input className="inline-setting-input detail" disabled={!canEdit} value={item.detail} onChange={(event) => update(item.role, "detail", event.target.value)} aria-label={`${item.label}权限说明`} /></small></span></div>)}</div><button className="outline-button" disabled={!canEdit || saving} onClick={() => void save()}><CheckCircle size={16} />{saving ? "保存中…" : canEdit ? "保存角色范围" : "老板可编辑"}</button></> : <EmptyState title={agentApiEnabled ? "暂无真实角色策略" : "连接服务端后显示角色策略"} />}</SectionCard>;
 }
 
 function AccountManagement({ onToast }) {

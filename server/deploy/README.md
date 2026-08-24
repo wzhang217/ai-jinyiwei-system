@@ -37,6 +37,8 @@ sudo -u jinyiwei bash -lc 'cd /opt/ai-jinyiwei/server && npm run ops:check'
 
 健康检查失败会触发 `ai-jinyiwei-agent-health-alert.service`。没有配置 webhook 时，故障仍会写入 journald；配置 webhook 后会按 `HEALTH_ALERT_COOLDOWN_SECONDS` 抑制重复通知。
 
+systemd 服务在每次启动前自动执行 `preflight-production`；密钥、HTTPS 来源、持久化路径、备份保留期或磁盘阈值不符合要求时，服务不会监听端口。修改 `/etc/ai-jinyiwei/server.env` 后直接重启即可重新检查。
+
 AI 用量告警由服务进程按组织和告警类型抑制重复通知，额度比例由 `AI_BUDGET_ALERT_RATIO` 和 `AI_REQUEST_ALERT_RATIO` 控制。正式交付前应使用企业告警系统的 HTTPS 地址，并在测试环境验证失败、阻断和恢复三种状态。
 
 ## HTTPS 反向代理

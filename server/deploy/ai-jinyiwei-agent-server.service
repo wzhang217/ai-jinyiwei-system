@@ -9,6 +9,7 @@ User=jinyiwei
 Group=jinyiwei
 WorkingDirectory=/opt/ai-jinyiwei/server
 EnvironmentFile=/etc/ai-jinyiwei/server.env
+ExecStartPre=/usr/bin/node --env-file-if-exists=.env scripts/preflight-production.mjs
 ExecStart=/usr/bin/node --env-file-if-exists=.env --experimental-sqlite src/index.mjs
 Restart=always
 RestartSec=5
