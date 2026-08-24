@@ -61,18 +61,39 @@ async function request(path, options = {}, { publicEndpoint = false } = {}) {
     },
   });
   const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.error?.message || `Agent API HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(body.error?.message || `Agent API HTTP ${response.status}`);
+    error.code = body.error?.code || "request_failed";
+    error.status = response.status;
+    throw error;
+  }
   return body;
 }
 
-export async function loginAdmin(username, password) {
+export async function loginAdmin(username, password, otp = "") {
   const body = await request("/api/auth/login", {
     method: "POST",
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username, password, ...(otp ? { otp } : {}) }),
   }, { publicEndpoint: true });
   setAdminSession(body.token);
   setAdminPrincipal(body.principal);
   return body;
+}
+
+export async function getLiveMfaStatus() {
+  return request("/api/auth/mfa/status");
+}
+
+export async function setupLiveMfa() {
+  return request("/api/auth/mfa/setup", { method: "POST" });
+}
+
+export async function enableLiveMfa(secret, code) {
+  return request("/api/auth/mfa/enable", { method: "POST", body: JSON.stringify({ secret, code }) });
+}
+
+export async function disableLiveMfa(code) {
+  return request("/api/auth/mfa/disable", { method: "POST", body: JSON.stringify({ code }) });
 }
 
 export async function getAdminMe() {
@@ -213,6 +234,21 @@ export async function updateIntegrationSettings(integrations) {
     body: JSON.stringify({ integrations }),
   });
   return body.integrations || [];
+}
+
+export async function getLivePrivacyPolicy() {
+  return request("/api/admin/privacy/policy");
+}
+
+export async function updateLivePrivacyPolicy(policy) {
+  return request("/api/admin/privacy/policy", {
+    method: "PUT",
+    body: JSON.stringify({
+      version: policy.version,
+      title: policy.title,
+      notice: policy.notice,
+    }),
+  });
 }
 
 export async function getLiveRolePolicies() {

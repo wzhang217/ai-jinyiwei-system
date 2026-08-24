@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -8,7 +8,7 @@ import { createAiService } from "./ai.mjs";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const defaultDbPath = resolve(moduleDir, "../data/agent.sqlite");
-const CURRENT_SCHEMA_VERSION = 4;
+const CURRENT_SCHEMA_VERSION = 5;
 const DEFAULT_ORGANIZATION_ID = /^[a-z0-9][a-z0-9_-]{2,63}$/.test(String(process.env.DEFAULT_ORGANIZATION_ID || "org_default"))
   ? String(process.env.DEFAULT_ORGANIZATION_ID || "org_default")
   : "org_default";
@@ -141,6 +141,121 @@ function isWeakSecret(value) {
   ].includes(normalized);
 }
 
+const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function encodeBase32(value) {
+  let bits = 0;
+  let buffer = 0;
+  let output = "";
+  for (const byte of Buffer.from(value)) {
+    buffer = (buffer << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      output += BASE32_ALPHABET[(buffer >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) output += BASE32_ALPHABET[(buffer << (5 - bits)) & 31];
+  return output;
+}
+
+function decodeBase32(value) {
+  const normalized = String(value || "").toUpperCase().replace(/=+$/g, "").replace(/\s+/g, "");
+  let bits = 0;
+  let buffer = 0;
+  const output = [];
+  for (const character of normalized) {
+    const index = BASE32_ALPHABET.indexOf(character);
+    if (index < 0) return null;
+    buffer = (buffer << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      output.push((buffer >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(output);
+}
+
+function totpCode(secret, counter) {
+  const key = decodeBase32(secret);
+  if (!key || !key.length || !Number.isSafeInteger(counter) || counter < 0) return null;
+  const message = Buffer.alloc(8);
+  message.writeBigUInt64BE(BigInt(counter));
+  const digest = createHmac("sha1", key).update(message).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const binary = ((digest[offset] & 0x7f) << 24)
+    | ((digest[offset + 1] & 0xff) << 16)
+    | ((digest[offset + 2] & 0xff) << 8)
+    | (digest[offset + 3] & 0xff);
+  return String(binary % 1_000_000).padStart(6, "0");
+}
+
+function verifyTotp(secret, value, now = Date.now()) {
+  const code = String(value || "").trim();
+  if (!/^\d{6}$/.test(code)) return false;
+  const counter = Math.floor(now / 30_000);
+  for (const drift of [-1, 0, 1]) {
+    const expected = totpCode(secret, counter + drift);
+    if (expected && timingSafeEqual(Buffer.from(expected), Buffer.from(code))) return true;
+  }
+  return false;
+}
+
+function encryptionKey(material) {
+  return createHash("sha256").update(`ai-jinyiwei:mfa:${material}`).digest();
+}
+
+function encryptMfaSecret(secret, material) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", encryptionKey(material), iv);
+  const ciphertext = Buffer.concat([cipher.update(String(secret), "utf8"), cipher.final()]);
+  return `v1:${iv.toString("base64url")}:${cipher.getAuthTag().toString("base64url")}:${ciphertext.toString("base64url")}`;
+}
+
+function decryptMfaSecret(encoded, material) {
+  try {
+    const [version, ivValue, tagValue, ciphertextValue] = String(encoded || "").split(":");
+    if (version !== "v1" || !ivValue || !tagValue || !ciphertextValue) return null;
+    const decipher = createDecipheriv("aes-256-gcm", encryptionKey(material), Buffer.from(ivValue, "base64url"));
+    decipher.setAuthTag(Buffer.from(tagValue, "base64url"));
+    return Buffer.concat([decipher.update(Buffer.from(ciphertextValue, "base64url")), decipher.final()]).toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function generateRecoveryCodes() {
+  return Array.from({ length: 8 }, () => randomBytes(5).toString("hex").toUpperCase());
+}
+
+function recoveryCodesJson(codes) {
+  return JSON.stringify((Array.isArray(codes) ? codes : []).map((code) => hash(String(code).trim().toUpperCase())));
+}
+
+function parseRecoveryCodes(value) {
+  try {
+    const parsed = JSON.parse(value || "[]");
+    return Array.isArray(parsed) ? parsed.filter((item) => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function verifyMfaCode(db, account, value, sessionSecret) {
+  const submitted = String(value || "").trim().toUpperCase();
+  const secret = decryptMfaSecret(account.mfa_secret_enc, sessionSecret);
+  if (secret && verifyTotp(secret, submitted)) return { valid: true, recovery: false };
+  const recoveryHash = hash(submitted);
+  const recoveryCodes = parseRecoveryCodes(account.mfa_recovery_codes_json);
+  const index = recoveryCodes.indexOf(recoveryHash);
+  if (index < 0) return { valid: false, recovery: false };
+  recoveryCodes.splice(index, 1);
+  db.prepare("UPDATE user_accounts SET mfa_recovery_codes_json = ?, updated_at = ? WHERE id = ?")
+    .run(JSON.stringify(recoveryCodes), isoNow(), account.id);
+  return { valid: true, recovery: true };
+}
+
 function hashPassword(password) {
   const salt = randomBytes(16).toString("base64url");
   const digest = scryptSync(String(password), salt, 32).toString("base64url");
@@ -168,6 +283,7 @@ function accountPrincipal(account) {
     employee_id: account.employee_id || null,
     team: account.team || null,
     organization_id: account.organization_id || DEFAULT_ORGANIZATION_ID,
+    mfa_enabled: Boolean(account.mfa_enabled),
   };
 }
 
@@ -219,7 +335,10 @@ function createSchema(db) {
       last_login_at TEXT,
       disabled_at TEXT,
       failed_login_count INTEGER NOT NULL DEFAULT 0,
-      locked_until TEXT
+      locked_until TEXT,
+      mfa_enabled INTEGER NOT NULL DEFAULT 0,
+      mfa_secret_enc TEXT,
+      mfa_recovery_codes_json TEXT NOT NULL DEFAULT '[]'
     );
 
     CREATE TABLE IF NOT EXISTS admin_sessions (
@@ -478,6 +597,9 @@ function createSchema(db) {
   ensureColumn(db, "events", "source_kind", "TEXT NOT NULL DEFAULT 'desktop_app'");
   ensureColumn(db, "user_accounts", "failed_login_count", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "user_accounts", "locked_until", "TEXT");
+  ensureColumn(db, "user_accounts", "mfa_enabled", "INTEGER NOT NULL DEFAULT 0");
+  ensureColumn(db, "user_accounts", "mfa_secret_enc", "TEXT");
+  ensureColumn(db, "user_accounts", "mfa_recovery_codes_json", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "memory_summaries", "rollup_scope", "TEXT NOT NULL DEFAULT 'window'");
   ensureColumn(db, "memory_summaries", "source_record_ids_json", "TEXT NOT NULL DEFAULT '[]'");
   ensureColumn(db, "memory_summaries", "title", "TEXT NOT NULL DEFAULT ''");
@@ -595,6 +717,9 @@ function applySchemaMigrations(db, organizationDefault, now = isoNow()) {
   }
   if (!applied.has(4)) {
     insert.run(4, "privacy-acknowledgements-and-login-protection", hash("schema:privacy-acknowledgements-and-login-protection:v4"), now);
+  }
+  if (!applied.has(5)) {
+    insert.run(5, "account-mfa-secrets", hash("schema:account-mfa-secrets:v5"), now);
   }
 }
 
@@ -982,7 +1107,7 @@ function databaseSessionPrincipal(db, token) {
   if (!token) return null;
   const session = db.prepare(`
     SELECT s.id, s.role, s.actor, s.employee_id, s.team, s.organization_id, s.expires_at,
-      a.id AS account_id, a.username
+      a.id AS account_id, a.username, a.mfa_enabled
     FROM admin_sessions s
     JOIN user_accounts a ON a.id = s.account_id
     WHERE s.token_hash = ?
@@ -1000,6 +1125,7 @@ function databaseSessionPrincipal(db, token) {
     employee_id: session.employee_id || null,
     team: session.team || null,
     organization_id: session.organization_id || DEFAULT_ORGANIZATION_ID,
+    mfa_enabled: Boolean(session.mfa_enabled),
     source: "session",
   };
 }
@@ -2746,7 +2872,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const password = typeof body.password === "string" ? body.password : "";
         const account = db.prepare(`
           SELECT id, username, display_name, role, employee_id, team, organization_id, password_hash,
-            failed_login_count, locked_until
+            failed_login_count, locked_until, mfa_enabled, mfa_secret_enc, mfa_recovery_codes_json
           FROM user_accounts
           WHERE username = ? AND disabled_at IS NULL
         `).get(username);
@@ -2771,10 +2897,28 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           }
           return sendError(response, 401, "用户名或密码错误", "invalid_credentials");
         }
+        const otp = typeof body.otp === "string" ? body.otp.trim() : "";
+        if (account.mfa_enabled) {
+          if (!otp) return sendError(response, 401, "请输入身份验证器验证码", "mfa_required");
+          const mfaResult = verifyMfaCode(db, account, otp, sessionSecret);
+          if (!mfaResult.valid) {
+            const failedCount = Number(account.failed_login_count || 0) + 1;
+            const nextLock = failedCount >= protection.maxFailures
+              ? new Date(Date.now() + protection.lockoutSeconds * 1000).toISOString()
+              : null;
+            const failedAt = isoNow();
+            db.prepare("UPDATE user_accounts SET failed_login_count = ?, locked_until = ?, updated_at = ? WHERE id = ?")
+              .run(failedCount, nextLock, failedAt, account.id);
+            recordAudit(db, "login_failed", "system", account.id, `factor=mfa; failed_attempt=${failedCount}`);
+            if (nextLock) recordAudit(db, "account_locked", "system", account.id, `until=${nextLock}`);
+            return sendError(response, 401, "身份验证器验证码错误", "invalid_mfa");
+          }
+          if (mfaResult.recovery) recordAudit(db, "mfa_recovery_code_used", account.display_name, account.id, "one-time recovery code consumed");
+        }
         const now = isoNow();
         db.prepare("UPDATE user_accounts SET failed_login_count = 0, locked_until = NULL, last_login_at = ?, updated_at = ? WHERE id = ?").run(now, now, account.id);
         const session = createDatabaseSession(db, account);
-        recordAudit(db, "login_succeeded", account.display_name, account.id, "password login");
+        recordAudit(db, "login_succeeded", account.display_name, account.id, account.mfa_enabled ? "password plus mfa login" : "password login");
         return sendJson(response, 200, session);
       }
 
@@ -2782,6 +2926,66 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const principal = requireAdmin(request);
         if (!principal) return sendError(response, 401, "登录已失效，请重新登录", "unauthorized");
         return sendJson(response, 200, { principal });
+      }
+
+      if (method === "GET" && url.pathname === "/api/auth/mfa/status") {
+        const principal = requireAdmin(request);
+        if (!principal?.account_id) return sendError(response, 401, "需要真实账号会话", "unauthorized");
+        const account = db.prepare("SELECT mfa_enabled FROM user_accounts WHERE id = ? AND organization_id = ? AND disabled_at IS NULL")
+          .get(principal.account_id, principal.organization_id || DEFAULT_ORGANIZATION_ID);
+        if (!account) return sendError(response, 401, "账号不存在或已停用", "unauthorized");
+        return sendJson(response, 200, { enabled: Boolean(account.mfa_enabled) });
+      }
+
+      if (method === "POST" && url.pathname === "/api/auth/mfa/setup") {
+        const principal = requireAdmin(request);
+        if (!principal?.account_id) return sendError(response, 401, "需要真实账号会话", "unauthorized");
+        const account = db.prepare("SELECT username, mfa_enabled FROM user_accounts WHERE id = ? AND organization_id = ? AND disabled_at IS NULL")
+          .get(principal.account_id, principal.organization_id || DEFAULT_ORGANIZATION_ID);
+        if (!account) return sendError(response, 401, "账号不存在或已停用", "unauthorized");
+        if (account.mfa_enabled) return sendError(response, 409, "MFA 已启用，请先关闭后重新设置", "mfa_already_enabled");
+        const secret = encodeBase32(randomBytes(20));
+        const organization = db.prepare("SELECT name FROM organizations WHERE id = ?").get(principal.organization_id || DEFAULT_ORGANIZATION_ID);
+        const issuer = String(organization?.name || "AI锦衣卫").slice(0, 48);
+        const label = `${issuer}:${account.username}`;
+        const otpauthUri = `otpauth://totp/${encodeURIComponent(label)}?secret=${secret}&issuer=${encodeURIComponent(issuer)}&algorithm=SHA1&digits=6&period=30`;
+        return sendJson(response, 200, { secret, otpauth_uri: otpauthUri, algorithm: "SHA1", digits: 6, period: 30 });
+      }
+
+      if (method === "POST" && url.pathname === "/api/auth/mfa/enable") {
+        const principal = requireAdmin(request);
+        if (!principal?.account_id) return sendError(response, 401, "需要真实账号会话", "unauthorized");
+        const account = db.prepare("SELECT id, username, display_name, mfa_enabled FROM user_accounts WHERE id = ? AND organization_id = ? AND disabled_at IS NULL")
+          .get(principal.account_id, principal.organization_id || DEFAULT_ORGANIZATION_ID);
+        if (!account) return sendError(response, 401, "账号不存在或已停用", "unauthorized");
+        if (account.mfa_enabled) return sendError(response, 409, "MFA 已启用", "mfa_already_enabled");
+        const body = await readJson(request);
+        const secret = typeof body.secret === "string" ? body.secret.trim().toUpperCase() : "";
+        const code = typeof body.code === "string" ? body.code.trim() : "";
+        if (!/^[A-Z2-7]{16,64}$/.test(secret) || !verifyTotp(secret, code)) return sendError(response, 400, "MFA 密钥或验证码无效", "invalid_mfa_setup");
+        const recoveryCodes = generateRecoveryCodes();
+        db.prepare("UPDATE user_accounts SET mfa_enabled = 1, mfa_secret_enc = ?, mfa_recovery_codes_json = ?, updated_at = ? WHERE id = ?")
+          .run(encryptMfaSecret(secret, sessionSecret), recoveryCodesJson(recoveryCodes), isoNow(), account.id);
+        recordAudit(db, "mfa_enabled", account.display_name, account.id, "totp enabled");
+        return sendJson(response, 200, { enabled: true, recovery_codes: recoveryCodes });
+      }
+
+      if (method === "POST" && url.pathname === "/api/auth/mfa/disable") {
+        const principal = requireAdmin(request);
+        if (!principal?.account_id) return sendError(response, 401, "需要真实账号会话", "unauthorized");
+        const account = db.prepare("SELECT id, display_name, mfa_enabled, mfa_secret_enc, mfa_recovery_codes_json FROM user_accounts WHERE id = ? AND organization_id = ? AND disabled_at IS NULL")
+          .get(principal.account_id, principal.organization_id || DEFAULT_ORGANIZATION_ID);
+        if (!account) return sendError(response, 401, "账号不存在或已停用", "unauthorized");
+        if (!account.mfa_enabled) return sendJson(response, 200, { enabled: false });
+        const body = await readJson(request);
+        const mfaResult = verifyMfaCode(db, account, body.code, sessionSecret);
+        if (!mfaResult.valid) return sendError(response, 400, "验证码无效，不能关闭 MFA", "invalid_mfa");
+        const now = isoNow();
+        db.prepare("UPDATE user_accounts SET mfa_enabled = 0, mfa_secret_enc = NULL, mfa_recovery_codes_json = '[]', updated_at = ? WHERE id = ?").run(now, account.id);
+        const currentToken = request.headers["x-admin-session"] || "";
+        if (currentToken) db.prepare("UPDATE admin_sessions SET revoked_at = ? WHERE account_id = ? AND token_hash != ? AND revoked_at IS NULL").run(now, account.id, hash(currentToken));
+        recordAudit(db, "mfa_disabled", account.display_name, account.id, "totp disabled");
+        return sendJson(response, 200, { enabled: false });
       }
 
       if (method === "POST" && url.pathname === "/api/auth/logout") {
@@ -2793,6 +2997,9 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
       }
 
       if (method === "POST" && url.pathname === "/api/admin/sessions") {
+        if (process.env.NODE_ENV === "production") {
+          return sendError(response, 410, "bootstrap identity sessions are disabled in production; use account login", "bootstrap_sessions_disabled");
+        }
         if (request.headers["x-admin-token"] !== adminToken) return sendError(response, 401, "bootstrap admin authentication required", "unauthorized");
         const body = await readJson(request);
         const role = ["admin", "manager", "employee"].includes(body.role) ? body.role : null;

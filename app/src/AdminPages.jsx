@@ -39,7 +39,7 @@ import {
 } from "@phosphor-icons/react";
 import { historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, downloadRecordsMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, exportLiveAudit, getAdminAccounts, getLiveAdminSettings, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveOrganization, getLivePolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setAdminAccountStatus, setLiveDeviceStatus, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateNotificationSettings, updateOrganizationSettings } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, disableLiveMfa, enableLiveMfa, exportLiveAudit, getAdminAccounts, getLiveAdminSettings, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveMfaStatus, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setAdminAccountStatus, setLiveDeviceStatus, setupLiveMfa, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateNotificationSettings, updateOrganizationSettings } from "./services/agentApi.js";
 import { auditData, deviceData, employeeData, permissionRoles, settingsData, teamData } from "./adminData.js";
 import { SHANGHAI_TIME_ZONE, formatShanghaiTime, shanghaiDateAtStart, shanghaiDateInput, shanghaiDayKey, shanghaiWeekKey } from "./time.js";
 
@@ -1019,16 +1019,18 @@ function AuditPage({ role, query, onToast }) {
 
 function SettingsPage({ role, onToast }) {
   const canEdit = role === "admin";
-  const [tab, setTab] = useState("企业资料");
+  const [tab, setTab] = useState(role === "employee" ? "安全合规" : "企业资料");
   const [settings, setSettings] = useState(null);
   const [error, setError] = useState("");
+  const tabs = role === "employee" ? ["安全合规"] : ["企业资料", "工作会话", "活动分类", "AI 设置", "通知", "数据与集成", "安全合规"];
+  useEffect(() => { if (role === "employee") setTab("安全合规"); }, [role]);
   useEffect(() => {
     if (!agentApiEnabled) return undefined;
     getLiveAdminSettings().then(setSettings).catch((requestError) => setError(requestError.message));
     return undefined;
   }, []);
   const updateSettings = (patch) => setSettings((current) => ({ ...(current || {}), ...patch }));
-  return <div className="page-content"><PageHeader eyebrow="ORGANIZATION SETTINGS" title="设置" description="管理企业资料、工作会话、活动分类、AI、通知和数据集成。" meta={roleLabel[role]} action={<span className="scope-pill">{agentApiEnabled ? settings ? "已连接服务端" : "正在读取…" : "演示模式"}</span>} />{error && <div className="error-box">设置读取失败：{error}</div>}<Tabs tabs={["企业资料", "工作会话", "活动分类", "AI 设置", "通知", "数据与集成", "安全合规"]} active={tab} onChange={setTab} />{tab === "企业资料" && <SettingsForm role={role} settings={settings?.organization} onChanged={(organization) => updateSettings({ organization })} onToast={onToast} />}{tab === "工作会话" && <PolicyEditor role={role} onToast={onToast} />}{tab === "活动分类" && <CategorySettings role={role} categories={settings?.categories} onChanged={(categories) => updateSettings({ categories })} onToast={onToast} />}{tab === "AI 设置" && <AiSettings role={role} settings={settings?.organization} onChanged={(organization) => updateSettings({ organization })} onToast={onToast} />}{tab === "通知" && <NotificationSettings role={role} notifications={settings?.notifications} onChanged={(notifications) => updateSettings({ notifications })} onToast={onToast} />}{tab === "数据与集成" && <IntegrationSettings role={role} integrations={settings?.integrations} onChanged={(integrations) => updateSettings({ integrations })} onToast={onToast} />}{tab === "安全合规" && <ComplianceSettings onToast={onToast} />}</div>;
+  return <div className="page-content"><PageHeader eyebrow="ORGANIZATION SETTINGS" title="设置" description="管理企业资料、工作会话、活动分类、AI、通知和数据集成。" meta={roleLabel[role]} action={<span className="scope-pill">{agentApiEnabled ? settings ? "已连接服务端" : "正在读取…" : "演示模式"}</span>} />{error && <div className="error-box">设置读取失败：{error}</div>}<Tabs tabs={tabs} active={tab} onChange={setTab} />{tab === "企业资料" && <SettingsForm role={role} settings={settings?.organization} onChanged={(organization) => updateSettings({ organization })} onToast={onToast} />}{tab === "工作会话" && <PolicyEditor role={role} onToast={onToast} />}{tab === "活动分类" && <CategorySettings role={role} categories={settings?.categories} onChanged={(categories) => updateSettings({ categories })} onToast={onToast} />}{tab === "AI 设置" && <AiSettings role={role} settings={settings?.organization} onChanged={(organization) => updateSettings({ organization })} onToast={onToast} />}{tab === "通知" && <NotificationSettings role={role} notifications={settings?.notifications} onChanged={(notifications) => updateSettings({ notifications })} onToast={onToast} />}{tab === "数据与集成" && <IntegrationSettings role={role} integrations={settings?.integrations} onChanged={(integrations) => updateSettings({ integrations })} onToast={onToast} />}{tab === "安全合规" && <ComplianceSettings role={role} onToast={onToast} />}</div>;
 }
 function SettingsForm({ role = "admin", settings, onChanged, onToast }) {
   const canEdit = role === "admin";
@@ -1093,7 +1095,60 @@ function IntegrationSettings({ role = "admin", integrations, onChanged, onToast 
   return <SectionCard title="数据与集成" description="第三方数据源默认关闭，启用前需要管理员授权"><div className="integration-grid">{items.map((item) => <IntegrationCard key={item.key} icon={item.key === "browser_extension" ? <Browser size={21} /> : item.key === "project_tools" ? <Code size={21} /> : item.key === "collaboration" ? <ChatCircleDots size={21} /> : <Database size={21} />} title={item.title} detail={item.detail} status={item.status} enabled={item.enabled} onClick={() => toggle(item.key)} />)}</div><button className="outline-button" disabled={!canEdit || saving} onClick={() => void save()}><CheckCircle size={16} />{saving ? "保存中…" : canEdit ? "保存集成设置" : "老板可编辑"}</button></SectionCard>;
 }
 function IntegrationCard({ icon, title, detail, status, enabled, onClick }) { const display = status === "connected" ? "已连接" : status === "partial" ? "部分连接" : status === "preparing" ? "准备中" : "未连接"; return <button className="integration-card" onClick={onClick}><span className="integration-icon">{icon}</span><span><strong>{title}</strong><small>{detail} · {enabled ? "已启用" : "已停用"}</small></span><StatusPill status={status === "connected" || enabled && status === "partial" ? "online" : status === "partial" ? "meeting" : "pending"} /><b>{display}</b></button>; }
-function ComplianceSettings({ onToast }) { return <SectionCard title="安全与合规" description="员工告知、敏感资源排除和数据访问说明"><div className="compliance-list"><ComplianceRow icon={<ShieldCheck size={19} />} title="员工采集告知" detail="已发布 · 最近更新 2026-08-20" onToast={onToast} /><ComplianceRow icon={<LockKey size={19} />} title="敏感资源排除" detail="3 条规则生效 · 文件正文不采集" onToast={onToast} /><ComplianceRow icon={<Fingerprint size={19} />} title="访问审计" detail="所有个人时间线访问均留痕" onToast={onToast} /><ComplianceRow icon={<Archive size={19} />} title="数据删除策略" detail="原始 90 天 · 汇总 1 年" onToast={onToast} /></div><button className="outline-button" onClick={() => onToast("合规说明已打开")}><ArrowSquareOut size={16} />查看完整说明</button></SectionCard>; }
+function ComplianceSettings({ role = "admin", onToast }) {
+  const canEdit = role === "admin";
+  const [policy, setPolicy] = useState(null);
+  const [draft, setDraft] = useState({ version: "", title: "", notice: "" });
+  const [loading, setLoading] = useState(Boolean(agentApiEnabled));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const load = async () => {
+    if (!agentApiEnabled) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      const result = await getLivePrivacyPolicy();
+      setPolicy(result);
+      if (result.policy) setDraft({ version: result.policy.version, title: result.policy.title, notice: result.policy.notice });
+      setError("");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { void load(); }, []);
+  const save = async () => {
+    if (!canEdit) return onToast("当前角色只能查看隐私政策；请由老板编辑");
+    setSaving(true);
+    try {
+      const result = agentApiEnabled ? await updateLivePrivacyPolicy(draft) : { policy: draft, acknowledgements: policy?.acknowledgements || [] };
+      setPolicy(result);
+      onToast("隐私政策已保存；员工需要重新确认新版本");
+    } catch (saveError) {
+      setError(saveError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const acknowledgements = policy?.acknowledgements || [];
+  const acknowledgedCount = acknowledgements.filter((item) => item.acknowledged).length;
+  return <div className="compliance-stack">
+    <SectionCard title="员工采集告知" description="政策版本和员工确认状态由服务端保存，并在 Agent 上传前校验。">
+      {error && <div className="error-box">隐私政策读取失败：{error}</div>}
+      <div className="privacy-policy-meta"><StatusPill status={policy?.policy ? "success" : "pending"} /><span>当前版本：{loading ? "读取中…" : policy?.policy?.version || "未配置"}</span><span>{acknowledgedCount}/{acknowledgements.length || 0} 位员工已确认</span></div>
+      <div className="settings-grid"><SettingField label="政策版本" value={draft.version} disabled={!canEdit || loading} onChange={(value) => setDraft((current) => ({ ...current, version: value }))} /><SettingField label="政策标题" value={draft.title} disabled={!canEdit || loading} onChange={(value) => setDraft((current) => ({ ...current, title: value }))} /></div>
+      <label className="setting-field privacy-notice-field"><span>员工看到的采集说明</span><textarea disabled={!canEdit || loading} value={draft.notice} onChange={(event) => setDraft((current) => ({ ...current, notice: event.target.value }))} rows="5" /></label>
+      <div className="policy-save-row"><small>{canEdit ? "修改版本或正文后，所有员工需重新确认。" : "当前角色无权修改政策。"}</small><button className="primary-button" disabled={!canEdit || loading || saving} onClick={() => void save()}>{saving ? "保存中…" : "保存并发布政策"}</button></div>
+    </SectionCard>
+    <SectionCard title="员工确认台账" description="只显示确认状态、版本和时间，不显示员工采集内容。">
+      <div className="compliance-list">{acknowledgements.length ? acknowledgements.map((item) => <div className="compliance-row" key={item.employee_id}><ShieldCheck size={19} /><span><strong>{item.employee_name} · {item.team}</strong><small>{item.acknowledged ? `已确认 ${formatShanghaiTime(item.acknowledged_at, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}` : "尚未确认当前政策"}</small></span><StatusPill status={item.acknowledged ? "success" : "pending"} /></div>) : <EmptyState title={agentApiEnabled ? "暂无员工台账" : "连接服务端后显示员工确认状态"} />}</div>
+    </SectionCard>
+    <SectionCard title="固定隐私边界" description="以下能力不提供开关，避免把合规边界变成可误操作的设置."><div className="compliance-list"><ComplianceRow icon={<LockKey size={19} />} title="敏感资源排除" detail="键盘、剪贴板、截图、聊天正文和文件正文禁止采集" onToast={onToast} /><ComplianceRow icon={<Fingerprint size={19} />} title="访问审计" detail="个人时间线、导出和策略修改均写入审计日志" onToast={onToast} /><ComplianceRow icon={<Archive size={19} />} title="数据删除策略" detail="删除前预览，执行结果写入审计" onToast={onToast} /></div></SectionCard>
+  </div>;
+}
 function ComplianceRow({ icon, title, detail, onToast }) { return <button type="button" className="compliance-row" onClick={() => onToast(`${title}说明已打开`)}>{icon}<span><strong>{title}</strong><small>{detail}</small></span><CheckCircle size={17} weight="fill" /></button>; }
 function EmptyState({ title }) { return <div className="empty-state"><Database size={24} /><strong>{title}</strong><span>接入真实数据后会显示在这里。</span></div>; }
 
