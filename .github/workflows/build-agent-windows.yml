@@ -110,13 +110,39 @@ jobs:
           Get-ChildItem "src-tauri\target\release\bundle\msi\*.msi" | ForEach-Object {
             & $signtool.FullName sign /fd SHA256 /f $pfxPath /p $env:WINDOWS_SIGNING_PFX_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $_.FullName
             if ($LASTEXITCODE -ne 0) { throw "signtool failed for $($_.Name)" }
+            $signature = Get-AuthenticodeSignature $_.FullName
+            if ($signature.Status -ne "Valid") { throw "MSI signature is not valid for $($_.Name): $($signature.Status)" }
           }
+
+      - name: Create release manifest
+        shell: pwsh
+        run: |
+          $package = Get-Content "package.json" | ConvertFrom-Json
+          $artifacts = Get-ChildItem "src-tauri\target\release\bundle\msi\*.msi" | ForEach-Object {
+            $signature = Get-AuthenticodeSignature $_.FullName
+            @{
+              file = $_.Name
+              sha256 = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+              signature_status = $signature.Status.ToString()
+              signer = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null }
+            }
+          }
+          @{
+            product = "AI锦衣卫 Agent"
+            agent_version = $package.version
+            commit = $env:GITHUB_SHA
+            generated_at_utc = (Get-Date).ToUniversalTime().ToString("o")
+            artifacts = @($artifacts)
+          } | ConvertTo-Json -Depth 5 | Set-Content -Path "release-manifest.json" -Encoding UTF8
+          New-Item -ItemType Directory -Force -Path "release-assets" | Out-Null
+          Copy-Item "src-tauri\target\release\bundle\msi\*.msi" "release-assets\"
+          Copy-Item "release-manifest.json" "release-assets\"
 
       - name: Upload MSI artifact
         uses: actions/upload-artifact@v4
         with:
           name: ai-jinyiwei-agent-msi
-          path: agent/src-tauri/target/release/bundle/msi/*.msi
+          path: agent/release-assets/*
           if-no-files-found: error
           retention-days: 14
 
@@ -136,4 +162,4 @@ jobs:
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" release/*.msi --title "AI锦衣卫 Agent ${GITHUB_REF_NAME}" --generate-notes
+        run: gh release create "${GITHUB_REF_NAME}" release/*.msi release/release-manifest.json --title "AI锦衣卫 Agent ${GITHUB_REF_NAME}" --generate-notes

@@ -49,6 +49,10 @@ input:focus { border-color: #79a18c; box-shadow: 0 0 0 3px rgba(121,161,140,.14)
 .privacy-confirmation strong, .privacy-confirmation small { color: #65756b; font-size: 10px; line-height: 1.5; }
 .privacy-confirmation .primary-button { margin-top: 0; }
 .error-box { margin-top: 12px; padding: 9px; border-radius: 8px; background: #fff1f0; color: #a14f4f; font-size: 10px; line-height: 1.5; }
+.account-actions-card { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.account-actions-card p { margin-top: 8px; color: #78847d; font-size: 10px; line-height: 1.7; }
+.danger-button { flex: 0 0 auto; padding: 8px 10px; border: 1px solid #e2baba; border-radius: 8px; background: #fff4f3; color: #a14f4f; font-size: 10px; font-weight: 700; }
+.danger-button:disabled { opacity: .55; cursor: wait; }
 .pairing-help { margin: 10px 0 14px; color: #78847d; font-size: 11px; line-height: 1.7; }
 .secondary-button { margin-top: 0; padding: 8px 10px; border: 1px solid #cbdacf; border-radius: 8px; background: #edf3ee; color: #31523f; font-size: 10px; font-weight: 700; }
 .pairing-code-box { display: flex; align-items: center; gap: 9px; margin-top: 13px; padding: 10px 11px; border: 1px dashed #9bb9a6; border-radius: 9px; background: #f3faf4; }

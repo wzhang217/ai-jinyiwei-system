@@ -12,7 +12,7 @@ const fallbackStatus = {
   last_error: null,
   last_browser_capture_at: null,
   last_browser_capture_source: null,
-  agent_version: "0.1.13",
+  agent_version: "0.1.14",
   privacy_policy: null,
   privacy_acknowledged: false,
   policy: {
@@ -136,6 +136,26 @@ export function App() {
     }
   };
 
+  const clearRegistration = async () => {
+    if (!isTauri()) {
+      notify("浏览器预览不能清理真实设备数据，请在 Windows Agent 中操作");
+      return;
+    }
+    const confirmed = window.confirm("这会清除本机离线队列、设备凭据和注册信息，且无法恢复。确定继续吗？");
+    if (!confirmed) return;
+    setBusy(true);
+    try {
+      const next = await call("clear_registration");
+      setStatus(next);
+      setBrowserPairing(null);
+      notify("本机数据已清除，设备已解除绑定");
+    } catch (error) {
+      notify(`清理失败：${error}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const copyBrowserPairingCode = async () => {
     if (!browserPairing?.code) return;
     try {
@@ -190,6 +210,7 @@ export function App() {
             <div className="policy-list"><PolicyItem title="应用活动" detail={`前台应用名称和使用时长，每 ${status.policy.activity_checkpoint_seconds || 15} 秒更新活动区间`} enabled /><PolicyItem title="脱敏工作标识" detail="仅保留开发工具项目标识，不保存原始窗口标题" enabled /><PolicyItem title="网站来源" detail="Windows 原生读取域名；扩展仅作为兼容兜底" enabled /><PolicyItem title="空闲状态" detail={`超过 ${Math.round(status.policy.idle_threshold_seconds / 60)} 分钟进入空闲`} enabled /><PolicyItem title="同步心跳" detail={`每 ${status.policy.heartbeat_interval_seconds} 秒更新设备状态`} enabled /><PolicyItem title="屏幕、键盘和聊天正文" detail="系统级禁止采集" /></div>
           </section>
           <section className="card privacy-card"><div className="shield">✓</div><div><h2>{status.privacy_policy?.title || "隐私边界"}</h2><p>{status.privacy_policy?.notice || "Agent 不读取键盘、剪贴板、屏幕、聊天正文、文件正文、原始窗口标题或完整网页内容；只保留有限的项目标识和网站域名。断网时数据只保存在本机队列，恢复后自动补传。"}</p>{status.privacy_policy && <div className="privacy-confirmation">{status.privacy_acknowledged ? <small>已确认策略版本 {status.privacy_policy.version}，确认时间由服务端留痕。</small> : <><strong>请先确认当前采集说明</strong><button className="primary-button" onClick={acknowledgePrivacy} disabled={busy}>{busy ? "提交中…" : "我已阅读并确认"}</button></>}</div>}</div></section>
+          <section className="card account-actions-card"><div><div className="card-kicker">设备退出</div><h2>解除绑定并清除本机数据</h2><p>用于员工离职、设备转交或卸载前清理。会删除本机离线队列、设备 Token 和注册信息；服务端历史记录不会被删除。</p></div><button className="danger-button" onClick={clearRegistration} disabled={busy}>{busy ? "清理中…" : "清除本机数据"}</button></section>
         </>
       )}
 

@@ -14,7 +14,10 @@
 
 - [ ] `agent/package.json`、`package-lock.json`、`src-tauri/Cargo.toml` 和 `tauri.conf.json` 版本一致。
 - [ ] `vX.Y.Z` tag 与 Agent 版本一致，Windows MSI 构建成功并使用代码签名证书。
+- [ ] Release 中的 `release-manifest.json` 与 MSI SHA-256 一致，签名状态为 `Valid`。
 - [ ] 在干净 Windows 10/11 安装、注册、开机启动、卸载和升级成功。
+- [ ] 升级保留设备凭据和未上传队列；回滚使用上一份签名 MSI，且未手工删除 SQLite。
+- [ ] 卸载前通过 Agent 的“清除本机数据”完成显式清理，清理结果和服务端设备停用均有记录。
 - [ ] 断网缓存、恢复补传、重复事件幂等、磁盘不可写和队列上限有结果记录。
 - [ ] 请求中没有键盘、剪贴板、截图、正文、原始窗口标题或完整 URL。
 - [ ] Windows 防火墙、代理、杀毒软件和企业软件分发策略已验收。
