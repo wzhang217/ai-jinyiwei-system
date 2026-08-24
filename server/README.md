@@ -66,6 +66,8 @@ AGENT_DB_PATH=./data/agent.sqlite AGENT_BACKUP_PATH=./data/backups/manual.sqlite
 AGENT_RESTORE_PATH=./data/backups/manual.sqlite npm run restore-check
 ```
 
+恢复检查会额外要求备份达到当前 schema 版本；旧版本备份必须先在隔离环境完成迁移和验证，不能直接作为正式恢复源。
+
 `npm run backup` 会先校验源库，再使用 SQLite `VACUUM INTO` 生成一致性备份，并重新打开备份校验 `integrity_check` 和 `foreign_key_check`；任一步失败都会返回非零退出码。恢复前先停止服务端，用 `npm run restore-check` 校验备份，再用经过校验的备份文件替换 `AGENT_DB_PATH`，然后启动服务并检查 `/health`、设备心跳、历史记录和审计日志。不要在服务运行时直接覆盖 SQLite 文件；备份文件应进入企业自己的加密存储和异地保留策略。
 
 Linux systemd 可用仓库内的 `deploy/ai-jinyiwei-agent-backup.service` 和 `deploy/ai-jinyiwei-agent-backup.timer` 每日生成并轮换备份：
@@ -81,6 +83,12 @@ sudo systemctl list-timers ai-jinyiwei-agent-backup.timer
 
 ```bash
 npm run diagnostics -- --output ./data/diagnostics/diagnostic-$(date +%Y%m%d%H%M%S).json
+```
+
+交付或升级后可用一个只读命令汇总检查服务、磁盘、SQLite 完整性、外键和当前迁移版本；任一项失败都会返回非零退出码：
+
+```bash
+npm run ops:check
 ```
 
 systemd 部署还可以启用仓库内的 `deploy/ai-jinyiwei-agent-health.service` 和 `deploy/ai-jinyiwei-agent-health.timer`，每 5 分钟执行 `/health/ready`；失败记录会进入 journald，接入企业监控时应对该 unit 的失败状态告警：

@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { resolve } from "node:path";
+import { CURRENT_SCHEMA_VERSION } from "../src/index.mjs";
 
 const inputPath = process.env.AGENT_RESTORE_PATH || process.argv[2];
 if (!inputPath) throw new Error("provide a backup path via AGENT_RESTORE_PATH or the first argument");
@@ -17,7 +18,10 @@ try {
   const schemaVersion = hasMigrationTable
     ? db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version || 0
     : 0;
-  console.log(JSON.stringify({ ok: true, path: candidate, schema_version: Number(schemaVersion) }));
+  if (!hasMigrationTable || Number(schemaVersion) < CURRENT_SCHEMA_VERSION) {
+    throw new Error(`backup schema version ${Number(schemaVersion)} is older than required ${CURRENT_SCHEMA_VERSION}`);
+  }
+  console.log(JSON.stringify({ ok: true, path: candidate, schema_version: Number(schemaVersion), expected_schema_version: CURRENT_SCHEMA_VERSION }));
 } finally {
   db.close();
 }

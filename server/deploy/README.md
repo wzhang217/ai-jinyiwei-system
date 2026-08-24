@@ -32,6 +32,7 @@ sudo systemctl status ai-jinyiwei-agent-server
 journalctl -u ai-jinyiwei-agent-server -f
 sudo systemctl list-timers ai-jinyiwei-agent-backup.timer ai-jinyiwei-agent-health.timer
 sudo -u jinyiwei bash -lc 'cd /opt/ai-jinyiwei/server && npm run diagnostics'
+sudo -u jinyiwei bash -lc 'cd /opt/ai-jinyiwei/server && npm run ops:check'
 ```
 
 健康检查失败会触发 `ai-jinyiwei-agent-health-alert.service`。没有配置 webhook 时，故障仍会写入 journald；配置 webhook 后会按 `HEALTH_ALERT_COOLDOWN_SECONDS` 抑制重复通知。
@@ -72,7 +73,8 @@ Compose 只把 8787 绑定到本机，仍建议由 Caddy/Nginx 负责 HTTPS。`.
 ```bash
 cd /opt/ai-jinyiwei/server
 sudo -u jinyiwei npm run backup:rotate
-sudo -u jinyiwei AGENT_BACKUP_PATH=/tmp/agent-restore-check.sqlite npm run restore-check
+sudo -u jinyiwei AGENT_RESTORE_PATH=/tmp/agent-restore-check.sqlite npm run restore-check
+npm run ops:check
 ```
 
 升级时保留旧目录和数据库，先停止服务、备份、替换应用文件，再启动并检查 `/health/ready`。新版本异常时恢复旧应用目录并保留新产生的日志，禁止直接删除数据库。正式客户交付前应把这套流程写入变更单和回滚记录。

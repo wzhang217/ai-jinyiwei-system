@@ -12,6 +12,7 @@
     "provision:organization": "node --env-file-if-exists=.env --experimental-sqlite scripts/provision-organization.mjs",
     "directory:import": "node --env-file-if-exists=.env --experimental-sqlite scripts/import-directory.mjs",
     "diagnostics": "node --env-file-if-exists=.env --experimental-sqlite scripts/diagnostics.mjs",
+    "ops:check": "node --env-file-if-exists=.env --experimental-sqlite scripts/ops-check.mjs",
     "ai:eval": "node --env-file-if-exists=.env scripts/evaluate-ai.mjs",
     "preflight:production": "node --env-file-if-exists=.env scripts/preflight-production.mjs",
     "healthcheck": "node --env-file-if-exists=.env scripts/healthcheck.mjs",
