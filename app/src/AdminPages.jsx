@@ -39,7 +39,7 @@ import {
 } from "@phosphor-icons/react";
 import { historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, downloadRecordsMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, disableLiveMfa, enableLiveMfa, exportLiveAudit, getAdminAccounts, getLiveAdminSettings, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveMfaStatus, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setAdminAccountStatus, setLiveDeviceStatus, setupLiveMfa, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateNotificationSettings, updateOrganizationSettings } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, createAdminAccount, createRegistrationCode, demoMode, deleteLivePrivacySubject, disableLiveMfa, enableLiveMfa, exportLiveAudit, exportLivePrivacySubject, getAdminAccounts, getLiveAdminSettings, getLiveAudit, getLiveDeviceDetail, getLiveDevices, getLiveEmployees, getLiveEvents, getLiveMfaStatus, getLiveOrganization, getLivePolicy, getLivePrivacyPolicy, getLiveRolePolicies, getLiveTeams, getMemoryJobs, runRetention, setAdminAccountStatus, setLiveDeviceStatus, setupLiveMfa, updateActivityCategories, updateIntegrationSettings, updateLivePolicy, updateLivePrivacyPolicy, updateNotificationSettings, updateOrganizationSettings } from "./services/agentApi.js";
 import { auditData, deviceData, employeeData, permissionRoles, settingsData, teamData } from "./adminData.js";
 import { SHANGHAI_TIME_ZONE, formatShanghaiTime, shanghaiDateAtStart, shanghaiDateInput, shanghaiDayKey, shanghaiWeekKey } from "./time.js";
 
@@ -1099,6 +1099,10 @@ function ComplianceSettings({ role = "admin", onToast }) {
   const canEdit = role === "admin";
   const [policy, setPolicy] = useState(null);
   const [draft, setDraft] = useState({ version: "", title: "", notice: "" });
+  const [employees, setEmployees] = useState([]);
+  const [selectedEmployeeId, setSelectedEmployeeId] = useState("");
+  const [rightsResult, setRightsResult] = useState(null);
+  const [rightsLoading, setRightsLoading] = useState(false);
   const [loading, setLoading] = useState(Boolean(agentApiEnabled));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -1112,6 +1116,14 @@ function ComplianceSettings({ role = "admin", onToast }) {
       const result = await getLivePrivacyPolicy();
       setPolicy(result);
       if (result.policy) setDraft({ version: result.policy.version, title: result.policy.title, notice: result.policy.notice });
+      try {
+        const directory = await getLiveEmployees();
+        setEmployees(directory);
+        setSelectedEmployeeId((current) => current || directory[0]?.id || result.acknowledgements?.[0]?.employee_id || "");
+      } catch {
+        setEmployees((result.acknowledgements || []).map((item) => ({ id: item.employee_id, name: item.employee_name, team: item.team })));
+        setSelectedEmployeeId((current) => current || result.acknowledgements?.[0]?.employee_id || "");
+      }
       setError("");
     } catch (requestError) {
       setError(requestError.message);
@@ -1135,6 +1147,42 @@ function ComplianceSettings({ role = "admin", onToast }) {
   };
   const acknowledgements = policy?.acknowledgements || [];
   const acknowledgedCount = acknowledgements.filter((item) => item.acknowledged).length;
+  const rightsEmployees = employees.length ? employees : acknowledgements.map((item) => ({ id: item.employee_id, name: item.employee_name, team: item.team }));
+  const selectedEmployee = rightsEmployees.find((item) => item.id === selectedEmployeeId);
+  const runSubjectExport = async () => {
+    if (!agentApiEnabled) return onToast("连接真实服务端后才能导出员工数据");
+    if (!selectedEmployeeId) return onToast("请选择员工");
+    setRightsLoading(true);
+    try {
+      const result = await exportLivePrivacySubject(selectedEmployeeId);
+      const blob = new Blob([JSON.stringify(result, null, 2)], { type: "application/json;charset=utf-8" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = `ai-jinyiwei-privacy-export-${selectedEmployeeId}-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+      onToast(`已导出 ${selectedEmployee?.name || "员工"} 的数据，并写入审计`);
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setRightsLoading(false);
+    }
+  };
+  const runSubjectDelete = async (apply = false) => {
+    if (!agentApiEnabled) return onToast("连接真实服务端后才能执行员工数据删除");
+    if (!selectedEmployeeId) return onToast("请选择员工");
+    if (apply && !window.confirm(`确认删除 ${selectedEmployee?.name || "该员工"} 的活动事件、Memory Summary 和浏览器临时凭据？员工身份、设备身份、审计日志和隐私确认记录会保留。`)) return;
+    setRightsLoading(true);
+    try {
+      const result = await deleteLivePrivacySubject(selectedEmployeeId, apply);
+      setRightsResult(result);
+      onToast(apply ? "员工活动数据已删除并写入审计" : "已生成员工数据删除预览");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setRightsLoading(false);
+    }
+  };
   return <div className="compliance-stack">
     <SectionCard title="员工采集告知" description="政策版本和员工确认状态由服务端保存，并在 Agent 上传前校验。">
       {error && <div className="error-box">隐私政策读取失败：{error}</div>}
@@ -1146,6 +1194,14 @@ function ComplianceSettings({ role = "admin", onToast }) {
     {role !== "employee" && <SectionCard title="员工确认台账" description="只显示确认状态、版本和时间，不显示员工采集内容。">
       <div className="compliance-list">{acknowledgements.length ? acknowledgements.map((item) => <div className="compliance-row" key={item.employee_id}><ShieldCheck size={19} /><span><strong>{item.employee_name} · {item.team}</strong><small>{item.acknowledged ? `已确认 ${formatShanghaiTime(item.acknowledged_at, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}` : "尚未确认当前政策"}</small></span><StatusPill status={item.acknowledged ? "success" : "pending"} /></div>) : <EmptyState title={agentApiEnabled ? "暂无员工台账" : "连接服务端后显示员工确认状态"} />}</div>
     </SectionCard>}
+    <SectionCard title="员工数据权利" description="按权限导出或删除指定员工的活动元数据；删除前必须预览，身份、设备、审计和隐私确认记录会保留。">
+      {!agentApiEnabled && <div className="mfa-note">连接真实服务端后可执行员工数据导出和删除。</div>}
+      {agentApiEnabled && <>
+        <div className="settings-grid"><label className="setting-field"><span>员工</span><select value={selectedEmployeeId} onChange={(event) => { setSelectedEmployeeId(event.target.value); setRightsResult(null); }} disabled={rightsLoading || !rightsEmployees.length}><option value="">请选择员工</option>{rightsEmployees.map((item) => <option key={item.id} value={item.id}>{item.name} · {item.team}</option>)}</select></label><div className="mfa-note"><strong>删除范围</strong><br />活动事件、Memory Summary、生成队列和浏览器临时凭据；不删除法律留存所需的审计与确认记录。</div></div>
+        <div className="policy-save-row"><div className="mfa-action-row"><button className="outline-button" disabled={rightsLoading || !selectedEmployeeId} onClick={() => void runSubjectExport()}><DownloadSimple size={16} />导出员工数据</button><button className="outline-button" disabled={rightsLoading || !selectedEmployeeId} onClick={() => void runSubjectDelete(false)}><Archive size={16} />预览删除范围</button><button className="primary-button" disabled={rightsLoading || !selectedEmployeeId || !rightsResult?.preview} onClick={() => void runSubjectDelete(true)}>{rightsLoading ? "处理中…" : "确认删除活动数据"}</button></div></div>
+        {rightsResult && <div className="deep-link-card"><Archive size={22} /><span><strong>{rightsResult.applied ? "员工数据删除已完成" : "员工数据删除预览"}</strong><small>{rightsResult.applied ? `已删除活动事件 ${rightsResult.deleted.events} 条、Memory Summary ${rightsResult.deleted.memory_summaries} 条；保留隐私确认 ${rightsResult.preserved.privacy_acknowledgements} 条。` : `将删除活动事件 ${rightsResult.preview.events} 条、Memory Summary ${rightsResult.preview.memory_summaries} 条、生成任务 ${rightsResult.preview.generation_jobs} 条。`}</small></span></div>}
+      </>}
+    </SectionCard>
     <SectionCard title="固定隐私边界" description="以下能力不提供开关，避免把合规边界变成可误操作的设置."><div className="compliance-list"><ComplianceRow icon={<LockKey size={19} />} title="敏感资源排除" detail="键盘、剪贴板、截图、聊天正文和文件正文禁止采集" onToast={onToast} /><ComplianceRow icon={<Fingerprint size={19} />} title="访问审计" detail="个人时间线、导出和策略修改均写入审计日志" onToast={onToast} /><ComplianceRow icon={<Archive size={19} />} title="数据删除策略" detail="删除前预览，执行结果写入审计" onToast={onToast} /></div></SectionCard>
     <MfaSettings onToast={onToast} />
   </div>;

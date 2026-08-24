@@ -251,6 +251,20 @@ export async function updateLivePrivacyPolicy(policy) {
   });
 }
 
+export async function exportLivePrivacySubject(employeeId) {
+  return request("/api/admin/privacy/subject-export", {
+    method: "POST",
+    body: JSON.stringify({ employee_id: employeeId }),
+  });
+}
+
+export async function deleteLivePrivacySubject(employeeId, apply = false) {
+  return request("/api/admin/privacy/subject-delete", {
+    method: "POST",
+    body: JSON.stringify({ employee_id: employeeId, apply }),
+  });
+}
+
 export async function getLiveRolePolicies() {
   const body = await request("/api/admin/roles");
   return body.roles || [];

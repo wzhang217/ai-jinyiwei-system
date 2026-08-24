@@ -858,9 +858,18 @@ function getPrivacyPolicy(db, organizationId = DEFAULT_ORGANIZATION_ID) {
   };
 }
 
-function getPrivacyAcknowledgements(db, organizationId = DEFAULT_ORGANIZATION_ID) {
+function getPrivacyAcknowledgements(db, organizationId = DEFAULT_ORGANIZATION_ID, principal = null) {
   const scopedOrganizationId = organizationIdOrDefault(organizationId);
   const policy = getPrivacyPolicy(db, scopedOrganizationId);
+  const conditions = ["e.organization_id = ?"];
+  const params = [scopedOrganizationId];
+  if (principal?.role === "employee") {
+    conditions.push("e.id = ?");
+    params.push(principal.employee_id || "");
+  } else if (principal?.role === "manager") {
+    conditions.push("e.team = ?");
+    params.push(principal.team || "");
+  }
   return db.prepare(`
     SELECT e.id AS employee_id, e.name AS employee_name, e.team,
       CASE WHEN pa.id IS NULL THEN 0 ELSE 1 END AS acknowledged,
@@ -868,13 +877,118 @@ function getPrivacyAcknowledgements(db, organizationId = DEFAULT_ORGANIZATION_ID
     FROM employees e
     LEFT JOIN privacy_acknowledgements pa
       ON pa.employee_id = e.id AND pa.policy_version = ?
-    WHERE e.organization_id = ?
+    WHERE ${conditions.join(" AND ")}
     ORDER BY e.team, e.name
-  `).all(policy.version, scopedOrganizationId).map((row) => ({
+  `).all(policy.version, ...params).map((row) => ({
     ...row,
     acknowledged: Boolean(row.acknowledged),
     current_policy_version: policy.version,
   }));
+}
+
+function privacySubjectTarget(db, principal, requestedEmployeeId = "") {
+  const organizationId = principal?.organization_id || DEFAULT_ORGANIZATION_ID;
+  const employeeId = String(requestedEmployeeId || principal?.employee_id || "").trim();
+  if (!employeeId || employeeId.length > 160) return { error: "employee_id is required", code: "invalid_employee_id", status: 400 };
+  const employee = db.prepare("SELECT id, name, team, organization_id, created_at FROM employees WHERE id = ? AND organization_id = ?")
+    .get(employeeId, organizationId);
+  if (!employee) return { error: "employee not found", code: "employee_not_found", status: 404 };
+  if (principal?.role === "employee" && principal.employee_id !== employee.id) {
+    return { error: "employee data scope denied", code: "forbidden", status: 403 };
+  }
+  if (principal?.role === "manager" && principal.team !== employee.team) {
+    return { error: "employee data scope denied", code: "forbidden", status: 403 };
+  }
+  return { employee, organizationId };
+}
+
+function privacySubjectCounts(db, employeeId, organizationId) {
+  const deviceCondition = "d.employee_id = ? AND e.organization_id = ?";
+  const eventCount = db.prepare(`SELECT COUNT(*) AS count FROM events ev JOIN devices d ON d.id = ev.device_id JOIN employees e ON e.id = d.employee_id WHERE ${deviceCondition}`)
+    .get(employeeId, organizationId).count;
+  const summaryCount = db.prepare("SELECT COUNT(*) AS count FROM memory_summaries ms JOIN employees e ON e.id = ms.employee_id WHERE ms.employee_id = ? AND e.organization_id = ?")
+    .get(employeeId, organizationId).count;
+  const jobCount = db.prepare("SELECT COUNT(*) AS count FROM memory_generation_jobs j JOIN memory_summaries ms ON ms.id = j.summary_id JOIN employees e ON e.id = ms.employee_id WHERE ms.employee_id = ? AND e.organization_id = ?")
+    .get(employeeId, organizationId).count;
+  const browserTokenCount = db.prepare("SELECT COUNT(*) AS count FROM browser_tokens bt JOIN devices d ON d.id = bt.device_id JOIN employees e ON e.id = d.employee_id WHERE d.employee_id = ? AND e.organization_id = ?")
+    .get(employeeId, organizationId).count;
+  const browserPairingCodeCount = db.prepare("SELECT COUNT(*) AS count FROM browser_pairing_codes pc JOIN devices d ON d.id = pc.device_id JOIN employees e ON e.id = d.employee_id WHERE d.employee_id = ? AND e.organization_id = ?")
+    .get(employeeId, organizationId).count;
+  const acknowledgementCount = db.prepare("SELECT COUNT(*) AS count FROM privacy_acknowledgements WHERE employee_id = ? AND organization_id = ?")
+    .get(employeeId, organizationId).count;
+  return {
+    events: Number(eventCount || 0),
+    memory_summaries: Number(summaryCount || 0),
+    generation_jobs: Number(jobCount || 0),
+    browser_tokens: Number(browserTokenCount || 0),
+    browser_pairing_codes: Number(browserPairingCodeCount || 0),
+    privacy_acknowledgements_preserved: Number(acknowledgementCount || 0),
+  };
+}
+
+function privacySubjectExport(db, employee, organizationId) {
+  const devices = db.prepare(`
+    SELECT d.id, d.hostname, d.os_version, d.agent_version, d.status,
+      d.last_heartbeat_at, d.queued_events, d.created_at, d.updated_at, d.disabled_at
+    FROM devices d
+    JOIN employees e ON e.id = d.employee_id
+    WHERE d.employee_id = ? AND e.organization_id = ?
+    ORDER BY d.created_at ASC
+  `).all(employee.id, organizationId);
+  const events = db.prepare(`
+    SELECT ev.event_id, ev.device_id, ev.occurred_at, ev.type, ev.app_name,
+      ev.process_name, ev.source_kind, ev.context_label, ev.web_domain,
+      ev.duration_seconds, ev.received_at
+    FROM events ev
+    JOIN devices d ON d.id = ev.device_id
+    JOIN employees e ON e.id = d.employee_id
+    WHERE d.employee_id = ? AND e.organization_id = ?
+    ORDER BY ev.occurred_at ASC
+  `).all(employee.id, organizationId);
+  const summaries = db.prepare(`
+    SELECT ms.id, ms.record_type, ms.device_id, ms.started_at, ms.ended_at,
+      ms.duration_seconds, ms.period_start, ms.period_end,
+      ms.source_event_ids_json, ms.source_record_ids_json, ms.title, ms.summary,
+      ms.prior_context, ms.important_context, ms.citations_json, ms.model_name,
+      ms.prompt_version, ms.status, ms.generated_at, ms.updated_at
+    FROM memory_summaries ms
+    JOIN employees e ON e.id = ms.employee_id
+    WHERE ms.employee_id = ? AND e.organization_id = ?
+    ORDER BY ms.started_at ASC
+  `).all(employee.id, organizationId).map((summary) => ({
+    ...summary,
+    source_event_ids: parseJsonArray(summary.source_event_ids_json),
+    source_record_ids: parseJsonArray(summary.source_record_ids_json),
+    citations: parseJsonArray(summary.citations_json),
+    source_event_ids_json: undefined,
+    source_record_ids_json: undefined,
+    citations_json: undefined,
+  }));
+  const privacyAcknowledgements = db.prepare(`
+    SELECT id, policy_version, policy_hash, acknowledged_at, actor, source, created_at
+    FROM privacy_acknowledgements
+    WHERE employee_id = ? AND organization_id = ?
+    ORDER BY acknowledged_at ASC
+  `).all(employee.id, organizationId);
+  const account = db.prepare(`
+    SELECT id, username, display_name, role, team, created_at, updated_at,
+      last_login_at, disabled_at, mfa_enabled
+    FROM user_accounts
+    WHERE employee_id = ? AND organization_id = ?
+    ORDER BY created_at ASC
+  `).all(employee.id, organizationId).map((item) => ({ ...item, mfa_enabled: Boolean(item.mfa_enabled) }));
+  return {
+    export_version: "privacy-subject-export-v1",
+    exported_at: isoNow(),
+    organization_id: organizationId,
+    scope: "员工活动元数据、Memory Summary、设备状态、账号基本信息和隐私确认记录；不包含密码、Token、键盘、剪贴板、截图、聊天正文、文件正文或完整网页内容。",
+    employee,
+    accounts: account,
+    devices,
+    events,
+    memory_summaries: summaries,
+    privacy_acknowledgements: privacyAcknowledgements,
+  };
 }
 
 function getNotificationSettings(db, organizationId = DEFAULT_ORGANIZATION_ID) {
@@ -3477,7 +3591,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         ensureOrganizationConfiguration(db, organizationId);
         return sendJson(response, 200, {
           policy: getPrivacyPolicy(db, organizationId),
-          acknowledgements: getPrivacyAcknowledgements(db, organizationId),
+          acknowledgements: getPrivacyAcknowledgements(db, organizationId, principal),
         });
       }
 
@@ -3504,14 +3618,90 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         if (next.policy_hash !== current.policy_hash) {
           recordAudit(db, "privacy_policy_changed", principal.actor || "admin", "privacy_policy", `version=${version}`, organizationId);
         }
-        return sendJson(response, 200, { policy: next, acknowledgements: getPrivacyAcknowledgements(db, organizationId) });
+        return sendJson(response, 200, { policy: next, acknowledgements: getPrivacyAcknowledgements(db, organizationId, principal) });
       }
 
       if (method === "GET" && url.pathname === "/api/admin/privacy/acknowledgements") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
         const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
-        return sendJson(response, 200, { policy: getPrivacyPolicy(db, organizationId), acknowledgements: getPrivacyAcknowledgements(db, organizationId) });
+        return sendJson(response, 200, { policy: getPrivacyPolicy(db, organizationId), acknowledgements: getPrivacyAcknowledgements(db, organizationId, principal) });
+      }
+
+      if (method === "POST" && ["/api/admin/privacy/subject-export", "/api/admin/privacy/subject-delete"].includes(url.pathname)) {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
+        const body = await readJson(request);
+        const target = privacySubjectTarget(db, principal, body.employee_id);
+        if (target.error) return sendError(response, target.status, target.error, target.code);
+        const { employee, organizationId } = target;
+        if (url.pathname.endsWith("subject-export")) {
+          const exportData = privacySubjectExport(db, employee, organizationId);
+          recordAudit(db, "privacy_subject_exported", principal.actor || "admin", employee.id, `events=${exportData.events.length}; summaries=${exportData.memory_summaries.length}`, organizationId);
+          return sendJson(response, 200, exportData);
+        }
+
+        const preview = privacySubjectCounts(db, employee.id, organizationId);
+        if (body.apply !== true) {
+          return sendJson(response, 200, {
+            applied: false,
+            employee: { id: employee.id, name: employee.name, team: employee.team },
+            preview,
+            preserved: ["employee_identity", "device_identity", "audit_logs", "privacy_acknowledgements"],
+          });
+        }
+
+        db.exec("BEGIN IMMEDIATE");
+        try {
+          const jobs = db.prepare(`
+            DELETE FROM memory_generation_jobs
+            WHERE summary_id IN (
+              SELECT ms.id FROM memory_summaries ms
+              JOIN employees e ON e.id = ms.employee_id
+              WHERE ms.employee_id = ? AND e.organization_id = ?
+            )
+          `).run(employee.id, organizationId);
+          const summaries = db.prepare("DELETE FROM memory_summaries WHERE employee_id = ? AND employee_id IN (SELECT id FROM employees WHERE organization_id = ?)")
+            .run(employee.id, organizationId);
+          const events = db.prepare(`
+            DELETE FROM events
+            WHERE device_id IN (
+              SELECT d.id FROM devices d JOIN employees e ON e.id = d.employee_id
+              WHERE d.employee_id = ? AND e.organization_id = ?
+            )
+          `).run(employee.id, organizationId);
+          const browserTokens = db.prepare(`
+            DELETE FROM browser_tokens
+            WHERE device_id IN (
+              SELECT d.id FROM devices d JOIN employees e ON e.id = d.employee_id
+              WHERE d.employee_id = ? AND e.organization_id = ?
+            )
+          `).run(employee.id, organizationId);
+          const browserPairingCodes = db.prepare(`
+            DELETE FROM browser_pairing_codes
+            WHERE device_id IN (
+              SELECT d.id FROM devices d JOIN employees e ON e.id = d.employee_id
+              WHERE d.employee_id = ? AND e.organization_id = ?
+            )
+          `).run(employee.id, organizationId);
+          recordAudit(db, "privacy_subject_deleted", principal.actor || "admin", employee.id, `events=${events.changes}; summaries=${summaries.changes}; jobs=${jobs.changes}; browser_tokens=${browserTokens.changes}; browser_pairing_codes=${browserPairingCodes.changes}; acknowledgements_preserved=${preview.privacy_acknowledgements_preserved}`, organizationId);
+          db.exec("COMMIT");
+          return sendJson(response, 200, {
+            applied: true,
+            employee: { id: employee.id, name: employee.name, team: employee.team },
+            deleted: {
+              events: Number(events.changes),
+              memory_summaries: Number(summaries.changes),
+              generation_jobs: Number(jobs.changes),
+              browser_tokens: Number(browserTokens.changes),
+              browser_pairing_codes: Number(browserPairingCodes.changes),
+            },
+            preserved: { privacy_acknowledgements: preview.privacy_acknowledgements_preserved, audit_logs: true },
+          });
+        } catch (error) {
+          db.exec("ROLLBACK");
+          throw error;
+        }
       }
 
       if (method === "GET" && url.pathname === "/api/admin/events") {

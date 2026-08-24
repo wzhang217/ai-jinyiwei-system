@@ -1329,6 +1329,134 @@ test("requires current privacy acknowledgement for new Agent event payloads and 
   });
 });
 
+test("supports scoped privacy subject export and previewed activity deletion", async () => {
+  await withServer(async ({ base, app }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    async function enroll(employeeId, hostname) {
+      const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+        method: "POST",
+        headers: adminHeaders,
+        body: JSON.stringify({ employee_id: employeeId }),
+      });
+      return jsonFetch(`${base}/api/agent/enroll`, {
+        method: "POST",
+        body: JSON.stringify({ registration_code: code.body.code, hostname, os_version: "Windows 11", agent_version: "0.1.20" }),
+      });
+    }
+
+    const wei = await enroll("employee-wei", "WIN-PRIVACY-RIGHTS-WEI");
+    const lin = await enroll("employee-lin", "WIN-PRIVACY-RIGHTS-LIN");
+    const startedAt = new Date(Date.now() - 20 * 60_000).toISOString();
+    const endedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    app.db.prepare(`
+      INSERT INTO events (event_id, device_id, occurred_at, type, app_name, process_name, source_kind, context_label, web_domain, duration_seconds, received_at)
+      VALUES (?, ?, ?, 'app_session', ?, ?, 'desktop_app', ?, ?, ?, ?)
+    `).run("privacy-rights-event", wei.body.device_id, startedAt, "Visual Studio Code", "Code.exe", "项目：AI锦衣卫系统", null, 600, new Date().toISOString());
+    app.db.prepare(`
+      INSERT INTO memory_summaries
+        (id, record_type, employee_id, device_id, started_at, ended_at, duration_seconds, source_hash,
+         period_start, period_end, source_event_ids, source_event_ids_json, source_record_ids_json,
+         title, summary, prior_context, important_context, citations, citations_json, payload_json,
+         model_name, prompt_version, status, generated_at, updated_at, rollup_scope)
+      VALUES (?, 'leaf', ?, ?, ?, ?, 600, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, 'window')
+    `).run(
+      "privacy-rights-summary",
+      "employee-wei",
+      wei.body.device_id,
+      startedAt,
+      endedAt,
+      "source-hash",
+      startedAt,
+      endedAt,
+      JSON.stringify(["privacy-rights-event"]),
+      JSON.stringify(["privacy-rights-event"]),
+      JSON.stringify([]),
+      "Wei · 项目活动",
+      "基于活动元数据生成的摘要",
+      "开发上下文",
+      "不包含原始正文",
+      JSON.stringify([]),
+      JSON.stringify([]),
+      JSON.stringify({ title: "Wei · 项目活动", summary: "基于活动元数据生成的摘要" }),
+      "qwen3.7-plus",
+      "memory-v1",
+      new Date().toISOString(),
+      new Date().toISOString(),
+    );
+    app.db.prepare(`
+      INSERT INTO privacy_acknowledgements
+        (id, organization_id, employee_id, device_id, policy_version, policy_hash, acknowledged_at, actor, source, created_at)
+      VALUES (?, 'org_default', 'employee-wei', ?, 'test-policy', 'test-hash', ?, 'Wei', 'agent', ?)
+    `).run("privacy-rights-ack", wei.body.device_id, new Date().toISOString(), new Date().toISOString());
+
+    const exported = await jsonFetch(`${base}/api/admin/privacy/subject-export`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    assert.equal(exported.response.status, 200);
+    assert.equal(exported.body.employee.id, "employee-wei");
+    assert.equal(exported.body.events.length, 1);
+    assert.equal(exported.body.memory_summaries.length, 1);
+    assert.equal(exported.body.privacy_acknowledgements.length, 1);
+    assert.equal(Object.hasOwn(exported.body.devices[0], "token_hash"), false);
+    assert.equal(Object.hasOwn(exported.body.memory_summaries[0], "payload_json"), false);
+
+    const employeeSession = await jsonFetch(`${base}/api/admin/sessions`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ role: "employee", employee_id: "employee-wei" }),
+    });
+    const employeeExport = await jsonFetch(`${base}/api/admin/privacy/subject-export`, {
+      method: "POST",
+      headers: { "x-admin-session": employeeSession.body.token },
+      body: JSON.stringify({ employee_id: "employee-lin" }),
+    });
+    assert.equal(employeeExport.response.status, 403);
+
+    const managerSession = await jsonFetch(`${base}/api/admin/sessions`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ role: "manager", team: "研发与产品中心" }),
+    });
+    const managerExport = await jsonFetch(`${base}/api/admin/privacy/subject-export`, {
+      method: "POST",
+      headers: { "x-admin-session": managerSession.body.token },
+      body: JSON.stringify({ employee_id: "employee-lin" }),
+    });
+    assert.equal(managerExport.response.status, 403);
+
+    const preview = await jsonFetch(`${base}/api/admin/privacy/subject-delete`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    assert.equal(preview.response.status, 200);
+    assert.equal(preview.body.applied, false);
+    assert.equal(preview.body.preview.events, 1);
+    assert.equal(preview.body.preview.memory_summaries, 1);
+    assert.equal(preview.body.preview.privacy_acknowledgements_preserved, 1);
+
+    const applied = await jsonFetch(`${base}/api/admin/privacy/subject-delete`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei", apply: true }),
+    });
+    assert.equal(applied.response.status, 200);
+    assert.equal(applied.body.applied, true);
+    assert.equal(applied.body.deleted.events, 1);
+    assert.equal(applied.body.deleted.memory_summaries, 1);
+    assert.equal(applied.body.preserved.privacy_acknowledgements, 1);
+    assert.equal(app.db.prepare("SELECT COUNT(*) AS count FROM events WHERE event_id = ?").get("privacy-rights-event").count, 0);
+    assert.equal(app.db.prepare("SELECT COUNT(*) AS count FROM memory_summaries WHERE id = ?").get("privacy-rights-summary").count, 0);
+    assert.equal(app.db.prepare("SELECT COUNT(*) AS count FROM privacy_acknowledgements WHERE id = ?").get("privacy-rights-ack").count, 1);
+    const audit = await jsonFetch(`${base}/api/admin/audit`, { headers: adminHeaders });
+    assert.ok(audit.body.logs.some((item) => item.action === "privacy_subject_exported" && item.target === "employee-wei"));
+    assert.ok(audit.body.logs.some((item) => item.action === "privacy_subject_deleted" && item.target === "employee-wei"));
+    assert.equal(lin.response.status, 201);
+  });
+});
+
 test("locks an account after repeated login failures and resets protection after success", async () => {
   await withServer(async ({ base, app }) => {
     const created = await jsonFetch(`${base}/api/admin/accounts`, {

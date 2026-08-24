@@ -32,7 +32,7 @@ AUTH_LOCKOUT_SECONDS=900
 
 前端只需要设置 `VITE_AGENT_API_BASE_URL=http://localhost:8787`，不再设置 `VITE_AGENT_ADMIN_TOKEN`。登录成功后的会话存放在浏览器会话存储中，退出登录、账号停用或会话过期后立即失效。
 
-登录连续失败达到阈值后账号会暂时锁定，成功登录会清零失败计数。员工 Agent 注册后必须确认当前隐私策略版本，服务端会记录组织、员工、设备、策略哈希和确认时间；策略版本更新后需要重新确认。相关接口为 `/api/agent/privacy-policy`、`/api/agent/privacy-acknowledgement` 和 `/api/admin/privacy/acknowledgements`。
+登录连续失败达到阈值后账号会暂时锁定，成功登录会清零失败计数。员工 Agent 注册后必须确认当前隐私策略版本，服务端会记录组织、员工、设备、策略哈希和确认时间；策略版本更新后需要重新确认。相关接口为 `/api/agent/privacy-policy`、`/api/agent/privacy-acknowledgement` 和 `/api/admin/privacy/acknowledgements`。后台的“员工数据权利”支持 `POST /api/admin/privacy/subject-export` 导出员工活动元数据，以及 `POST /api/admin/privacy/subject-delete` 先预览再执行删除；两者均按老板/高管/员工服务端范围过滤并写入审计。导出不会包含密码、Token 或原始正文；删除会清理活动事件、Memory Summary、生成队列和浏览器临时凭据，但保留员工/设备身份、审计日志和隐私确认记录。
 
 ### 数据库迁移、备份与恢复
 
