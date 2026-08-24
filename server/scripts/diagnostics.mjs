@@ -1,8 +1,10 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, statfsSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 const dbPath = resolve(process.env.AGENT_DB_PATH || "./data/agent.sqlite");
+const storagePath = dirname(dbPath);
+const minimumFreeBytes = Math.max(0, Number(process.env.DISK_MIN_FREE_BYTES) || 1_073_741_824);
 const outputIndex = process.argv.indexOf("--output");
 const outputPath = outputIndex >= 0 && process.argv[outputIndex + 1]
   ? resolve(process.argv[outputIndex + 1])
@@ -34,6 +36,15 @@ try {
   const integrity = text("PRAGMA quick_check") || "unknown";
   const schemaVersion = scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations");
   const expectedSchemaVersion = 7;
+  let storage = { path: storagePath, free_bytes: null, total_bytes: null, minimum_free_bytes: minimumFreeBytes, ready: false };
+  try {
+    const filesystem = statfsSync(storagePath);
+    const freeBytes = Number(filesystem.bavail) * Number(filesystem.bsize);
+    const totalBytes = Number(filesystem.blocks) * Number(filesystem.bsize);
+    storage = { ...storage, free_bytes: freeBytes, total_bytes: totalBytes, ready: freeBytes >= minimumFreeBytes };
+  } catch (error) {
+    storage.error = redact(error.message).slice(0, 200);
+  }
   const recentJobErrors = db.prepare(`
     SELECT status, attempts, last_error, updated_at
     FROM memory_generation_jobs
@@ -53,7 +64,7 @@ try {
     db_path: dbPath,
     database: {
       integrity_check: integrity,
-      ready: integrity === "ok" && schemaVersion === expectedSchemaVersion,
+      ready: integrity === "ok" && schemaVersion === expectedSchemaVersion && storage.ready,
       schema_version: schemaVersion,
       expected_schema_version: expectedSchemaVersion,
       organizations: scalar("SELECT COUNT(*) FROM organizations"),
@@ -70,6 +81,7 @@ try {
       newest_event_at: text("SELECT MAX(received_at) FROM events"),
       newest_heartbeat_at: text("SELECT MAX(last_heartbeat_at) FROM devices"),
     },
+    storage,
     configuration: {
       host: process.env.HOST || "127.0.0.1",
       port: Number(process.env.PORT) || 8787,
