@@ -944,6 +944,10 @@ function PolicyEditor({ role = "admin", onToast }) {
     }
   };
 
+  if (agentApiEnabled && (loading || error)) {
+    return <SectionCard title="采集策略" description="统一控制应用、网页和文件元数据的采集范围">{error && <div className="error-box">策略读取失败：{error}</div>}<EmptyState title={loading ? "正在读取服务端策略…" : "暂时无法读取服务端策略"} /></SectionCard>;
+  }
+
   const togglePolicy = (key) => {
     if (!canEdit) {
       onToast("当前角色只能查看采集策略；请切换为老板后编辑");
@@ -1002,6 +1006,10 @@ function ExclusionPolicy({ role = "admin", onToast }) {
       setSaving(false);
     }
   };
+
+  if (agentApiEnabled && (loading || error)) {
+    return <SectionCard title="应用与网站排除" description="被排除的来源不会进入活动事件或 Memory Summary">{error && <div className="error-box">排除策略读取失败：{error}</div>}<EmptyState title={loading ? "正在读取服务端排除策略…" : "暂时无法读取服务端排除策略"} /></SectionCard>;
+  }
 
   return <SectionCard title="应用与网站排除" description="被排除的来源不会进入活动事件或 Memory Summary"><div className="exclusion-editor"><label>排除的进程（逗号分隔）<input disabled={!canEdit} value={policy.excluded_processes.join(", ")} placeholder="passwordmanager.exe, private.exe" onChange={(event) => updateList("excluded_processes", event.target.value)} /></label><label>排除的网站域名（逗号分隔）<input disabled={!canEdit} value={policy.excluded_domains.join(", ")} placeholder="bank.example.com, personal.example" onChange={(event) => updateList("excluded_domains", event.target.value)} /></label></div><small className="policy-hint">支持子域名匹配；只对保存后的新事件生效，不删除历史数据。</small>{error && <div className="error-box">排除策略保存失败：{error}</div>}<div className="policy-save-row"><small>{loading ? "正在读取服务端策略…" : agentApiEnabled ? `策略版本 v${policy.version || 1}` : "当前为演示模式，未连接服务端"}</small><button className="primary-button" disabled={loading || saving || !canEdit} onClick={save}>{saving ? "保存中…" : canEdit ? "保存排除策略" : "老板可编辑"}</button></div></SectionCard>;
 }
