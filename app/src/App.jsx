@@ -47,7 +47,7 @@ import {
 } from "@phosphor-icons/react";
 import { applications, defaultQuestions, historyRecords } from "./data.js";
 import { askHistory, downloadRecordMarkdown, getRecordStats } from "./services/historyService.js";
-import { agentApiEnabled, askLiveHistory, auditLiveExport, clearAdminSession, demoMode, getAdminMe, getLiveHistory, getLiveHistorySources, getLiveOrganization, getStoredAdminPrincipal, loginAdmin, logoutAdmin } from "./services/agentApi.js";
+import { agentApiEnabled, askLiveHistory, auditLiveExport, changeCurrentAccountPassword, clearAdminSession, demoMode, getAdminMe, getLiveHistory, getLiveHistorySources, getLiveOrganization, getStoredAdminPrincipal, loginAdmin, logoutAdmin } from "./services/agentApi.js";
 import { AdminPage, roleLabel } from "./AdminPages.jsx";
 import { formatShanghaiTime } from "./time.js";
 
@@ -170,6 +170,31 @@ function ApiConfigurationView() {
   return <div className="auth-screen"><div className="auth-card"><div className="organization-mark"><Buildings size={23} weight="fill" /></div><h1>管理后台未连接服务端</h1><p>生产构建不会在服务端未配置时显示演示账号或虚构数据。请设置 <code>VITE_AGENT_API_BASE_URL</code> 后重新启动前端。</p><div className="error-box">当前未配置 Agent API 地址</div></div></div>;
 }
 
+function PasswordChangeModal({ error, loading, onClose, onSubmit }) {
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [formError, setFormError] = useState("");
+  const submit = async (event) => {
+    event.preventDefault();
+    setFormError("");
+    if (newPassword.length < 12) {
+      setFormError("新密码至少需要12位");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setFormError("两次输入的新密码不一致");
+      return;
+    }
+    try {
+      await onSubmit(currentPassword, newPassword);
+    } catch (submitError) {
+      setFormError(submitError.message);
+    }
+  };
+  return <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && !loading && onClose()}><aside className="detail-panel password-change-panel" role="dialog" aria-modal="true" aria-label="修改密码"><div className="detail-topbar"><div><span className="detail-kicker"><Key size={14} />ACCOUNT SECURITY</span><h2>修改密码</h2><p>修改后当前登录会话会失效，需要重新登录。</p></div><button className="detail-close" disabled={loading} onClick={onClose}><X size={21} /></button></div><form className="password-change-form" onSubmit={submit}><label>当前密码<input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required /></label><label>新密码（至少12位）<input type="password" autoComplete="new-password" minLength="12" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required /></label><label>确认新密码<input type="password" autoComplete="new-password" minLength="12" value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} required /></label>{(formError || error) && <div className="error-box">{formError || error}</div>}<div className="registration-actions"><button type="button" className="outline-button" disabled={loading} onClick={onClose}>取消</button><button type="submit" className="primary-button" disabled={loading}>{loading ? "保存中…" : "保存并重新登录"}</button></div></form></aside></div>;
+}
+
 function App() {
   const [principal, setPrincipal] = useState(() => agentApiEnabled ? getStoredAdminPrincipal() : demoMode ? { role: "admin", actor: "演示管理员", team: null } : null);
   const [authChecking, setAuthChecking] = useState(agentApiEnabled);
@@ -183,6 +208,9 @@ function App() {
   const [liveUpdatedAt, setLiveUpdatedAt] = useState(null);
   const [liveRefreshing, setLiveRefreshing] = useState(false);
   const [liveError, setLiveError] = useState("");
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [passwordError, setPasswordError] = useState("");
   const [organizationName, setOrganizationName] = useState(demoMode ? "锦衣卫科技" : "当前组织");
   const role = principal?.role || "admin";
 
@@ -293,7 +321,7 @@ function App() {
       <div className="sidebar-search"><MagnifyingGlass size={17} /><input aria-label="搜索设置和功能" placeholder="搜索设置..." value={query} onChange={(event) => setQuery(event.target.value)} /></div>
       <div className="organization-switcher"><div className="organization-mark"><Buildings size={20} weight="fill" /></div><div><strong>{organizationName}</strong><span>{principal?.team || "全企业数据范围"}</span></div><CaretDown size={15} /></div>
       <nav className="sidebar-nav" aria-label="企业导航">{visibleNavGroups.map((group) => <div className="nav-group" key={group.label}><div className="nav-group-label">{group.label}</div>{group.items.map(({ id, label, icon: Icon }) => <button className={`nav-item ${activeNav === id ? "active" : ""}`} key={id} onClick={() => navigate(id)}><Icon size={19} weight={activeNav === id ? "fill" : "regular"} /><span>{role === "employee" && id === "overview" ? "我的工作状态" : label}</span>{id === "skill" && <span className="nav-new">AI</span>}</button>)}</div>)}</nav>
-      <div className="sidebar-footer"><div className="privacy-status"><ShieldCheck size={16} weight="fill" /><span>采集策略正常</span><span className="status-dot" /></div><div className="account-row"><span className="avatar">{(principal?.actor || "管").slice(0, 1)}</span><div><strong>{principal?.actor || "管理员"}</strong><span>{roleLabel[role]}</span></div><button className="account-menu-button" title="退出登录" onClick={() => { void logoutAdmin().then(() => setPrincipal(null)); }}><DotsThree size={20} /></button></div></div>
+      <div className="sidebar-footer"><div className="privacy-status"><ShieldCheck size={16} weight="fill" /><span>采集策略正常</span><span className="status-dot" /></div><div className="account-row"><span className="avatar">{(principal?.actor || "管").slice(0, 1)}</span><div><strong>{principal?.actor || "管理员"}</strong><span>{roleLabel[role]}</span></div>{agentApiEnabled && <button className="account-menu-button" title="修改密码" onClick={() => { setPasswordError(""); setPasswordOpen(true); }}><Key size={16} /></button>}<button className="account-menu-button" title="退出登录" onClick={() => { void logoutAdmin().then(() => setPrincipal(null)); }}><DotsThree size={20} /></button></div></div>
     </aside>
 
     <main className="main-content">
@@ -302,6 +330,22 @@ function App() {
     </main>
 
     {selectedRecord && <RecordDetail record={selectedRecord} onClose={() => setSelectedRecord(null)} onExport={() => { void exportRecordWithAudit(selectedRecord, notify); }} onToast={notify} onNavigate={navigate} />}
+    {passwordOpen && <PasswordChangeModal error={passwordError} loading={passwordSaving} onClose={() => setPasswordOpen(false)} onSubmit={async (currentPassword, newPassword) => {
+      setPasswordSaving(true);
+      setPasswordError("");
+      try {
+        await changeCurrentAccountPassword(currentPassword, newPassword);
+        clearAdminSession();
+        setPasswordOpen(false);
+        setPrincipal(null);
+        setAuthError("密码已修改，请使用新密码登录");
+      } catch (error) {
+        setPasswordError(error.message);
+        throw error;
+      } finally {
+        setPasswordSaving(false);
+      }
+    }} />}
     {toast && <div className="toast"><CheckCircle size={18} weight="fill" /><span>{toast}</span></div>}
   </div>;
 }

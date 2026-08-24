@@ -110,7 +110,13 @@ button, input, select { font: inherit; } button { color: inherit; border: 0; cur
 .auth-form .error-box { margin: 0; }
 .account-menu-button { display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: #85817a; }
 .account-menu-button:hover { color: #4e4b45; }
+.account-menu-button:disabled { cursor: not-allowed; opacity: .55; }
 .role-select-static { display: inline-flex; align-items: center; }
+.password-change-panel { width: min(430px, 100vw); }
+.password-change-form { display: grid; gap: 12px; padding: 21px 31px 28px; }
+.password-change-form label { display: flex; flex-direction: column; gap: 6px; color: #77736c; font-size: 10px; }
+.password-change-form input { height: 37px; padding: 0 10px; border: 1px solid #e4e1db; border-radius: 8px; outline: 0; background: #fafaf8; color: #565149; font-size: 11px; }
+.password-change-form input:focus { border-color: #b9a9d5; box-shadow: 0 0 0 3px #f0ebfa; }
 .account-admin-list { display: flex; flex-direction: column; gap: 7px; margin-bottom: 22px; }
 .account-admin-row { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 9px 10px; border: 1px solid #e9e7e2; border-radius: 8px; background: #fff; }
 .account-admin-row > span:nth-child(2) { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 3px; }
