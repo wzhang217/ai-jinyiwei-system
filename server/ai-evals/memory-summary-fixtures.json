@@ -1,0 +1,75 @@
+[
+  {
+    "id": "build-release",
+    "input": {
+      "employee_name": "Wei",
+      "employee_team": "研发与产品中心",
+      "started_at": "2026-08-24T01:00:00.000Z",
+      "ended_at": "2026-08-24T01:18:00.000Z",
+      "application_names": ["VS Code", "Chrome", "GitHub"],
+      "context_kinds": ["开发", "浏览器"],
+      "context_labels": ["ai-jinyiwei-system", "构建发布", "代码协作"],
+      "web_domains": ["github.com"],
+      "source_types": ["桌面应用", "浏览器原生"],
+      "resource_types": ["项目", "代码仓库", "网站"],
+      "context_switches": 4,
+      "activity_sequence": [
+        { "occurred_at": "2026-08-24T01:00:00.000Z", "app": "VS Code", "context_label": "ai-jinyiwei-system", "duration_seconds": 540 },
+        { "occurred_at": "2026-08-24T01:09:00.000Z", "app": "Chrome", "web_domain": "github.com", "context_label": "构建发布", "duration_seconds": 360 },
+        { "occurred_at": "2026-08-24T01:15:00.000Z", "app": "GitHub", "context_label": "代码协作", "duration_seconds": 180 }
+      ]
+    },
+    "expect": {
+      "must_include": ["ai-jinyiwei-system", "构建", "东八区", "VS Code"],
+      "must_not_include": ["https://", "C:\\\\", "/Users/", "页面正文", "键盘输入"]
+    }
+  },
+  {
+    "id": "document-communication",
+    "input": {
+      "employee_name": "Wei",
+      "employee_team": "研发与产品中心",
+      "started_at": "2026-08-24T03:20:00.000Z",
+      "ended_at": "2026-08-24T03:42:00.000Z",
+      "application_names": ["WPS", "Windows 文件资源管理器", "Weixin"],
+      "context_kinds": ["文件", "文档", "沟通"],
+      "context_labels": ["项目文档", "文件整理", "沟通协作"],
+      "web_domains": [],
+      "source_types": ["桌面应用"],
+      "resource_types": ["项目", "文档", "沟通工具"],
+      "context_switches": 3,
+      "activity_sequence": [
+        { "occurred_at": "2026-08-24T03:20:00.000Z", "app": "WPS", "context_label": "项目文档", "duration_seconds": 720 },
+        { "occurred_at": "2026-08-24T03:32:00.000Z", "app": "Windows 文件资源管理器", "context_label": "文件整理", "duration_seconds": 480 },
+        { "occurred_at": "2026-08-24T03:40:00.000Z", "app": "Weixin", "context_label": "沟通协作", "duration_seconds": 120 }
+      ]
+    },
+    "expect": {
+      "must_include": ["项目文档", "文件整理", "沟通", "东八区"],
+      "must_not_include": ["https://", "C:\\\\", "/Users/", "聊天正文", "剪贴板内容"]
+    }
+  },
+  {
+    "id": "idle-window",
+    "input": {
+      "employee_name": "Wei",
+      "employee_team": "研发与产品中心",
+      "started_at": "2026-08-24T04:00:00.000Z",
+      "ended_at": "2026-08-24T04:10:00.000Z",
+      "application_names": ["系统空闲"],
+      "context_kinds": ["系统空闲"],
+      "context_labels": ["系统空闲"],
+      "web_domains": [],
+      "source_types": ["系统空闲"],
+      "resource_types": [],
+      "context_switches": 0,
+      "activity_sequence": [
+        { "occurred_at": "2026-08-24T04:00:00.000Z", "app": "系统空闲", "context_label": "系统空闲", "duration_seconds": 600 }
+      ]
+    },
+    "expect": {
+      "must_include": ["系统空闲", "东八区"],
+      "must_not_include": ["https://", "C:\\\\", "/Users/", "绩效结论", "具体工作内容"]
+    }
+  }
+]
