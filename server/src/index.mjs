@@ -8,6 +8,9 @@ import { createAiService } from "./ai.mjs";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const defaultDbPath = resolve(moduleDir, "../data/agent.sqlite");
+const DEFAULT_ORGANIZATION_ID = /^[a-z0-9][a-z0-9_-]{2,63}$/.test(String(process.env.DEFAULT_ORGANIZATION_ID || "org_default"))
+  ? String(process.env.DEFAULT_ORGANIZATION_ID || "org_default")
+  : "org_default";
 const allowedEventTypes = new Set(["app_session", "idle"]);
 const allowedSourceKinds = new Set([
   "desktop_app",
@@ -141,6 +144,7 @@ function accountPrincipal(account) {
     actor: account.display_name,
     employee_id: account.employee_id || null,
     team: account.team || null,
+    organization_id: account.organization_id || DEFAULT_ORGANIZATION_ID,
   };
 }
 
@@ -149,14 +153,25 @@ function configuredAiGenerationBatchSize() {
 }
 
 function createSchema(db) {
+  const organizationDefault = `'${DEFAULT_ORGANIZATION_ID.replaceAll("'", "''")}'`;
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA foreign_keys = ON;
+
+    CREATE TABLE IF NOT EXISTS organizations (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      slug TEXT NOT NULL UNIQUE,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      disabled_at TEXT
+    );
 
     CREATE TABLE IF NOT EXISTS employees (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
       team TEXT NOT NULL,
+      organization_id TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id),
       created_at TEXT NOT NULL
     );
 
@@ -167,6 +182,7 @@ function createSchema(db) {
       role TEXT NOT NULL CHECK (role IN ('admin', 'manager', 'employee')),
       employee_id TEXT REFERENCES employees(id),
       team TEXT,
+      organization_id TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id),
       password_hash TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
@@ -182,6 +198,7 @@ function createSchema(db) {
       actor TEXT NOT NULL,
       employee_id TEXT,
       team TEXT,
+      organization_id TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id),
       expires_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       last_seen_at TEXT NOT NULL,
@@ -377,10 +394,25 @@ function createSchema(db) {
   `);
   purgeInvalidIdleSummaries(db);
 
+  const now = isoNow();
+  db.prepare(`
+    INSERT OR IGNORE INTO organizations (id, name, slug, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(
+    DEFAULT_ORGANIZATION_ID,
+    process.env.ORGANIZATION_NAME || "锦衣卫科技",
+    process.env.ORGANIZATION_SLUG || "jinyiwei",
+    now,
+    now,
+  );
+  ensureColumn(db, "employees", "organization_id", `TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id)`);
+  ensureColumn(db, "user_accounts", "organization_id", `TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id)`);
+  ensureColumn(db, "admin_sessions", "organization_id", `TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id)`);
+
   const employeeInsert = db.prepare(
     "INSERT OR IGNORE INTO employees (id, name, team, created_at) VALUES (?, ?, ?, ?)",
   );
-  const createdAt = isoNow();
+  const createdAt = now;
   for (const employee of defaultEmployees) employeeInsert.run(...employee, createdAt);
 
   const adminUsername = normalizeUsername(process.env.ADMIN_USERNAME || "admin");
@@ -388,12 +420,13 @@ function createSchema(db) {
   if (adminPassword && !db.prepare("SELECT id FROM user_accounts WHERE username = ?").get(adminUsername)) {
     db.prepare(`
       INSERT INTO user_accounts
-        (id, username, display_name, role, employee_id, team, password_hash, created_at, updated_at)
-      VALUES (?, ?, ?, 'admin', NULL, NULL, ?, ?, ?)
+        (id, username, display_name, role, employee_id, team, organization_id, password_hash, created_at, updated_at)
+      VALUES (?, ?, ?, 'admin', NULL, NULL, ?, ?, ?, ?)
     `).run(
       newId("account"),
       adminUsername,
       process.env.ADMIN_DISPLAY_NAME || "企业管理员",
+      DEFAULT_ORGANIZATION_ID,
       hashPassword(adminPassword),
       createdAt,
       createdAt,
