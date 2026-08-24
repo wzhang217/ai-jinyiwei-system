@@ -166,6 +166,35 @@ History Skill 的召回使用 `semantic-metadata-v1`：先按时间和权限过�
 
 管理后台的团队和员工目录通过 `GET /api/admin/teams`、`GET /api/admin/employees` 读取服务端组织数据，并沿用管理员、管理者和员工的服务端权限范围；前端不再把演示目录作为真实数据源。
 
+### 批量导入客户员工目录
+
+正式交付前可以使用 CSV 或 JSON 将客户员工目录导入指定组织。脚本只创建或更新员工目录，不删除缺失员工，也不接受密码字段；账号密码仍通过管理后台、SSO 或客户自己的账号目录交接，避免把密码写入导入文件。
+
+CSV 最小格式：
+
+```csv
+employee_id,name,team
+employee-001,张三,研发中心
+employee-002,李四,客户成功
+```
+
+先预览，再执行：
+
+```bash
+AGENT_DB_PATH=./data/agent.sqlite \
+npm run directory:import -- \
+  --organization-id customer_acme \
+  --file ./customer-directory.csv \
+  --dry-run
+
+AGENT_DB_PATH=./data/agent.sqlite \
+npm run directory:import -- \
+  --organization-id customer_acme \
+  --file ./customer-directory.csv
+```
+
+JSON 可以是员工数组，也可以是 `{ "employees": [...] }`。脚本具备组织隔离、重复员工 ID 拒绝、事务回滚和审计记录；重复执行同一文件是幂等的。它不会自动停用缺失员工，停用应由管理员确认后在后台完成。
+
 管理后台的“立即刷新”会重新读取 `GET /api/admin/history`，历史记录页的导出会调用 `POST /api/admin/history/export`，服务端返回当前权限范围内的记录并写入 `history_exported` 审计日志。设备列表读取真实心跳；超过策略心跳间隔的设备会被标记为离线，并写入 `agent_offline`，恢复心跳后写入 `agent_online`。
 
 历史记录同时提供 Leaf、连续窗口、小时、每日、个人每周和团队周 Rollup Summary。模型暂时不可用时会先返回规则兜底摘要，并写入 `memory_generation_jobs`，后台会按退避策略重试，最多 5 次。`AI_MAX_REQUESTS_PER_MINUTE` 控制单个服务进程的模型调用预算，超过后暂时使用规则摘要并进入重试队列。模型请求默认 60 秒超时，并默认关闭 qwen3.7-plus 的思考模式以适配短摘要和实时问答；超时同样会进入规则兜底和重试流程。需要保留思考过程时可设置 `AI_ENABLE_THINKING=true`，但应同步提高 `AI_REQUEST_TIMEOUT_MS`。
