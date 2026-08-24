@@ -8,6 +8,7 @@ import { createAiService } from "./ai.mjs";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 const defaultDbPath = resolve(moduleDir, "../data/agent.sqlite");
+const CURRENT_SCHEMA_VERSION = 2;
 const DEFAULT_ORGANIZATION_ID = /^[a-z0-9][a-z0-9_-]{2,63}$/.test(String(process.env.DEFAULT_ORGANIZATION_ID || "org_default"))
   ? String(process.env.DEFAULT_ORGANIZATION_ID || "org_default")
   : "org_default";
@@ -158,6 +159,13 @@ function createSchema(db) {
     PRAGMA journal_mode = WAL;
     PRAGMA foreign_keys = ON;
 
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      checksum TEXT NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS organizations (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -268,6 +276,7 @@ function createSchema(db) {
       actor TEXT NOT NULL,
       target TEXT NOT NULL,
       detail TEXT,
+      organization_id TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id),
       created_at TEXT NOT NULL
     );
 
@@ -405,15 +414,16 @@ function createSchema(db) {
     now,
     now,
   );
-  ensureColumn(db, "employees", "organization_id", `TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id)`);
-  ensureColumn(db, "user_accounts", "organization_id", `TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id)`);
-  ensureColumn(db, "admin_sessions", "organization_id", `TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id)`);
+  applySchemaMigrations(db, organizationDefault, now);
 
   const employeeInsert = db.prepare(
     "INSERT OR IGNORE INTO employees (id, name, team, created_at) VALUES (?, ?, ?, ?)",
   );
   const createdAt = now;
-  for (const employee of defaultEmployees) employeeInsert.run(...employee, createdAt);
+  const seedDefaultDirectory = process.env.SEED_DEFAULT_DIRECTORY !== "false" && process.env.NODE_ENV !== "production";
+  if (seedDefaultDirectory) {
+    for (const employee of defaultEmployees) employeeInsert.run(...employee, createdAt);
+  }
 
   const adminUsername = normalizeUsername(process.env.ADMIN_USERNAME || "admin");
   const adminPassword = String(process.env.ADMIN_PASSWORD || "");
@@ -452,6 +462,21 @@ function createSchema(db) {
 
   const roleInsert = db.prepare("INSERT OR IGNORE INTO role_policies (role, label, scope, detail, updated_at) VALUES (?, ?, ?, ?, ?)");
   for (const [role, label, scope, detail] of defaultRolePolicies) roleInsert.run(role, label, scope, detail, createdAt);
+}
+
+function applySchemaMigrations(db, organizationDefault, now = isoNow()) {
+  const applied = new Set(db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => Number(row.version)));
+  const insert = db.prepare("INSERT OR IGNORE INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)");
+  if (!applied.has(1)) {
+    insert.run(1, "baseline", hash("schema:baseline:v1"), now);
+  }
+  if (!applied.has(2)) {
+    ensureColumn(db, "employees", "organization_id", `TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id)`);
+    ensureColumn(db, "user_accounts", "organization_id", `TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id)`);
+    ensureColumn(db, "admin_sessions", "organization_id", `TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id)`);
+    ensureColumn(db, "audit_logs", "organization_id", `TEXT NOT NULL DEFAULT ${organizationDefault} REFERENCES organizations(id)`);
+    insert.run(2, "organization-ownership", hash("schema:organization-ownership:v2"), now);
+  }
 }
 
 function purgeInvalidIdleSummaries(db) {
@@ -712,8 +737,8 @@ function createDatabaseSession(db, account) {
   const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
   db.prepare(`
     INSERT INTO admin_sessions
-      (id, token_hash, account_id, role, actor, employee_id, team, expires_at, created_at, last_seen_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, token_hash, account_id, role, actor, employee_id, team, organization_id, expires_at, created_at, last_seen_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     newId("session"),
     hash(token),
@@ -722,6 +747,7 @@ function createDatabaseSession(db, account) {
     account.display_name,
     account.employee_id || null,
     account.team || null,
+    account.organization_id || DEFAULT_ORGANIZATION_ID,
     expiresAt,
     now,
     now,
@@ -732,7 +758,7 @@ function createDatabaseSession(db, account) {
 function databaseSessionPrincipal(db, token) {
   if (!token) return null;
   const session = db.prepare(`
-    SELECT s.id, s.role, s.actor, s.employee_id, s.team, s.expires_at,
+    SELECT s.id, s.role, s.actor, s.employee_id, s.team, s.organization_id, s.expires_at,
       a.id AS account_id, a.username
     FROM admin_sessions s
     JOIN user_accounts a ON a.id = s.account_id
@@ -750,6 +776,7 @@ function databaseSessionPrincipal(db, token) {
     actor: session.actor,
     employee_id: session.employee_id || null,
     team: session.team || null,
+    organization_id: session.organization_id || DEFAULT_ORGANIZATION_ID,
     source: "session",
   };
 }
@@ -765,10 +792,10 @@ function resolveAdminPrincipal(request, adminToken, sessionSecret = adminToken, 
   const databasePrincipal = db ? databaseSessionPrincipal(db, token) : null;
   if (databasePrincipal) return databasePrincipal;
   if (request.headers["x-admin-token"] === adminToken) {
-    return { role: "admin", actor: "admin", employee_id: null, team: null, source: "bootstrap" };
+    return { role: "admin", actor: "admin", employee_id: null, team: null, organization_id: DEFAULT_ORGANIZATION_ID, source: "bootstrap" };
   }
   const payload = verifyAdminSession(token, sessionSecret);
-  return payload ? { ...payload, source: "session" } : null;
+  return payload ? { ...payload, organization_id: payload.organization_id || DEFAULT_ORGANIZATION_ID, source: "session" } : null;
 }
 
 function canMutateAdmin(principal) {
@@ -776,15 +803,21 @@ function canMutateAdmin(principal) {
 }
 
 function scopePredicate(principal, { deviceAlias = "d", employeeAlias = "e" } = {}) {
-  if (!principal || principal.role === "admin") return { sql: "1 = 1", params: [] };
-  if (principal.role === "employee") return { sql: `${deviceAlias}.employee_id = ?`, params: [principal.employee_id] };
-  if (principal.role === "manager") return { sql: `${employeeAlias}.team = ?`, params: [principal.team] };
+  if (!principal) return { sql: "1 = 1", params: [] };
+  const organization = principal.organization_id
+    ? { sql: `${employeeAlias}.organization_id = ?`, params: [principal.organization_id] }
+    : { sql: "1 = 1", params: [] };
+  if (principal.role === "admin") return organization;
+  if (principal.role === "employee") return { sql: `${organization.sql} AND ${deviceAlias}.employee_id = ?`, params: [...organization.params, principal.employee_id] };
+  if (principal.role === "manager") return { sql: `${organization.sql} AND ${employeeAlias}.team = ?`, params: [...organization.params, principal.team] };
   return { sql: "1 = 0", params: [] };
 }
 
 function principalScope(principal) {
-  if (!principal || principal.role === "admin") return {};
-  return principal.role === "employee" ? { employeeId: principal.employee_id } : { team: principal.team };
+  if (!principal || principal.role === "admin") return principal?.organization_id ? { organizationId: principal.organization_id } : {};
+  return principal.role === "employee"
+    ? { organizationId: principal.organization_id, employeeId: principal.employee_id }
+    : { organizationId: principal.organization_id, team: principal.team };
 }
 
 function bearerToken(request) {
@@ -812,10 +845,21 @@ function deviceFromRequest(db, request) {
   return browser ? { ...browser, auth_kind: "browser" } : null;
 }
 
-function recordAudit(db, action, actor, target, detail = "") {
+function organizationForAuditTarget(db, target) {
+  const value = String(target || "");
+  const row = db.prepare(`
+    SELECT organization_id FROM employees WHERE id = ?
+    UNION ALL SELECT organization_id FROM user_accounts WHERE id = ?
+    UNION ALL SELECT e.organization_id FROM devices d JOIN employees e ON e.id = d.employee_id WHERE d.id = ?
+    LIMIT 1
+  `).get(value, value, value);
+  return row?.organization_id || DEFAULT_ORGANIZATION_ID;
+}
+
+function recordAudit(db, action, actor, target, detail = "", organizationId = null) {
   db.prepare(
-    "INSERT INTO audit_logs (id, action, actor, target, detail, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-  ).run(newId("audit"), action, actor, target, detail, isoNow());
+    "INSERT INTO audit_logs (id, action, actor, target, detail, organization_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+  ).run(newId("audit"), action, actor, target, detail, organizationId || organizationForAuditTarget(db, target), isoNow());
 }
 
 function refreshStaleDeviceStatuses(db) {
@@ -2465,7 +2509,8 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
       }
       if (!withinRateLimit(request)) return sendError(response, 429, "请求过于频繁，请稍后重试", "rate_limited");
       if (method === "GET" && url.pathname === "/health") {
-        return sendJson(response, 200, { ok: true, service: "ai-jinyiwei-agent-server", now: isoNow() });
+        const schemaVersion = db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version || 0;
+        return sendJson(response, 200, { ok: true, service: "ai-jinyiwei-agent-server", now: isoNow(), schema_version: Number(schemaVersion), expected_schema_version: CURRENT_SCHEMA_VERSION });
       }
 
       if (method === "POST" && url.pathname === "/api/auth/login") {
@@ -2473,7 +2518,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const username = normalizeUsername(body.username);
         const password = typeof body.password === "string" ? body.password : "";
         const account = db.prepare(`
-          SELECT id, username, display_name, role, employee_id, team, password_hash
+          SELECT id, username, display_name, role, employee_id, team, organization_id, password_hash
           FROM user_accounts
           WHERE username = ? AND disabled_at IS NULL
         `).get(username);
@@ -2521,19 +2566,21 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         }
         const ttl = Math.min(Math.max(Number(body.expires_in_seconds) || 8 * 3600, 300), 24 * 3600);
         const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
-        const token = signAdminSession({ role, actor, employee_id: employeeId, team, exp: Date.parse(expiresAt) }, sessionSecret);
-        recordAudit(db, "admin_session_created", "admin", actor, `role=${role}`);
-        return sendJson(response, 201, { token, expires_at: expiresAt, principal: { role, actor, employee_id: employeeId, team } });
+        const organizationId = DEFAULT_ORGANIZATION_ID;
+        const token = signAdminSession({ role, actor, employee_id: employeeId, team, organization_id: organizationId, exp: Date.parse(expiresAt) }, sessionSecret);
+        recordAudit(db, "admin_session_created", "admin", actor, `role=${role}`, organizationId);
+        return sendJson(response, 201, { token, expires_at: expiresAt, principal: { role, actor, employee_id: employeeId, team, organization_id: organizationId } });
       }
 
       if (url.pathname === "/api/admin/accounts" && method === "GET") {
         const principal = requireAdmin(request);
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin account permission required", "forbidden");
         const accounts = db.prepare(`
-          SELECT id, username, display_name, role, employee_id, team, created_at, updated_at, last_login_at, disabled_at
+          SELECT id, username, display_name, role, employee_id, team, organization_id, created_at, updated_at, last_login_at, disabled_at
           FROM user_accounts
+          WHERE organization_id = ?
           ORDER BY created_at ASC
-        `).all();
+        `).all(principal.organization_id || DEFAULT_ORGANIZATION_ID);
         return sendJson(response, 200, { accounts });
       }
 
@@ -2554,7 +2601,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         let employeeId = null;
         let team = null;
         if (role === "employee") {
-          const employee = db.prepare("SELECT id, team FROM employees WHERE id = ?").get(body.employee_id);
+          const employee = db.prepare("SELECT id, team FROM employees WHERE id = ? AND organization_id = ?").get(body.employee_id, principal.organization_id || DEFAULT_ORGANIZATION_ID);
           if (!employee) return sendError(response, 404, "employee not found", "employee_not_found");
           employeeId = employee.id;
           team = employee.team;
@@ -2571,16 +2618,17 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           role,
           employee_id: employeeId,
           team,
+          organization_id: principal.organization_id || DEFAULT_ORGANIZATION_ID,
           password_hash: hashPassword(password),
           created_at: now,
           updated_at: now,
         };
         db.prepare(`
           INSERT INTO user_accounts
-            (id, username, display_name, role, employee_id, team, password_hash, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(account.id, account.username, account.display_name, account.role, account.employee_id, account.team, account.password_hash, account.created_at, account.updated_at);
-        recordAudit(db, "account_created", principal.actor || "admin", account.id, `username=${username}; role=${role}`);
+            (id, username, display_name, role, employee_id, team, organization_id, password_hash, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(account.id, account.username, account.display_name, account.role, account.employee_id, account.team, account.organization_id, account.password_hash, account.created_at, account.updated_at);
+        recordAudit(db, "account_created", principal.actor || "admin", account.id, `username=${username}; role=${role}`, account.organization_id);
         return sendJson(response, 201, { account: accountPrincipal(account) });
       }
 
@@ -2590,7 +2638,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin account permission required", "forbidden");
         const accountId = decodeURIComponent(accountAction[1]);
         const action = accountAction[2];
-        const account = db.prepare("SELECT id, username, display_name, role, employee_id, team, password_hash, disabled_at FROM user_accounts WHERE id = ?").get(accountId);
+        const account = db.prepare("SELECT id, username, display_name, role, employee_id, team, organization_id, password_hash, disabled_at FROM user_accounts WHERE id = ? AND organization_id = ?").get(accountId, principal.organization_id || DEFAULT_ORGANIZATION_ID);
         if (!account) return sendError(response, 404, "account not found", "account_not_found");
 
         if (action === "password") {
@@ -2600,18 +2648,18 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           const now = isoNow();
           db.prepare("UPDATE user_accounts SET password_hash = ?, updated_at = ? WHERE id = ?").run(hashPassword(password), now, account.id);
           db.prepare("UPDATE admin_sessions SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL").run(now, account.id);
-          recordAudit(db, "account_password_reset", principal.actor || "admin", account.id, `username=${account.username}`);
+          recordAudit(db, "account_password_reset", principal.actor || "admin", account.id, `username=${account.username}`, account.organization_id);
           return sendJson(response, 200, { ok: true });
         }
 
         const nextDisabledAt = action === "disable" ? isoNow() : null;
         if (action === "disable" && !account.disabled_at && account.role === "admin") {
-          const activeAdmins = db.prepare("SELECT COUNT(*) AS count FROM user_accounts WHERE role = 'admin' AND disabled_at IS NULL").get();
+          const activeAdmins = db.prepare("SELECT COUNT(*) AS count FROM user_accounts WHERE role = 'admin' AND organization_id = ? AND disabled_at IS NULL").get(account.organization_id || DEFAULT_ORGANIZATION_ID);
           if (Number(activeAdmins?.count || 0) <= 1) return sendError(response, 409, "cannot disable the last active admin", "last_admin");
         }
         db.prepare("UPDATE user_accounts SET disabled_at = ?, updated_at = ? WHERE id = ?").run(nextDisabledAt, isoNow(), account.id);
         if (action === "disable") db.prepare("UPDATE admin_sessions SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL").run(isoNow(), account.id);
-        recordAudit(db, action === "disable" ? "account_disabled" : "account_enabled", principal.actor || "admin", account.id, `username=${account.username}`);
+        recordAudit(db, action === "disable" ? "account_disabled" : "account_enabled", principal.actor || "admin", account.id, `username=${account.username}`, account.organization_id);
         return sendJson(response, 200, { ok: true, disabled_at: nextDisabledAt });
       }
 
@@ -2619,7 +2667,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
         const body = await readJson(request);
-        const employee = db.prepare("SELECT id, name, team FROM employees WHERE id = ?").get(body.employee_id);
+        const employee = db.prepare("SELECT id, name, team, organization_id FROM employees WHERE id = ? AND organization_id = ?").get(body.employee_id, principal.organization_id || DEFAULT_ORGANIZATION_ID);
         if (!employee) return sendError(response, 404, "employee not found", "employee_not_found");
         const ttl = Math.min(Math.max(Number(body.expires_in_seconds) || 3600, 60), 7 * 24 * 3600);
         const code = newRegistrationCode();
@@ -2627,7 +2675,7 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         db.prepare(
           "INSERT INTO registration_codes (id, code_hash, employee_id, expires_at, created_at) VALUES (?, ?, ?, ?, ?)",
         ).run(newId("code"), hash(code), employee.id, expiresAt, isoNow());
-        recordAudit(db, "registration_code_created", "admin", employee.id, "one-time registration code created");
+        recordAudit(db, "registration_code_created", principal.actor || "admin", employee.id, "one-time registration code created", employee.organization_id);
         return sendJson(response, 201, { code, employee, expires_at: expiresAt });
       }
 
@@ -2670,8 +2718,8 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         const device = db.prepare(`
           SELECT d.*, e.name AS employee_name, e.team AS employee_team
           FROM devices d JOIN employees e ON e.id = d.employee_id
-          WHERE d.id = ?
-        `).get(deviceId);
+          WHERE d.id = ? AND e.organization_id = ?
+        `).get(deviceId, principal.organization_id || DEFAULT_ORGANIZATION_ID);
         if (!device) return sendError(response, 404, "device not found", "device_not_found");
         const scope = scopePredicate(principal);
         const inScope = db.prepare(`SELECT 1 FROM devices d JOIN employees e ON e.id = d.employee_id WHERE d.id = ? AND ${scope.sql}`).get(deviceId, ...scope.params);
@@ -2689,19 +2737,41 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
         const deviceId = decodeURIComponent(deviceActionMatch[1]);
         const action = deviceActionMatch[2];
-        const device = db.prepare("SELECT id, disabled_at FROM devices WHERE id = ?").get(deviceId);
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        const device = db.prepare(`
+          SELECT d.id, d.disabled_at, e.organization_id
+          FROM devices d JOIN employees e ON e.id = d.employee_id
+          WHERE d.id = ? AND e.organization_id = ?
+        `).get(deviceId, organizationId);
         if (!device) return sendError(response, 404, "device not found", "device_not_found");
         const now = isoNow();
         if (action === "disable") {
           db.prepare("UPDATE devices SET status = 'disabled', disabled_at = ?, updated_at = ? WHERE id = ?").run(now, now, deviceId);
           db.prepare("UPDATE browser_tokens SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL").run(now, deviceId);
-          recordAudit(db, "device_disabled", principal.actor || "admin", deviceId, "device disabled by administrator");
+          recordAudit(db, "device_disabled", principal.actor || "admin", deviceId, "device disabled by administrator", device.organization_id);
         } else {
           db.prepare("UPDATE devices SET status = 'offline', disabled_at = NULL, updated_at = ? WHERE id = ?").run(now, deviceId);
-          recordAudit(db, "device_enabled", principal.actor || "admin", deviceId, "device enabled by administrator");
+          recordAudit(db, "device_enabled", principal.actor || "admin", deviceId, "device enabled by administrator", device.organization_id);
         }
         const updated = db.prepare("SELECT id, status, disabled_at, updated_at FROM devices WHERE id = ?").get(deviceId);
         return sendJson(response, 200, { device: updated });
+      }
+
+      if (method === "GET" && url.pathname === "/api/admin/organizations") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
+        const organization = db.prepare(`
+          SELECT o.id, o.name, o.slug, o.created_at, o.updated_at, o.disabled_at,
+            COUNT(DISTINCT e.id) AS employee_count,
+            COUNT(DISTINCT d.id) AS device_count
+          FROM organizations o
+          LEFT JOIN employees e ON e.organization_id = o.id
+          LEFT JOIN devices d ON d.employee_id = e.id
+          WHERE o.id = ?
+          GROUP BY o.id, o.name, o.slug, o.created_at, o.updated_at, o.disabled_at
+        `).get(principal.organization_id || DEFAULT_ORGANIZATION_ID);
+        if (!organization) return sendError(response, 404, "organization not found", "organization_not_found");
+        return sendJson(response, 200, { organization });
       }
 
       if (method === "GET" && url.pathname === "/api/admin/employees") {
@@ -2721,6 +2791,46 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           ORDER BY e.team ASC, e.name ASC
         `).all(...scope.params);
         return sendJson(response, 200, { employees });
+      }
+
+      if (method === "POST" && url.pathname === "/api/admin/employees") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
+        const body = await readJson(request);
+        const employeeId = typeof body.id === "string" && body.id.trim() ? body.id.trim().toLowerCase() : newId("employee");
+        const name = typeof body.name === "string" ? body.name.trim().slice(0, 120) : "";
+        const team = typeof body.team === "string" ? body.team.trim().slice(0, 120) : "";
+        if (!/^[a-z0-9][a-z0-9_-]{2,63}$/.test(employeeId)) return sendError(response, 400, "employee id is invalid", "invalid_employee_id");
+        if (!name) return sendError(response, 400, "employee name is required", "invalid_employee_name");
+        if (!team) return sendError(response, 400, "employee team is required", "invalid_employee_team");
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        if (db.prepare("SELECT id FROM employees WHERE id = ?").get(employeeId)) return sendError(response, 409, "employee id already exists", "employee_exists");
+        const createdAt = isoNow();
+        db.prepare("INSERT INTO employees (id, name, team, organization_id, created_at) VALUES (?, ?, ?, ?, ?)").run(employeeId, name, team, organizationId, createdAt);
+        const employee = db.prepare("SELECT id, name, team, organization_id, created_at FROM employees WHERE id = ?").get(employeeId);
+        recordAudit(db, "employee_created", principal.actor || "admin", employeeId, `team=${team}`, organizationId);
+        return sendJson(response, 201, { employee });
+      }
+
+      const employeeAction = url.pathname.match(/^\/api\/admin\/employees\/([^/]+)$/);
+      if (employeeAction && method === "PUT") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
+        const employeeId = decodeURIComponent(employeeAction[1]);
+        const body = await readJson(request);
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        const current = db.prepare("SELECT id, name, team, organization_id, created_at FROM employees WHERE id = ? AND organization_id = ?").get(employeeId, organizationId);
+        if (!current) return sendError(response, 404, "employee not found", "employee_not_found");
+        const name = body.name === undefined ? current.name : typeof body.name === "string" ? body.name.trim().slice(0, 120) : "";
+        const team = body.team === undefined ? current.team : typeof body.team === "string" ? body.team.trim().slice(0, 120) : "";
+        if (!name) return sendError(response, 400, "employee name is required", "invalid_employee_name");
+        if (!team) return sendError(response, 400, "employee team is required", "invalid_employee_team");
+        const now = isoNow();
+        db.prepare("UPDATE employees SET name = ?, team = ? WHERE id = ? AND organization_id = ?").run(name, team, employeeId, organizationId);
+        db.prepare("UPDATE user_accounts SET team = ?, updated_at = ? WHERE employee_id = ? AND organization_id = ?").run(team, now, employeeId, organizationId);
+        const employee = db.prepare("SELECT id, name, team, organization_id, created_at FROM employees WHERE id = ?").get(employeeId);
+        recordAudit(db, "employee_updated", principal.actor || "admin", employeeId, `team=${team}`, organizationId);
+        return sendJson(response, 200, { employee });
       }
 
       if (method === "GET" && url.pathname === "/api/admin/teams") {
@@ -3006,18 +3116,21 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
       if (method === "GET" && url.pathname === "/api/admin/audit") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
-        let query = "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 500";
-        let params = [];
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        let query = "SELECT * FROM audit_logs WHERE organization_id = ? ORDER BY created_at DESC LIMIT 500";
+        let params = [organizationId];
         if (principal.role === "employee") {
-          query = "SELECT * FROM audit_logs WHERE actor = ? OR target = ? ORDER BY created_at DESC LIMIT 500";
-          params = [principal.actor, principal.employee_id];
+          query = "SELECT * FROM audit_logs WHERE organization_id = ? AND (actor = ? OR target = ?) ORDER BY created_at DESC LIMIT 500";
+          params = [organizationId, principal.actor, principal.employee_id];
         } else if (principal.role === "manager") {
           query = `SELECT * FROM audit_logs
-            WHERE target IN (SELECT d.id FROM devices d JOIN employees e ON e.id = d.employee_id WHERE e.team = ?)
-               OR target IN (SELECT id FROM employees WHERE team = ?)
-               OR actor = ?
+            WHERE organization_id = ? AND (
+              target IN (SELECT d.id FROM devices d JOIN employees e ON e.id = d.employee_id WHERE e.organization_id = ? AND e.team = ?)
+              OR target IN (SELECT id FROM employees WHERE organization_id = ? AND team = ?)
+              OR actor = ?
+            )
             ORDER BY created_at DESC LIMIT 500`;
-          params = [principal.team, principal.team, principal.actor];
+          params = [organizationId, organizationId, principal.team, organizationId, principal.team, principal.actor];
         }
         const logs = db.prepare(query).all(...params);
         return sendJson(response, 200, { logs });
@@ -3026,21 +3139,24 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
       if (method === "GET" && url.pathname === "/api/admin/audit/export") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
-        let query = "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 5000";
-        let params = [];
+        const organizationId = principal.organization_id || DEFAULT_ORGANIZATION_ID;
+        let query = "SELECT * FROM audit_logs WHERE organization_id = ? ORDER BY created_at DESC LIMIT 5000";
+        let params = [organizationId];
         if (principal.role === "employee") {
-          query = "SELECT * FROM audit_logs WHERE actor = ? OR target = ? ORDER BY created_at DESC LIMIT 5000";
-          params = [principal.actor, principal.employee_id];
+          query = "SELECT * FROM audit_logs WHERE organization_id = ? AND (actor = ? OR target = ?) ORDER BY created_at DESC LIMIT 5000";
+          params = [organizationId, principal.actor, principal.employee_id];
         } else if (principal.role === "manager") {
           query = `SELECT * FROM audit_logs
-            WHERE target IN (SELECT d.id FROM devices d JOIN employees e ON e.id = d.employee_id WHERE e.team = ?)
-               OR target IN (SELECT id FROM employees WHERE team = ?)
-               OR actor = ?
+            WHERE organization_id = ? AND (
+              target IN (SELECT d.id FROM devices d JOIN employees e ON e.id = d.employee_id WHERE e.organization_id = ? AND e.team = ?)
+              OR target IN (SELECT id FROM employees WHERE organization_id = ? AND team = ?)
+              OR actor = ?
+            )
             ORDER BY created_at DESC LIMIT 5000`;
-          params = [principal.team, principal.team, principal.actor];
+          params = [organizationId, organizationId, principal.team, organizationId, principal.team, principal.actor];
         }
         const logs = db.prepare(query).all(...params);
-        recordAudit(db, "audit_exported", principal.actor || "admin", "audit_logs", `records=${logs.length}`);
+        recordAudit(db, "audit_exported", principal.actor || "admin", "audit_logs", `records=${logs.length}`, organizationId);
         return sendJson(response, 200, { logs, exported_at: isoNow() });
       }
 

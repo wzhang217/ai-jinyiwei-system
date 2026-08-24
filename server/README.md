@@ -30,17 +30,20 @@ AUTH_SESSION_TTL_SECONDS=28800
 
 前端只需要设置 `VITE_AGENT_API_BASE_URL=http://localhost:8787`，不再设置 `VITE_AGENT_ADMIN_TOKEN`。登录成功后的会话存放在浏览器会话存储中，退出登录、账号停用或会话过期后立即失效。
 
-### 数据库备份与恢复
+### 数据库迁移、备份与恢复
 
-MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
+服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 2，包含组织归属字段；旧版 SQLite 会在启动时补列，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
 
 ```bash
 npm run backup
 # 或指定源库和备份文件
 AGENT_DB_PATH=./data/agent.sqlite AGENT_BACKUP_PATH=./data/backups/manual.sqlite npm run backup
+
+# 对已有备份执行完整性和外键校验
+AGENT_RESTORE_PATH=./data/backups/manual.sqlite npm run restore-check
 ```
 
-恢复前先停止服务端，再用经过校验的备份文件替换 `AGENT_DB_PATH`，然后启动服务并检查 `/health`、设备心跳、历史记录和审计日志。不要在服务运行时直接覆盖 SQLite 文件；备份文件应进入企业自己的加密存储和异地保留策略。
+`npm run backup` 会先校验源库，再使用 SQLite `VACUUM INTO` 生成一致性备份，并重新打开备份校验 `integrity_check` 和 `foreign_key_check`；任一步失败都会返回非零退出码。恢复前先停止服务端，用 `npm run restore-check` 校验备份，再用经过校验的备份文件替换 `AGENT_DB_PATH`，然后启动服务并检查 `/health`、设备心跳、历史记录和审计日志。不要在服务运行时直接覆盖 SQLite 文件；备份文件应进入企业自己的加密存储和异地保留策略。
 
 ## AI 摘要与 History Skill
 
@@ -67,6 +70,39 @@ AGENT_ADMIN_TOKEN=dev-admin-token
 启动后可在服务端终端看到 `AI provider: qwen3.7-plus`。如果显示 `rules-v1`，说明没有读取到 API Key；这不影响 Agent 采集，但不会调用 Qwen。
 
 `GET /api/admin/history` 会将 Leaf/Rollup Summary 持久化到 `memory_summaries` 表；`POST /api/admin/history/ask` 默认会在留存窗口内召回已持久化的 Memory Summary，再结合最近活动覆盖更新的记录进行排序和问答，不只搜索最近一页活动。模型输入只包含应用、时长、切换、脱敏标识和网站域名等活动元数据。
+
+## 生产部署
+
+### Docker Compose
+
+适合局域网服务器或云主机的第一种部署方式：
+
+```bash
+cp .env.example .env
+# 编辑 .env：至少设置 ADMIN_PASSWORD、AGENT_SESSION_SECRET、AGENT_CORS_ORIGIN
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail=100 agent-server
+```
+
+容器使用 `restart: unless-stopped`，数据库写入挂载到 `server/data`，镜像只读根文件系统。升级时执行 `docker compose up -d --build`，服务启动会自动执行版本化迁移；升级前先执行一次 `npm run backup` 或对应的容器备份任务。
+
+### Linux systemd
+
+将 `deploy/ai-jinyiwei-agent-server.service` 安装到 `/etc/systemd/system/`，创建专用用户 `jinyiwei`，将服务目录放到 `/opt/ai-jinyiwei/server`，并把 `.env.example` 复制为 `/etc/ai-jinyiwei/server.env` 后填写生产密钥：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ai-jinyiwei-agent-server
+sudo systemctl status ai-jinyiwei-agent-server
+sudo journalctl -u ai-jinyiwei-agent-server -n 100 --no-pager
+```
+
+systemd 会在进程异常退出后自动重启，日志进入 journald；生产机还应按企业标准配置 journald 保留上限、磁盘告警和备份任务。`npm run healthcheck` 用于部署探活，要求迁移版本已达到当前版本。
+
+### HTTPS 与防火墙
+
+`deploy/Caddyfile.example` 是反向代理模板，实际部署时替换域名，令 `AGENT_CORS_ORIGIN` 与前端 HTTPS 来源完全一致，只开放 443；8787 仅允许本机或内网反向代理访问。证书、DNS、防火墙和企业网络代理由部署环境负责，不能把示例域名直接用于生产。
 
 History Skill 的召回使用 `semantic-metadata-v1`：先按时间和权限过滤，再用工作语义分组（开发、浏览器、沟通、文档、项目管理、AI 工作台等）结合应用、域名、来源类型、工作标识和活动顺序进行排序，最后把排序后的脱敏证据交给 Qwen 生成回答。这个检索层不读取原始窗口标题、完整 URL、文件正文或聊天正文，也不会为每条活动额外调用模型。
 

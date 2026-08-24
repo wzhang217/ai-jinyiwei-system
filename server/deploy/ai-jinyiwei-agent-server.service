@@ -1,0 +1,24 @@
+[Unit]
+Description=AI锦衣卫 Agent Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jinyiwei
+Group=jinyiwei
+WorkingDirectory=/opt/ai-jinyiwei/server
+EnvironmentFile=/etc/ai-jinyiwei/server.env
+ExecStart=/usr/bin/node --env-file-if-exists=.env --experimental-sqlite src/index.mjs
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ai-jinyiwei/server/data
+LimitNOFILE=65536
+SyslogIdentifier=ai-jinyiwei-agent-server
+
+[Install]
+WantedBy=multi-user.target

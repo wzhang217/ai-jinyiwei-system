@@ -105,6 +105,9 @@ test("retrieves by semantic metadata facets and not only exact wording", () => {
 
 test("enrolls a device and accepts idempotent events and heartbeats", async () => {
   await withServer(async ({ base, app }) => {
+    const health = await jsonFetch(`${base}/health`);
+    assert.equal(health.response.status, 200);
+    assert.equal(health.body.schema_version, health.body.expected_schema_version);
     const preflight = await fetch(`${base}/api/admin/devices`, { method: "OPTIONS" });
     assert.equal(preflight.status, 204);
     assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
@@ -1168,6 +1171,48 @@ test("supports database-backed account login, revocation, and admin account cont
     assert.equal(logout.response.status, 200);
     const revoked = await jsonFetch(`${base}/api/auth/me`, { headers: sessionHeaders });
     assert.equal(revoked.response.status, 401);
+  });
+});
+
+test("keeps employee directory and account binding inside the active organization", async () => {
+  await withServer(async ({ base, app }) => {
+    const created = await jsonFetch(`${base}/api/admin/employees`, {
+      method: "POST",
+      headers: { "x-admin-token": "test-admin" },
+      body: JSON.stringify({ id: "employee-org-test", name: "组织测试员工", team: "测试团队" }),
+    });
+    assert.equal(created.response.status, 201);
+    assert.equal(created.body.employee.organization_id, "org_default");
+
+    const updated = await jsonFetch(`${base}/api/admin/employees/employee-org-test`, {
+      method: "PUT",
+      headers: { "x-admin-token": "test-admin" },
+      body: JSON.stringify({ team: "测试研发团队" }),
+    });
+    assert.equal(updated.response.status, 200);
+    assert.equal(updated.body.employee.team, "测试研发团队");
+
+    const now = new Date().toISOString();
+    app.db.prepare("INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES (?, ?, ?, ?, ?)").run("org_other", "另一企业", "other", now, now);
+    app.db.prepare("UPDATE employees SET organization_id = ? WHERE id = ?").run("org_other", "employee-org-test");
+
+    const employees = await jsonFetch(`${base}/api/admin/employees`, { headers: { "x-admin-token": "test-admin" } });
+    assert.equal(employees.response.status, 200);
+    assert.equal(employees.body.employees.some((employee) => employee.id === "employee-org-test"), false);
+
+    const account = await jsonFetch(`${base}/api/admin/accounts`, {
+      method: "POST",
+      headers: { "x-admin-token": "test-admin" },
+      body: JSON.stringify({
+        username: "other-org-user",
+        password: "a-secure-test-password",
+        display_name: "跨组织员工",
+        role: "employee",
+        employee_id: "employee-org-test",
+      }),
+    });
+    assert.equal(account.response.status, 404);
+    assert.equal(account.body.error.code, "employee_not_found");
   });
 });
 
