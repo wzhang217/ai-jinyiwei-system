@@ -19,6 +19,10 @@ ProtectSystem=strict
 ReadWritePaths=/opt/ai-jinyiwei/server/data
 LimitNOFILE=65536
 SyslogIdentifier=ai-jinyiwei-agent-server
+StandardOutput=journal
+StandardError=journal
+LogRateLimitIntervalSec=30s
+LogRateLimitBurst=2000
 
 [Install]
 WantedBy=multi-user.target

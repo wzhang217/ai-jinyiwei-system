@@ -148,13 +148,13 @@ sudo systemctl status ai-jinyiwei-agent-server
 sudo journalctl -u ai-jinyiwei-agent-server -n 100 --no-pager
 ```
 
-systemd 会在进程异常退出后自动重启，日志进入 journald；生产机还应按企业标准配置 journald 保留上限、磁盘告警和备份任务。`npm run healthcheck` 用于部署探活，要求迁移版本已达到当前版本。
+systemd 会在进程异常退出后自动重启，日志进入 journald；服务单元自带日志限流，生产机还应按企业标准配置 journald 保留上限、磁盘告警和备份任务。仓库提供 `deploy/journald-ai-jinyiwei.conf.example` 作为可选模板，安装到 `/etc/systemd/journald.conf.d/` 前应先由客户确认主机级保留策略。`npm run healthcheck` 用于部署探活，要求迁移版本已达到当前版本且数据库所在文件系统剩余空间不低于 `DISK_MIN_FREE_BYTES`。
 
 ### HTTPS 与防火墙
 
 `deploy/Caddyfile.example` 是反向代理模板，实际部署时替换域名，令 `AGENT_CORS_ORIGIN` 与前端 HTTPS 来源完全一致；多个前端来源用英文逗号分隔，不能使用 `*`。只开放 443；8787 仅允许本机或内网反向代理访问。服务端会拒绝未列入白名单的浏览器 `Origin`，并返回安全响应头。证书、DNS、防火墙和企业网络代理由部署环境负责，不能把示例域名直接用于生产。
 
-健康检查分为三类：`GET /health/live` 只判断进程是否能响应；`GET /health` 和 `GET /health/ready` 会检查 SQLite `quick_check` 以及迁移版本，数据库未就绪时返回 HTTP 503。容器探活和 systemd 部署应使用 `/health/ready`，负载均衡器的存活探针可使用 `/health/live`。
+健康检查分为三类：`GET /health/live` 只判断进程是否能响应；`GET /health` 和 `GET /health/ready` 会检查 SQLite `quick_check` 以及迁移版本，数据库未就绪时返回 HTTP 503。`npm run healthcheck` 额外检查数据库文件系统的剩余空间；`npm run diagnostics` 会输出空间总量、剩余量和阈值。容器探活和 systemd 部署应使用 `/health/ready`，负载均衡器的存活探针可使用 `/health/live`。
 
 账号登录支持可选 TOTP MFA。管理员登录后台后，在“设置 → 安全合规 → 账号多因素认证”生成密钥并用身份验证器确认；恢复码只返回一次，应保存到企业密码管理器。MFA 密钥在 SQLite 中使用 `AGENT_SESSION_SECRET` 派生的 AES-256-GCM 密钥加密，修改或轮换 `AGENT_SESSION_SECRET` 前必须完成密钥迁移方案，否则旧 MFA 密钥无法解密。
 

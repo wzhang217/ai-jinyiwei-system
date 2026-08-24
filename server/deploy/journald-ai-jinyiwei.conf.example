@@ -1,0 +1,8 @@
+# Optional customer-approved journald retention policy.
+# Install as /etc/systemd/journald.conf.d/ai-jinyiwei.conf and restart journald.
+# These limits apply to the host journal, so review them with the server owner.
+SystemMaxUse=2G
+SystemKeepFree=4G
+MaxRetentionSec=30day
+RateLimitIntervalSec=30s
+RateLimitBurst=2000
