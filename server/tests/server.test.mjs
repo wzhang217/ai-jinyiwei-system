@@ -1673,3 +1673,82 @@ test("previews and applies admin retention deletion", async () => {
     assert.equal(events.body.events.length, 0);
   });
 });
+
+test("persists admin settings, role scopes, and notification rules with server RBAC", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const initial = await jsonFetch(`${base}/api/admin/settings`, { headers: adminHeaders });
+    assert.equal(initial.response.status, 200);
+    assert.equal(initial.body.organization.timezone, "Asia/Shanghai（UTC+8）");
+    assert.deepEqual(initial.body.roles.map((item) => item.role), ["admin", "manager", "employee"]);
+    assert.equal(initial.body.notifications.length, 4);
+
+    const organization = await jsonFetch(`${base}/api/admin/settings/organization`, {
+      method: "PUT",
+      headers: adminHeaders,
+      body: JSON.stringify({ company_name: "锦衣卫试点企业", ai_summary_interval_seconds: "600" }),
+    });
+    assert.equal(organization.response.status, 200);
+    assert.equal(organization.body.organization.company_name, "锦衣卫试点企业");
+
+    const notifications = await jsonFetch(`${base}/api/admin/settings/notifications`, {
+      method: "PUT",
+      headers: adminHeaders,
+      body: JSON.stringify({ settings: [{ key: "suspected_non_work", enabled: true }] }),
+    });
+    assert.equal(notifications.response.status, 200);
+    assert.equal(notifications.body.notifications.find((item) => item.key === "suspected_non_work").enabled, true);
+
+    const categories = await jsonFetch(`${base}/api/admin/settings/categories`, {
+      method: "PUT",
+      headers: adminHeaders,
+      body: JSON.stringify({ categories: initial.body.categories.map((item) => item.id === "unknown" ? { ...item, label: "待确认", detail: "需要人工确认的活动", enabled: true } : item) }),
+    });
+    assert.equal(categories.response.status, 200);
+    assert.equal(categories.body.categories.find((item) => item.id === "unknown").label, "待确认");
+
+    const managerSession = await jsonFetch(`${base}/api/admin/sessions`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ role: "manager", team: "研发与产品中心" }),
+    });
+    const managerHeaders = { "x-admin-session": managerSession.body.token };
+    const forbidden = await jsonFetch(`${base}/api/admin/settings/organization`, {
+      method: "PUT",
+      headers: managerHeaders,
+      body: JSON.stringify({ company_name: "不应成功" }),
+    });
+    assert.equal(forbidden.response.status, 403);
+
+    const persisted = await jsonFetch(`${base}/api/admin/settings`, { headers: adminHeaders });
+    assert.equal(persisted.body.organization.company_name, "锦衣卫试点企业");
+    assert.equal(persisted.body.categories.find((item) => item.id === "unknown").label, "待确认");
+    const audit = await jsonFetch(`${base}/api/admin/audit`, { headers: adminHeaders });
+    assert.ok(audit.body.logs.some((item) => item.action === "organization_settings_changed"));
+    assert.ok(audit.body.logs.some((item) => item.action === "activity_categories_changed"));
+  });
+});
+
+test("supports scoped device diagnostics and admin enable/disable actions", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const code = await jsonFetch(`${base}/api/admin/registration-codes`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ employee_id: "employee-wei" }),
+    });
+    const enrolled = await jsonFetch(`${base}/api/agent/enroll`, {
+      method: "POST",
+      body: JSON.stringify({ registration_code: code.body.code, hostname: "WIN-SETTINGS", os_version: "Windows 11", agent_version: "0.1.10" }),
+    });
+    const detail = await jsonFetch(`${base}/api/admin/devices/${encodeURIComponent(enrolled.body.device_id)}`, { headers: adminHeaders });
+    assert.equal(detail.response.status, 200);
+    assert.equal(detail.body.device.id, enrolled.body.device_id);
+    const disabled = await jsonFetch(`${base}/api/admin/devices/${encodeURIComponent(enrolled.body.device_id)}/disable`, { method: "POST", headers: adminHeaders });
+    assert.equal(disabled.response.status, 200);
+    assert.equal(disabled.body.device.status, "disabled");
+    const enabled = await jsonFetch(`${base}/api/admin/devices/${encodeURIComponent(enrolled.body.device_id)}/enable`, { method: "POST", headers: adminHeaders });
+    assert.equal(enabled.response.status, 200);
+    assert.equal(enabled.body.device.disabled_at, null);
+  });
+});

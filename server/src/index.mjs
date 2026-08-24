@@ -40,6 +40,44 @@ const defaultPolicy = {
   version: 1,
 };
 
+const defaultOrganizationSettings = {
+  company_name: "锦衣卫科技",
+  default_language: "简体中文",
+  timezone: "Asia/Shanghai（UTC+8）",
+  retention: "原始 90 天 · 汇总 1 年",
+  ai_model: "qwen3.7-plus",
+  ai_summary_interval_seconds: "600",
+  ai_budget_per_minute: "30",
+};
+
+const defaultNotificationSettings = [
+  ["agent_offline", "Agent 离线超过 30 分钟", 1],
+  ["memory_summary_failed", "Memory Summary 生成失败", 1],
+  ["coverage_low", "团队数据覆盖率低于 90%", 1],
+  ["suspected_non_work", "疑似非工作活动", 0],
+];
+
+const defaultActivityCategories = [
+  ["work_project", "purple", "工作与项目", "开发、文档、项目管理"],
+  ["communication", "blue", "沟通与会议", "企业微信、会议和邮件"],
+  ["system_tools", "green", "系统与工具", "登录、设置、故障和同步"],
+  ["suspected_non_work", "amber", "疑似非工作", "购物、娱乐、求职和游戏，需人工确认"],
+  ["unknown", "gray", "未知", "无法可靠分类的活动"],
+];
+
+const defaultIntegrationSettings = [
+  ["browser_extension", "浏览器扩展", "Chrome / Edge 页面域名和标题", "connected", 1],
+  ["project_tools", "项目管理工具", "Jira、Linear、Trello", "disconnected", 0],
+  ["collaboration", "协作工具", "企业微信、飞书、Slack", "partial", 1],
+  ["history_api", "History API", "供企业内部系统查询记录", "preparing", 0],
+];
+
+const defaultRolePolicies = [
+  ["admin", "老板", "整个企业", "管理组织、设备、策略、审计和全企业历史记录。"],
+  ["manager", "高管", "直属团队", "查看直属团队的趋势、历史记录和 Memory Summary。"],
+  ["employee", "员工", "本人", "查看自己的活动历史、Memory Summary 和隐私说明。"],
+];
+
 const HISTORY_WINDOW_SECONDS = 10 * 60;
 const AI_SUMMARY_WINDOW_SECONDS = Math.max(
   60,
@@ -201,6 +239,45 @@ function createSchema(db) {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS organization_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS notification_settings (
+      key TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS activity_categories (
+      id TEXT PRIMARY KEY,
+      color TEXT NOT NULL,
+      label TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS integration_settings (
+      key TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      status TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS role_policies (
+      role TEXT PRIMARY KEY,
+      label TEXT NOT NULL,
+      scope TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
   `);
 
   ensureColumn(db, "events", "context_label", "TEXT");
@@ -252,6 +329,21 @@ function createSchema(db) {
   for (const [key, value] of Object.entries(defaultPolicy)) {
     policyInsert.run(key, Array.isArray(value) ? JSON.stringify(value) : String(value));
   }
+
+  const organizationInsert = db.prepare("INSERT OR IGNORE INTO organization_settings (key, value, updated_at) VALUES (?, ?, ?)");
+  for (const [key, value] of Object.entries(defaultOrganizationSettings)) organizationInsert.run(key, value, createdAt);
+
+  const notificationInsert = db.prepare("INSERT OR IGNORE INTO notification_settings (key, label, enabled, updated_at) VALUES (?, ?, ?, ?)");
+  for (const [key, label, enabled] of defaultNotificationSettings) notificationInsert.run(key, label, enabled, createdAt);
+
+  const categoryInsert = db.prepare("INSERT OR IGNORE INTO activity_categories (id, color, label, detail, enabled, updated_at) VALUES (?, ?, ?, ?, 1, ?)");
+  for (const [id, color, label, detail] of defaultActivityCategories) categoryInsert.run(id, color, label, detail, createdAt);
+
+  const integrationInsert = db.prepare("INSERT OR IGNORE INTO integration_settings (key, title, detail, status, enabled, updated_at) VALUES (?, ?, ?, ?, ?, ?)");
+  for (const [key, title, detail, status, enabled] of defaultIntegrationSettings) integrationInsert.run(key, title, detail, status, enabled, createdAt);
+
+  const roleInsert = db.prepare("INSERT OR IGNORE INTO role_policies (role, label, scope, detail, updated_at) VALUES (?, ?, ?, ?, ?)");
+  for (const [role, label, scope, detail] of defaultRolePolicies) roleInsert.run(role, label, scope, detail, createdAt);
 }
 
 function purgeInvalidIdleSummaries(db) {
@@ -312,6 +404,127 @@ function getPolicy(db) {
         : row.value;
     return policy;
   }, {});
+}
+
+function getOrganizationSettings(db) {
+  return db.prepare("SELECT key, value FROM organization_settings ORDER BY key").all()
+    .reduce((settings, row) => ({ ...settings, [row.key]: row.value }), {});
+}
+
+function getNotificationSettings(db) {
+  return db.prepare("SELECT key, label, enabled, updated_at FROM notification_settings ORDER BY rowid").all()
+    .map((row) => ({ ...row, enabled: Boolean(row.enabled) }));
+}
+
+function getActivityCategories(db) {
+  return db.prepare("SELECT id, color, label, detail, enabled, updated_at FROM activity_categories ORDER BY rowid").all()
+    .map((row) => ({ ...row, enabled: Boolean(row.enabled) }));
+}
+
+function getIntegrationSettings(db) {
+  return db.prepare("SELECT key, title, detail, status, enabled, updated_at FROM integration_settings ORDER BY rowid").all()
+    .map((row) => ({ ...row, enabled: Boolean(row.enabled) }));
+}
+
+function getRolePolicies(db) {
+  return db.prepare("SELECT role, label, scope, detail, updated_at FROM role_policies ORDER BY CASE role WHEN 'admin' THEN 1 WHEN 'manager' THEN 2 WHEN 'employee' THEN 3 ELSE 4 END").all();
+}
+
+function getAdminSettings(db) {
+  const timestamps = [
+    ...db.prepare("SELECT updated_at FROM organization_settings").all(),
+    ...db.prepare("SELECT updated_at FROM notification_settings").all(),
+    ...db.prepare("SELECT updated_at FROM activity_categories").all(),
+    ...db.prepare("SELECT updated_at FROM integration_settings").all(),
+    ...db.prepare("SELECT updated_at FROM role_policies").all(),
+  ].map((row) => Date.parse(row.updated_at)).filter((value) => !Number.isNaN(value));
+  return {
+    organization: getOrganizationSettings(db),
+    notifications: getNotificationSettings(db),
+    categories: getActivityCategories(db),
+    integrations: getIntegrationSettings(db),
+    roles: getRolePolicies(db),
+    updated_at: timestamps.length ? new Date(Math.max(...timestamps)).toISOString() : isoNow(),
+  };
+}
+
+function validSettingString(value, max = 200) {
+  return typeof value === "string" && value.trim().length > 0 && value.length <= max && !/[\r\n]/.test(value);
+}
+
+function validateOrganizationSettings(body) {
+  if (!body || typeof body !== "object") return "organization settings must be an object";
+  for (const key of Object.keys(defaultOrganizationSettings)) {
+    if (body[key] !== undefined && !validSettingString(body[key])) return `${key} is invalid`;
+  }
+  if (body.timezone && !/^Asia\/Shanghai（UTC\+8）$/.test(body.timezone) && body.timezone !== "Asia/Shanghai") return "timezone must use Asia/Shanghai";
+  return null;
+}
+
+function updateOrganizationSettings(db, body) {
+  const validationError = validateOrganizationSettings(body);
+  if (validationError) return { error: validationError };
+  const current = getOrganizationSettings(db);
+  const now = isoNow();
+  for (const key of Object.keys(defaultOrganizationSettings)) {
+    if (body[key] === undefined || String(body[key]) === String(current[key] ?? "")) continue;
+    db.prepare("INSERT INTO organization_settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at").run(key, String(body[key]).trim(), now);
+  }
+  return { settings: getOrganizationSettings(db), changed: Object.keys(defaultOrganizationSettings).some((key) => body[key] !== undefined && String(body[key]) !== String(current[key] ?? "")) };
+}
+
+function updateNotificationSettings(db, body) {
+  const entries = Array.isArray(body?.settings)
+    ? body.settings
+    : body?.settings && typeof body.settings === "object"
+      ? Object.entries(body.settings).map(([key, enabled]) => ({ key, enabled }))
+      : [];
+  if (!entries.length || entries.length > 20) return { error: "settings must contain notification entries" };
+  const known = new Map(getNotificationSettings(db).map((row) => [row.key, row]));
+  const now = isoNow();
+  for (const entry of entries) {
+    if (!known.has(entry?.key) || typeof entry.enabled !== "boolean") return { error: "notification setting is invalid" };
+    db.prepare("UPDATE notification_settings SET enabled = ?, updated_at = ? WHERE key = ?").run(entry.enabled ? 1 : 0, now, entry.key);
+  }
+  return { settings: getNotificationSettings(db) };
+}
+
+function validateCategories(categories) {
+  if (!Array.isArray(categories) || categories.length !== defaultActivityCategories.length) return "categories must contain all activity categories";
+  const known = new Set(defaultActivityCategories.map(([id]) => id));
+  return categories.every((item) => known.has(item?.id) && validSettingString(item.label, 80) && validSettingString(item.detail, 200) && typeof item.enabled === "boolean")
+    ? null
+    : "activity category is invalid";
+}
+
+function updateActivityCategories(db, categories) {
+  const validationError = validateCategories(categories);
+  if (validationError) return { error: validationError };
+  const now = isoNow();
+  const update = db.prepare("UPDATE activity_categories SET label = ?, detail = ?, enabled = ?, updated_at = ? WHERE id = ?");
+  for (const item of categories) update.run(item.label.trim(), item.detail.trim(), item.enabled ? 1 : 0, now, item.id);
+  return { categories: getActivityCategories(db) };
+}
+
+function updateIntegrationSettings(db, integrations) {
+  if (!Array.isArray(integrations) || integrations.length > 20) return { error: "integrations must be an array" };
+  const known = new Map(getIntegrationSettings(db).map((row) => [row.key, row]));
+  const now = isoNow();
+  for (const item of integrations) {
+    if (!known.has(item?.key) || typeof item.enabled !== "boolean") return { error: "integration setting is invalid" };
+    db.prepare("UPDATE integration_settings SET enabled = ?, updated_at = ? WHERE key = ?").run(item.enabled ? 1 : 0, now, item.key);
+  }
+  return { integrations: getIntegrationSettings(db) };
+}
+
+function updateRolePolicies(db, roles) {
+  if (!Array.isArray(roles) || roles.length !== defaultRolePolicies.length) return { error: "roles must contain老板、高管和员工" };
+  const known = new Set(defaultRolePolicies.map(([role]) => role));
+  if (!roles.every((item) => known.has(item?.role) && validSettingString(item.scope, 80) && validSettingString(item.detail, 240))) return { error: "role policy is invalid" };
+  const now = isoNow();
+  const update = db.prepare("UPDATE role_policies SET scope = ?, detail = ?, updated_at = ? WHERE role = ?");
+  for (const item of roles) update.run(item.scope.trim(), item.detail.trim(), now, item.role);
+  return { roles: getRolePolicies(db) };
 }
 
 function sendJson(response, status, payload) {
@@ -2114,6 +2327,20 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         return sendJson(response, 201, { code, employee, expires_at: expiresAt });
       }
 
+      if (method === "GET" && url.pathname === "/api/admin/registration-codes") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
+        const scope = scopePredicate(principal, { deviceAlias: "d", employeeAlias: "e" });
+        const codes = db.prepare(`
+          SELECT rc.id, rc.employee_id, e.name AS employee_name, e.team AS employee_team,
+            rc.expires_at, rc.used_at, rc.created_at
+          FROM registration_codes rc JOIN employees e ON e.id = rc.employee_id
+          WHERE ${scope.sql.replaceAll("d.", "rc.")}
+          ORDER BY rc.created_at DESC LIMIT 100
+        `).all(...scope.params);
+        return sendJson(response, 200, { codes });
+      }
+
       if (method === "GET" && url.pathname === "/api/admin/devices") {
         const principal = requireAdmin(request, adminToken, sessionSecret);
         if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
@@ -2128,6 +2355,49 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           ORDER BY d.updated_at DESC
         `).all(...scope.params);
         return sendJson(response, 200, { devices });
+      }
+
+      const deviceMatch = url.pathname.match(/^\/api\/admin\/devices\/([^/]+)$/);
+      if (deviceMatch && method === "GET") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
+        refreshStaleDeviceStatuses(db);
+        const deviceId = decodeURIComponent(deviceMatch[1]);
+        const device = db.prepare(`
+          SELECT d.*, e.name AS employee_name, e.team AS employee_team
+          FROM devices d JOIN employees e ON e.id = d.employee_id
+          WHERE d.id = ?
+        `).get(deviceId);
+        if (!device) return sendError(response, 404, "device not found", "device_not_found");
+        const scope = scopePredicate(principal);
+        const inScope = db.prepare(`SELECT 1 FROM devices d JOIN employees e ON e.id = d.employee_id WHERE d.id = ? AND ${scope.sql}`).get(deviceId, ...scope.params);
+        if (!inScope) return sendError(response, 403, "device is outside your data scope", "forbidden");
+        const events = db.prepare(`
+          SELECT event_id, occurred_at, type, app_name, process_name, source_kind, context_label, web_domain, duration_seconds, received_at
+          FROM events WHERE device_id = ? ORDER BY occurred_at DESC LIMIT 50
+        `).all(deviceId);
+        return sendJson(response, 200, { device, events });
+      }
+
+      const deviceActionMatch = url.pathname.match(/^\/api\/admin\/devices\/([^/]+)\/(disable|enable)$/);
+      if (deviceActionMatch && method === "POST") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
+        const deviceId = decodeURIComponent(deviceActionMatch[1]);
+        const action = deviceActionMatch[2];
+        const device = db.prepare("SELECT id, disabled_at FROM devices WHERE id = ?").get(deviceId);
+        if (!device) return sendError(response, 404, "device not found", "device_not_found");
+        const now = isoNow();
+        if (action === "disable") {
+          db.prepare("UPDATE devices SET status = 'disabled', disabled_at = ?, updated_at = ? WHERE id = ?").run(now, now, deviceId);
+          db.prepare("UPDATE browser_tokens SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL").run(now, deviceId);
+          recordAudit(db, "device_disabled", principal.actor || "admin", deviceId, "device disabled by administrator");
+        } else {
+          db.prepare("UPDATE devices SET status = 'offline', disabled_at = NULL, updated_at = ? WHERE id = ?").run(now, deviceId);
+          recordAudit(db, "device_enabled", principal.actor || "admin", deviceId, "device enabled by administrator");
+        }
+        const updated = db.prepare("SELECT id, status, disabled_at, updated_at FROM devices WHERE id = ?").get(deviceId);
+        return sendJson(response, 200, { device: updated });
       }
 
       if (method === "GET" && url.pathname === "/api/admin/employees") {
@@ -2225,6 +2495,61 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
           );
         }
         return sendJson(response, 200, { policy: getPolicy(db) });
+      }
+
+      if (method === "GET" && url.pathname === "/api/admin/settings") {
+        if (!requireAdmin(request, adminToken, sessionSecret)) return sendError(response, 401, "admin authentication required", "unauthorized");
+        return sendJson(response, 200, getAdminSettings(db));
+      }
+
+      if (method === "PUT" && url.pathname === "/api/admin/settings/organization") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
+        const result = updateOrganizationSettings(db, await readJson(request));
+        if (result.error) return sendError(response, 400, result.error, "invalid_settings");
+        if (result.changed) recordAudit(db, "organization_settings_changed", principal.actor || "admin", "organization_settings", "organization profile updated");
+        return sendJson(response, 200, { organization: result.settings });
+      }
+
+      if (method === "PUT" && url.pathname === "/api/admin/settings/notifications") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
+        const result = updateNotificationSettings(db, await readJson(request));
+        if (result.error) return sendError(response, 400, result.error, "invalid_settings");
+        recordAudit(db, "notification_settings_changed", principal.actor || "admin", "notification_settings", "notification rules updated");
+        return sendJson(response, 200, { notifications: result.settings });
+      }
+
+      if (method === "PUT" && url.pathname === "/api/admin/settings/categories") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
+        const result = updateActivityCategories(db, (await readJson(request)).categories);
+        if (result.error) return sendError(response, 400, result.error, "invalid_settings");
+        recordAudit(db, "activity_categories_changed", principal.actor || "admin", "activity_categories", "activity categories updated");
+        return sendJson(response, 200, { categories: result.categories });
+      }
+
+      if (method === "PUT" && url.pathname === "/api/admin/settings/integrations") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
+        const result = updateIntegrationSettings(db, (await readJson(request)).integrations);
+        if (result.error) return sendError(response, 400, result.error, "invalid_settings");
+        recordAudit(db, "integration_settings_changed", principal.actor || "admin", "integration_settings", "integration settings updated");
+        return sendJson(response, 200, { integrations: result.integrations });
+      }
+
+      if (method === "GET" && url.pathname === "/api/admin/roles") {
+        if (!requireAdmin(request, adminToken, sessionSecret)) return sendError(response, 401, "admin authentication required", "unauthorized");
+        return sendJson(response, 200, { roles: getRolePolicies(db) });
+      }
+
+      if (method === "PUT" && url.pathname === "/api/admin/roles") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal || !canMutateAdmin(principal)) return sendError(response, 403, "admin write permission required", "forbidden");
+        const result = updateRolePolicies(db, (await readJson(request)).roles);
+        if (result.error) return sendError(response, 400, result.error, "invalid_role_policy");
+        recordAudit(db, "role_policies_changed", principal.actor || "admin", "role_policies", "role data scopes updated");
+        return sendJson(response, 200, { roles: result.roles });
       }
 
       if (method === "GET" && url.pathname === "/api/admin/events") {
@@ -2392,6 +2717,27 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
         }
         const logs = db.prepare(query).all(...params);
         return sendJson(response, 200, { logs });
+      }
+
+      if (method === "GET" && url.pathname === "/api/admin/audit/export") {
+        const principal = requireAdmin(request, adminToken, sessionSecret);
+        if (!principal) return sendError(response, 401, "admin authentication required", "unauthorized");
+        let query = "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 5000";
+        let params = [];
+        if (principal.role === "employee") {
+          query = "SELECT * FROM audit_logs WHERE actor = ? OR target = ? ORDER BY created_at DESC LIMIT 5000";
+          params = [principal.actor, principal.employee_id];
+        } else if (principal.role === "manager") {
+          query = `SELECT * FROM audit_logs
+            WHERE target IN (SELECT d.id FROM devices d JOIN employees e ON e.id = d.employee_id WHERE e.team = ?)
+               OR target IN (SELECT id FROM employees WHERE team = ?)
+               OR actor = ?
+            ORDER BY created_at DESC LIMIT 5000`;
+          params = [principal.team, principal.team, principal.actor];
+        }
+        const logs = db.prepare(query).all(...params);
+        recordAudit(db, "audit_exported", principal.actor || "admin", "audit_logs", `records=${logs.length}`);
+        return sendJson(response, 200, { logs, exported_at: isoNow() });
       }
 
       if (method === "GET" && url.pathname === "/api/admin/memory/jobs") {

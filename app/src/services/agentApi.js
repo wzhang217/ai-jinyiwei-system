@@ -140,6 +140,65 @@ export async function updateLivePolicy(policy) {
   return body.policy;
 }
 
+export async function getLiveAdminSettings() {
+  return request("/api/admin/settings");
+}
+
+export async function updateOrganizationSettings(settings) {
+  const body = await request("/api/admin/settings/organization", {
+    method: "PUT",
+    body: JSON.stringify(settings),
+  });
+  return body.organization;
+}
+
+export async function updateNotificationSettings(settings) {
+  const body = await request("/api/admin/settings/notifications", {
+    method: "PUT",
+    body: JSON.stringify({ settings }),
+  });
+  return body.notifications || [];
+}
+
+export async function updateActivityCategories(categories) {
+  const body = await request("/api/admin/settings/categories", {
+    method: "PUT",
+    body: JSON.stringify({ categories }),
+  });
+  return body.categories || [];
+}
+
+export async function updateIntegrationSettings(integrations) {
+  const body = await request("/api/admin/settings/integrations", {
+    method: "PUT",
+    body: JSON.stringify({ integrations }),
+  });
+  return body.integrations || [];
+}
+
+export async function getLiveRolePolicies() {
+  const body = await request("/api/admin/roles");
+  return body.roles || [];
+}
+
+export async function updateLiveRolePolicies(roles) {
+  const body = await request("/api/admin/roles", {
+    method: "PUT",
+    body: JSON.stringify({ roles }),
+  });
+  return body.roles || [];
+}
+
+export async function getLiveDeviceDetail(deviceId) {
+  return request(`/api/admin/devices/${encodeURIComponent(deviceId)}`);
+}
+
+export async function setLiveDeviceStatus(deviceId, enabled) {
+  const action = enabled ? "enable" : "disable";
+  const body = await request(`/api/admin/devices/${encodeURIComponent(deviceId)}/${action}`, { method: "POST" });
+  return body.device;
+}
+
 export async function getLiveEvents(limit = 200) {
   const body = await request(`/api/admin/events?limit=${limit}`);
   return body.events.map((event) => ({
@@ -232,6 +291,10 @@ export async function auditLiveExport(recordIds = []) {
     method: "POST",
     body: JSON.stringify({ record_ids: recordIds }),
   });
+}
+
+export async function exportLiveAudit() {
+  return request("/api/admin/audit/export");
 }
 
 export async function runRetention(before, apply = false) {
