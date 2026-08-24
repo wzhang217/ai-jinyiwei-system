@@ -40,6 +40,19 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
+      - name: Verify release versions
+        shell: pwsh
+        run: |
+          $tauri = Get-Content "src-tauri/tauri.conf.json" | ConvertFrom-Json
+          $package = Get-Content "package.json" | ConvertFrom-Json
+          $cargoVersion = (Select-String -Path "src-tauri/Cargo.toml" -Pattern '^version = "([^"]+)"').Matches.Groups[1].Value
+          $versions = @($tauri.version, $package.version, $cargoVersion) | Select-Object -Unique
+          if ($versions.Count -ne 1) { throw "Agent version mismatch: $($versions -join ', ')" }
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $tagVersion = $env:GITHUB_REF_NAME.Substring(1)
+            if ($tagVersion -ne $tauri.version) { throw "Git tag $tagVersion does not match Agent version $($tauri.version)" }
+          }
+
       - name: Check Windows Rust target
         run: cargo check --target x86_64-pc-windows-msvc --locked
         working-directory: agent/src-tauri
@@ -106,3 +119,21 @@ jobs:
           path: agent/src-tauri/target/release/bundle/msi/*.msi
           if-no-files-found: error
           retention-days: 14
+
+  publish-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-msi
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed MSI
+        uses: actions/download-artifact@v4
+        with:
+          name: ai-jinyiwei-agent-msi
+          path: release
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" release/*.msi --title "AI锦衣卫 Agent ${GITHUB_REF_NAME}" --generate-notes
