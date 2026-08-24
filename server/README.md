@@ -36,7 +36,7 @@ AUTH_LOCKOUT_SECONDS=900
 
 ### 数据库迁移、备份与恢复
 
-服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 4，包含组织归属字段、按组织隔离的采集策略和企业设置、隐私策略确认记录以及账号登录失败保护；旧版 SQLite 会在启动时补列并建立组织配置，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
+服务启动会执行版本化迁移，并在 `/health` 返回 `schema_version` 与 `expected_schema_version`。当前数据库版本为 5，包含组织归属字段、按组织隔离的采集策略和企业设置、隐私策略确认记录、账号登录失败保护以及账号 MFA 密钥字段；旧版 SQLite 会在启动时补列并建立组织配置，不需要删库重建。MVP 使用 SQLite；正式交付前至少要把数据库目录放到持久化磁盘，并设置定时备份。手动备份：
 
 ```bash
 npm run backup
@@ -106,7 +106,11 @@ systemd 会在进程异常退出后自动重启，日志进入 journald；生产
 
 ### HTTPS 与防火墙
 
-`deploy/Caddyfile.example` 是反向代理模板，实际部署时替换域名，令 `AGENT_CORS_ORIGIN` 与前端 HTTPS 来源完全一致，只开放 443；8787 仅允许本机或内网反向代理访问。证书、DNS、防火墙和企业网络代理由部署环境负责，不能把示例域名直接用于生产。
+`deploy/Caddyfile.example` 是反向代理模板，实际部署时替换域名，令 `AGENT_CORS_ORIGIN` 与前端 HTTPS 来源完全一致；多个前端来源用英文逗号分隔，不能使用 `*`。只开放 443；8787 仅允许本机或内网反向代理访问。服务端会拒绝未列入白名单的浏览器 `Origin`，并返回安全响应头。证书、DNS、防火墙和企业网络代理由部署环境负责，不能把示例域名直接用于生产。
+
+健康检查分为三类：`GET /health/live` 只判断进程是否能响应；`GET /health` 和 `GET /health/ready` 会检查 SQLite `quick_check` 以及迁移版本，数据库未就绪时返回 HTTP 503。容器探活和 systemd 部署应使用 `/health/ready`，负载均衡器的存活探针可使用 `/health/live`。
+
+账号登录支持可选 TOTP MFA。管理员登录后台后，在“设置 → 安全合规 → 账号多因素认证”生成密钥并用身份验证器确认；恢复码只返回一次，应保存到企业密码管理器。MFA 密钥在 SQLite 中使用 `AGENT_SESSION_SECRET` 派生的 AES-256-GCM 密钥加密，修改或轮换 `AGENT_SESSION_SECRET` 前必须完成密钥迁移方案，否则旧 MFA 密钥无法解密。
 
 History Skill 的召回使用 `semantic-metadata-v1`：先按时间和权限过滤，再用工作语义分组（开发、浏览器、沟通、文档、项目管理、AI 工作台等）结合应用、域名、来源类型、工作标识和活动顺序进行排序，最后把排序后的脱敏证据交给 Qwen 生成回答。这个检索层不读取原始窗口标题、完整 URL、文件正文或聊天正文，也不会为每条活动额外调用模型。
 

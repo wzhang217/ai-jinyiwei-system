@@ -1014,17 +1014,42 @@ function sendJson(response, status, payload) {
     "content-type": "application/json; charset=utf-8",
     "content-length": Buffer.byteLength(body),
     "cache-control": "no-store",
-    ...corsHeaders(),
+    ...corsHeaders(response.__aiJinyiweiRequest),
   });
   response.end(body);
 }
 
-function corsHeaders() {
+function configuredCorsOrigins() {
+  return String(process.env.AGENT_CORS_ORIGIN || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function corsOriginAllowed(request) {
+  const origin = String(request?.headers?.origin || "").trim();
+  if (!origin) return true;
+  const configured = configuredCorsOrigins();
+  if (!configured.length) return process.env.NODE_ENV !== "production";
+  return configured.includes(origin);
+}
+
+function corsHeaders(request) {
+  const origin = String(request?.headers?.origin || "").trim();
+  const configured = configuredCorsOrigins();
+  const allowOrigin = configured.length
+    ? (origin && configured.includes(origin) ? origin : "null")
+    : (process.env.NODE_ENV === "production" ? "null" : "*");
   return {
-    "access-control-allow-origin": process.env.AGENT_CORS_ORIGIN || (process.env.NODE_ENV === "production" ? "null" : "*"),
+    "access-control-allow-origin": allowOrigin,
     "access-control-allow-methods": "GET, POST, PUT, OPTIONS",
     "access-control-allow-headers": "content-type, authorization, x-admin-token, x-admin-session",
     "access-control-max-age": "600",
+    "vary": "Origin",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+    "referrer-policy": "no-referrer",
+    "permissions-policy": "camera=(), microphone=(), geolocation=()",
   };
 }
 
@@ -2852,18 +2877,27 @@ function createRequestHandler({ db, adminToken, sessionSecret = adminToken, ai, 
     return count <= requestsPerMinute;
   };
   return async (request, response) => {
+    response.__aiJinyiweiRequest = request;
     const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
     const method = request.method || "GET";
 
     try {
+      if (!corsOriginAllowed(request)) {
+        return sendError(response, 403, "请求来源未被允许", "cors_origin_denied");
+      }
       if (method === "OPTIONS") {
-        response.writeHead(204, corsHeaders());
+        response.writeHead(204, corsHeaders(request));
         return response.end();
       }
       if (!withinRateLimit(request)) return sendError(response, 429, "请求过于频繁，请稍后重试", "rate_limited");
-      if (method === "GET" && url.pathname === "/health") {
+      if (method === "GET" && url.pathname === "/health/live") {
+        return sendJson(response, 200, { ok: true, service: "ai-jinyiwei-agent-server", now: isoNow() });
+      }
+      if (method === "GET" && ["/health", "/health/ready"].includes(url.pathname)) {
         const schemaVersion = db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()?.version || 0;
-        return sendJson(response, 200, { ok: true, service: "ai-jinyiwei-agent-server", now: isoNow(), schema_version: Number(schemaVersion), expected_schema_version: CURRENT_SCHEMA_VERSION });
+        const databaseCheck = db.prepare("PRAGMA quick_check(1)").get()?.quick_check || "unknown";
+        const ready = Number(schemaVersion) >= CURRENT_SCHEMA_VERSION && databaseCheck === "ok";
+        return sendJson(response, ready ? 200 : 503, { ok: ready, ready, service: "ai-jinyiwei-agent-server", now: isoNow(), database: databaseCheck, schema_version: Number(schemaVersion), expected_schema_version: CURRENT_SCHEMA_VERSION });
       }
 
       if (method === "POST" && url.pathname === "/api/auth/login") {
@@ -3946,6 +3980,15 @@ export function createAgentServer({ dbPath = process.env.AGENT_DB_PATH || defaul
     if (isWeakSecret(process.env.AGENT_ADMIN_TOKEN)) throw new Error("production requires a random AGENT_ADMIN_TOKEN with at least 32 characters");
     if (!process.env.AGENT_SESSION_SECRET || process.env.AGENT_SESSION_SECRET.length < 32) throw new Error("production requires a random AGENT_SESSION_SECRET with at least 32 characters");
     if (!process.env.AGENT_CORS_ORIGIN || process.env.AGENT_CORS_ORIGIN === "*") throw new Error("production requires an explicit AGENT_CORS_ORIGIN");
+    const productionOrigins = configuredCorsOrigins();
+    if (!productionOrigins.length || productionOrigins.some((origin) => {
+      try {
+        const parsed = new URL(origin);
+        return !["http:", "https:"].includes(parsed.protocol) || !parsed.host;
+      } catch {
+        return true;
+      }
+    })) throw new Error("production requires comma-separated HTTP(S) AGENT_CORS_ORIGIN values");
   }
   mkdirSync(dirname(resolve(dbPath)), { recursive: true });
   const db = new DatabaseSync(resolve(dbPath));

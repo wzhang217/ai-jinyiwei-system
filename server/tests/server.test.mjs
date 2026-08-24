@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,6 +23,37 @@ async function withServer(callback, options = {}) {
 async function jsonFetch(url, options = {}) {
   const response = await fetch(url, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
   return { response, body: await response.json() };
+}
+
+function decodeBase32(value) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0;
+  let buffer = 0;
+  const output = [];
+  for (const character of String(value).replace(/=+$/g, "")) {
+    const index = alphabet.indexOf(character);
+    if (index < 0) throw new Error("invalid base32 test secret");
+    buffer = (buffer << 5) | index;
+    bits += 5;
+    if (bits >= 8) {
+      output.push((buffer >>> (bits - 8)) & 255);
+      bits -= 8;
+    }
+  }
+  return Buffer.from(output);
+}
+
+function currentTotp(secret, now = Date.now()) {
+  const counter = Math.floor(now / 30_000);
+  const message = Buffer.alloc(8);
+  message.writeBigUInt64BE(BigInt(counter));
+  const digest = createHmac("sha1", decodeBase32(secret)).update(message).digest();
+  const offset = digest[digest.length - 1] & 0x0f;
+  const binary = ((digest[offset] & 0x7f) << 24)
+    | ((digest[offset + 1] & 0xff) << 16)
+    | ((digest[offset + 2] & 0xff) << 8)
+    | (digest[offset + 3] & 0xff);
+  return String(binary % 1_000_000).padStart(6, "0");
 }
 
 test("ranks relevant Memory Summary records before History Skill context", () => {
@@ -297,6 +328,29 @@ test("enrolls a device and accepts idempotent events and heartbeats", async () =
     });
     assert.equal(invalidQuestion.response.status, 400);
   });
+});
+
+test("checks live and ready health separately and rejects unapproved browser origins", async () => {
+  const previousOrigin = process.env.AGENT_CORS_ORIGIN;
+  try {
+    process.env.AGENT_CORS_ORIGIN = "https://allowed.example";
+    await withServer(async ({ base }) => {
+      const live = await jsonFetch(`${base}/health/live`);
+      assert.equal(live.response.status, 200);
+      const ready = await jsonFetch(`${base}/health/ready`);
+      assert.equal(ready.response.status, 200);
+      assert.equal(ready.body.database, "ok");
+      const allowed = await jsonFetch(`${base}/health`, { headers: { origin: "https://allowed.example" } });
+      assert.equal(allowed.response.status, 200);
+      assert.equal(allowed.response.headers.get("access-control-allow-origin"), "https://allowed.example");
+      const denied = await jsonFetch(`${base}/health`, { headers: { origin: "https://malicious.example" } });
+      assert.equal(denied.response.status, 403);
+      assert.equal(denied.body.error.code, "cors_origin_denied");
+    });
+  } finally {
+    if (previousOrigin === undefined) delete process.env.AGENT_CORS_ORIGIN;
+    else process.env.AGENT_CORS_ORIGIN = previousOrigin;
+  }
 });
 
 test("pairs a browser with a short-lived scoped credential", async () => {
@@ -1171,6 +1225,63 @@ test("supports database-backed account login, revocation, and admin account cont
     assert.equal(logout.response.status, 200);
     const revoked = await jsonFetch(`${base}/api/auth/me`, { headers: sessionHeaders });
     assert.equal(revoked.response.status, 401);
+  });
+});
+
+test("supports account MFA setup, login challenge, recovery, and disable", async () => {
+  await withServer(async ({ base }) => {
+    const adminHeaders = { "x-admin-token": "test-admin" };
+    const created = await jsonFetch(`${base}/api/admin/accounts`, {
+      method: "POST",
+      headers: adminHeaders,
+      body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password", display_name: "MFA 测试", role: "admin" }),
+    });
+    assert.equal(created.response.status, 201);
+
+    const login = await jsonFetch(`${base}/api/auth/login`, {
+      method: "POST",
+      body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password" }),
+    });
+    assert.equal(login.response.status, 200);
+    const sessionHeaders = { "x-admin-session": login.body.token };
+    const setup = await jsonFetch(`${base}/api/auth/mfa/setup`, { method: "POST", headers: sessionHeaders });
+    assert.equal(setup.response.status, 200);
+    assert.match(setup.body.secret, /^[A-Z2-7]{32}$/);
+    assert.match(setup.body.otpauth_uri, /^otpauth:\/\/totp\//);
+
+    const enable = await jsonFetch(`${base}/api/auth/mfa/enable`, {
+      method: "POST",
+      headers: sessionHeaders,
+      body: JSON.stringify({ secret: setup.body.secret, code: currentTotp(setup.body.secret) }),
+    });
+    assert.equal(enable.response.status, 200);
+    assert.equal(enable.body.enabled, true);
+    assert.equal(enable.body.recovery_codes.length, 8);
+
+    const required = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password" }) });
+    assert.equal(required.response.status, 401);
+    assert.equal(required.body.error.code, "mfa_required");
+    const invalid = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password", otp: "000000" }) });
+    assert.equal(invalid.response.status, 401);
+    assert.equal(invalid.body.error.code, "invalid_mfa");
+
+    const totpLogin = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password", otp: currentTotp(setup.body.secret) }) });
+    assert.equal(totpLogin.response.status, 200);
+    const recovery = enable.body.recovery_codes[0];
+    const recoveryLogin = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password", otp: recovery }) });
+    assert.equal(recoveryLogin.response.status, 200);
+    const reusedRecovery = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password", otp: recovery }) });
+    assert.equal(reusedRecovery.response.status, 401);
+    assert.equal(reusedRecovery.body.error.code, "invalid_mfa");
+
+    const disabled = await jsonFetch(`${base}/api/auth/mfa/disable`, {
+      method: "POST",
+      headers: { "x-admin-session": totpLogin.body.token },
+      body: JSON.stringify({ code: currentTotp(setup.body.secret) }),
+    });
+    assert.equal(disabled.response.status, 200);
+    const postDisableLogin = await jsonFetch(`${base}/api/auth/login`, { method: "POST", body: JSON.stringify({ username: "mfa-test", password: "a-secure-test-password" }) });
+    assert.equal(postDisableLogin.response.status, 200);
   });
 });
 

@@ -1143,11 +1143,104 @@ function ComplianceSettings({ role = "admin", onToast }) {
       <label className="setting-field privacy-notice-field"><span>员工看到的采集说明</span><textarea disabled={!canEdit || loading} value={draft.notice} onChange={(event) => setDraft((current) => ({ ...current, notice: event.target.value }))} rows="5" /></label>
       <div className="policy-save-row"><small>{canEdit ? "修改版本或正文后，所有员工需重新确认。" : "当前角色无权修改政策。"}</small><button className="primary-button" disabled={!canEdit || loading || saving} onClick={() => void save()}>{saving ? "保存中…" : "保存并发布政策"}</button></div>
     </SectionCard>
-    <SectionCard title="员工确认台账" description="只显示确认状态、版本和时间，不显示员工采集内容。">
+    {role !== "employee" && <SectionCard title="员工确认台账" description="只显示确认状态、版本和时间，不显示员工采集内容。">
       <div className="compliance-list">{acknowledgements.length ? acknowledgements.map((item) => <div className="compliance-row" key={item.employee_id}><ShieldCheck size={19} /><span><strong>{item.employee_name} · {item.team}</strong><small>{item.acknowledged ? `已确认 ${formatShanghaiTime(item.acknowledged_at, { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}` : "尚未确认当前政策"}</small></span><StatusPill status={item.acknowledged ? "success" : "pending"} /></div>) : <EmptyState title={agentApiEnabled ? "暂无员工台账" : "连接服务端后显示员工确认状态"} />}</div>
-    </SectionCard>
+    </SectionCard>}
     <SectionCard title="固定隐私边界" description="以下能力不提供开关，避免把合规边界变成可误操作的设置."><div className="compliance-list"><ComplianceRow icon={<LockKey size={19} />} title="敏感资源排除" detail="键盘、剪贴板、截图、聊天正文和文件正文禁止采集" onToast={onToast} /><ComplianceRow icon={<Fingerprint size={19} />} title="访问审计" detail="个人时间线、导出和策略修改均写入审计日志" onToast={onToast} /><ComplianceRow icon={<Archive size={19} />} title="数据删除策略" detail="删除前预览，执行结果写入审计" onToast={onToast} /></div></SectionCard>
+    <MfaSettings onToast={onToast} />
   </div>;
+}
+function MfaSettings({ onToast }) {
+  const [status, setStatus] = useState(null);
+  const [setup, setSetup] = useState(null);
+  const [code, setCode] = useState("");
+  const [recoveryCodes, setRecoveryCodes] = useState([]);
+  const [loading, setLoading] = useState(Boolean(agentApiEnabled));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const load = async () => {
+    if (!agentApiEnabled) {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    try {
+      setStatus(await getLiveMfaStatus());
+      setError("");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { void load(); }, []);
+  const beginSetup = async () => {
+    if (!agentApiEnabled) return onToast("连接真实服务端后可配置 MFA");
+    setSaving(true);
+    try {
+      setSetup(await setupLiveMfa());
+      setCode("");
+      setRecoveryCodes([]);
+      setError("");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const enable = async () => {
+    if (!setup?.secret || !code.trim()) return setError("请输入身份验证器中的 6 位验证码");
+    setSaving(true);
+    try {
+      const result = await enableLiveMfa(setup.secret, code.trim());
+      setStatus({ enabled: true });
+      setSetup(null);
+      setCode("");
+      setRecoveryCodes(result.recovery_codes || []);
+      setError("");
+      onToast("MFA 已启用；请立即保存恢复码");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const disable = async () => {
+    if (!code.trim()) return setError("请输入当前 MFA 验证码或恢复码");
+    setSaving(true);
+    try {
+      await disableLiveMfa(code.trim());
+      setStatus({ enabled: false });
+      setCode("");
+      setRecoveryCodes([]);
+      setError("");
+      onToast("MFA 已关闭，其他登录会话已撤销");
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const copyRecoveryCodes = async () => {
+    try {
+      await navigator.clipboard.writeText(recoveryCodes.join("\n"));
+      onToast("恢复码已复制，请保存到密码管理器");
+    } catch {
+      onToast("复制失败，请手动保存恢复码");
+    }
+  };
+  return <SectionCard title="账号多因素认证（MFA）" description="为当前登录账号增加身份验证器保护；密钥只在服务端加密保存，恢复码只显示一次。">
+    {error && <div className="error-box">MFA 操作失败：{error}</div>}
+    {!agentApiEnabled && <div className="mfa-note">连接真实服务端后可配置 MFA。</div>}
+    {agentApiEnabled && loading && <div className="mfa-note">正在读取 MFA 状态…</div>}
+    {agentApiEnabled && !loading && status?.enabled && <>
+      <div className="privacy-policy-meta"><StatusPill status="success" /><span>当前账号已启用 MFA</span></div>
+      <div className="mfa-action-row"><input className="mfa-code-input" inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(event) => setCode(event.target.value)} placeholder="验证码或恢复码" /><button className="outline-button" disabled={saving} onClick={() => void disable()}>{saving ? "处理中…" : "关闭 MFA"}</button></div>
+    </>}
+    {agentApiEnabled && !loading && !status?.enabled && !setup && <div className="mfa-action-row"><span className="mfa-note">当前账号未启用 MFA。</span><button className="primary-button" disabled={saving} onClick={() => void beginSetup()}>{saving ? "准备中…" : "开始设置 MFA"}</button></div>}
+    {setup && <div className="mfa-setup-box"><strong>1. 在身份验证器中添加账号</strong><small>手动密钥（无法扫码时使用）</small><code>{setup.secret}</code><small>otpauth URI</small><code className="mfa-uri">{setup.otpauth_uri}</code><strong>2. 输入身份验证器生成的验证码</strong><div className="mfa-action-row"><input className="mfa-code-input" inputMode="numeric" autoComplete="one-time-code" value={code} onChange={(event) => setCode(event.target.value)} placeholder="6 位验证码" maxLength="6" /><button className="primary-button" disabled={saving} onClick={() => void enable()}>{saving ? "启用中…" : "确认启用"}</button></div></div>}
+    {recoveryCodes.length > 0 && <div className="mfa-recovery-box"><strong>请立即保存以下恢复码</strong><small>每个恢复码只能使用一次；关闭此页面后不会再次显示。</small><div className="mfa-recovery-codes">{recoveryCodes.map((item) => <code key={item}>{item}</code>)}</div><button className="outline-button" onClick={() => void copyRecoveryCodes()}><DownloadSimple size={16} />复制恢复码</button></div>}
+  </SectionCard>;
 }
 function ComplianceRow({ icon, title, detail, onToast }) { return <button type="button" className="compliance-row" onClick={() => onToast(`${title}说明已打开`)}>{icon}<span><strong>{title}</strong><small>{detail}</small></span><CheckCircle size={17} weight="fill" /></button>; }
 function EmptyState({ title }) { return <div className="empty-state"><Database size={24} /><strong>{title}</strong><span>接入真实数据后会显示在这里。</span></div>; }
