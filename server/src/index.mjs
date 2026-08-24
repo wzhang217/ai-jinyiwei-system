@@ -732,7 +732,7 @@ function createSchema(db) {
   ensureOrganizationConfiguration(db, DEFAULT_ORGANIZATION_ID, createdAt);
 }
 
-function applySchemaMigrations(db, organizationDefault, now = isoNow()) {
+export function applySchemaMigrations(db, organizationDefault, now = isoNow()) {
   const applied = new Set(db.prepare("SELECT version FROM schema_migrations ORDER BY version").all().map((row) => Number(row.version)));
   const insert = db.prepare("INSERT OR IGNORE INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)");
   if (!applied.has(1)) {
@@ -801,7 +801,20 @@ function recoverRunningMemoryJobs(db) {
 function ensureColumn(db, table, column, definition) {
   const columns = db.prepare(`PRAGMA table_info(${table})`).all();
   if (columns.some((item) => item.name === column)) return;
-  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  } catch (error) {
+    // SQLite refuses ALTER TABLE ... ADD COLUMN when a REFERENCES clause is
+    // combined with a non-NULL DEFAULT. The original v2 migration needs to
+    // work against databases created before organization_id was part of the
+    // table definitions. New databases still get the full FK constraints from
+    // CREATE TABLE above; legacy databases are backfilled with the validated
+    // organization default and keep the application-level scope checks.
+    const message = String(error?.message || error);
+    if (!/\bREFERENCES\b/i.test(definition) || !/REFERENCES column with non-NULL default value/i.test(message)) throw error;
+    const fallbackDefinition = definition.replace(/\s+REFERENCES\b.*$/i, "").trim();
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${fallbackDefinition}`);
+  }
 }
 
 function organizationIdOrDefault(organizationId) {

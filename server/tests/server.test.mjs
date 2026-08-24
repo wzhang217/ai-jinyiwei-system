@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import test from "node:test";
-import { createAgentServer, ensureOrganizationConfiguration, getAdminSettings, getPolicy, processMemoryGenerationJobs, rankHistoryRecords, searchHistoryRecords } from "../src/index.mjs";
+import { applySchemaMigrations, createAgentServer, ensureOrganizationConfiguration, getAdminSettings, getPolicy, processMemoryGenerationJobs, rankHistoryRecords, searchHistoryRecords } from "../src/index.mjs";
 import { createAiService } from "../src/ai.mjs";
 
 async function withServer(callback, options = {}) {
@@ -55,6 +56,33 @@ function currentTotp(secret, now = Date.now()) {
     | (digest[offset + 3] & 0xff);
   return String(binary % 1_000_000).padStart(6, "0");
 }
+
+test("migrates legacy organization columns on SQLite", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ai-jinyiwei-legacy-schema-"));
+  const db = new DatabaseSync(join(dir, "agent.sqlite"));
+  try {
+    db.exec(`
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, checksum TEXT NOT NULL, applied_at TEXT NOT NULL);
+      CREATE TABLE organizations (id TEXT PRIMARY KEY, name TEXT NOT NULL, slug TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE employees (id TEXT PRIMARY KEY, name TEXT NOT NULL, team TEXT NOT NULL, created_at TEXT NOT NULL);
+      CREATE TABLE user_accounts (id TEXT PRIMARY KEY, username TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, role TEXT NOT NULL, password_hash TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE TABLE admin_sessions (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, role TEXT NOT NULL, actor TEXT NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL);
+      CREATE TABLE audit_logs (id TEXT PRIMARY KEY, action TEXT NOT NULL, actor TEXT NOT NULL, target TEXT NOT NULL, detail TEXT, created_at TEXT NOT NULL);
+      INSERT INTO organizations (id, name, slug, created_at, updated_at) VALUES ('org_default', 'Test', 'test', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    `);
+
+    applySchemaMigrations(db, "'org_default'", "2026-01-01T00:00:00.000Z");
+
+    for (const table of ["employees", "user_accounts", "admin_sessions", "audit_logs"]) {
+      const column = db.prepare(`PRAGMA table_info(${table})`).all().find((item) => item.name === "organization_id");
+      assert.ok(column, `${table}.organization_id should be added`);
+      assert.equal(column.dflt_value, "'org_default'");
+    }
+  } finally {
+    db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
 
 test("ranks relevant Memory Summary records before History Skill context", () => {
   const ranked = rankHistoryRecords("GitHub 项目", [
